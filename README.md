@@ -6,6 +6,8 @@
 [![License](https://img.shields.io/github/license/nuetzliches/hookaido)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/nuetzliches/hookaido?include_prereleases&sort=semver)](https://github.com/nuetzliches/hookaido/releases)
 
+Docs: https://nuetzliches.github.io/hookaido/
+
 **Webhook infrastructure that just works.** Single binary. Zero runtime dependencies. Production-ready defaults.
 
 Hookaido receives webhooks at the edge, queues them durably, and delivers them to your services — with retries, dead-letter queues, and cryptographic verification built in. Think of it as Caddy for webhooks: a compact config file, sensible defaults, and instant reloads.

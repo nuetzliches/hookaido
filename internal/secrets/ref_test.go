@@ -10,6 +10,43 @@ import (
 	"testing"
 )
 
+func TestValidateRef(t *testing.T) {
+	cases := []struct {
+		name    string
+		ref     string
+		wantErr string
+	}{
+		{name: "env", ref: "env:HOOKAIDO_SECRET"},
+		{name: "file", ref: "file:/run/secrets/token"},
+		{name: "raw", ref: "raw:local"},
+		{name: "vault", ref: "vault:secret/data/hookaido#token"},
+		{name: "empty", ref: "", wantErr: "empty"},
+		{name: "unsupported", ref: "kms:key", wantErr: "unsupported scheme"},
+		{name: "env-empty", ref: "env:", wantErr: "env var name is empty"},
+		{name: "file-empty", ref: "file:", wantErr: "file path is empty"},
+		{name: "raw-empty", ref: "raw:", wantErr: "raw value is empty"},
+		{name: "vault-empty", ref: "vault:", wantErr: "vault ref is empty"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateRef(tc.ref)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateRef(%q): %v", tc.ref, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestLoadRef_Env(t *testing.T) {
 	t.Setenv("HOOKAIDO_TEST_SECRET", "top-secret")
 

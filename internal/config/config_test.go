@@ -5615,6 +5615,88 @@ pull_api { auth token "raw:t" }
 	}
 }
 
+func TestCompile_SecretRefSchemeValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{
+			name: "pull_api token invalid scheme",
+			input: `
+pull_api { auth token "kms:abc" }
+"/x" { pull { path "/e" } }
+`,
+			wantErr: "pull_api.auth token[0]",
+		},
+		{
+			name: "route pull token invalid scheme",
+			input: `
+pull_api { auth token "raw:t" }
+"/x" { pull { path "/e" auth token "kms:abc" } }
+`,
+			wantErr: `route "/x" pull.auth token[0]`,
+		},
+		{
+			name: "auth hmac direct secret invalid scheme",
+			input: `
+pull_api { auth token "raw:t" }
+"/x" { auth hmac "kms:abc" pull { path "/e" } }
+`,
+			wantErr: `route "/x" auth hmac secret[0]`,
+		},
+		{
+			name: "deliver sign hmac invalid scheme",
+			input: `
+pull_api { auth token "raw:t" }
+"/x" {
+  deliver "https://example.com/hook" {
+    sign hmac "kms:abc"
+  }
+}
+`,
+			wantErr: `route "/x" deliver[0].sign hmac`,
+		},
+		{
+			name: "secrets value invalid scheme",
+			input: `
+secrets {
+  secret "S1" {
+    value "kms:abc"
+    valid_from "2025-01-01T00:00:00Z"
+  }
+}
+pull_api { auth token "raw:t" }
+"/x" { auth hmac secret_ref "S1" pull { path "/e" } }
+`,
+			wantErr: `secret "S1" value`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tc.input))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			_, res := Compile(cfg)
+			if res.OK {
+				t.Fatalf("expected error, got ok")
+			}
+			found := false
+			for _, e := range res.Errors {
+				if strings.Contains(e, tc.wantErr) && strings.Contains(e, "invalid secret reference") {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected secret ref validation error containing %q, got %v", tc.wantErr, res.Errors)
+			}
+		})
+	}
+}
+
 func TestCompile_SecretRefRequiresSecret(t *testing.T) {
 	in := []byte(`
 pull_api { auth token "raw:t" }

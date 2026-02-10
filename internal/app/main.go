@@ -44,7 +44,7 @@ func printHelp() {
 	fmt.Fprintln(os.Stdout, "Usage:")
 	fmt.Fprintln(os.Stdout, "  hookaido run --config ./Hookaidofile [--db ./.data/hookaido.db] [--pid-file ./hookaido.pid] [--watch] [--log-level info] [--dotenv ./.env]")
 	fmt.Fprintln(os.Stdout, "  hookaido config fmt --config ./Hookaidofile")
-	fmt.Fprintln(os.Stdout, "  hookaido config validate --config ./Hookaidofile --format json|text")
+	fmt.Fprintln(os.Stdout, "  hookaido config validate --config ./Hookaidofile --format json|text [--strict-secrets]")
 	fmt.Fprintln(os.Stdout, "  hookaido mcp serve --config ./Hookaidofile --db ./.data/hookaido.db [--enable-mutations] [--enable-runtime-control] [--admin-endpoint-allowlist host:port,https://host/admin]")
 	fmt.Fprintln(os.Stdout, "  hookaido verify-release --checksums ./dist/hookaido_<version>_checksums.txt [--require-signature] [--require-sbom] [--json]")
 	fmt.Fprintln(os.Stdout, "  hookaido version [--long] [--json]")

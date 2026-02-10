@@ -11,11 +11,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 - Official container publishing to GHCR (`ghcr.io/nuetzliches/hookaido`) via tag-triggered multi-arch workflow (`linux/amd64`, `linux/arm64`) with registry provenance attestation.
 - Vault secret adapter for secret refs via `vault:...` (HashiCorp Vault-compatible HTTP API), including KV v1/v2 field extraction and env-configured namespace/TLS options.
+- Optional strict secret preflight in config validation: `hookaido config validate --strict-secrets` and MCP `config_validate` argument `strict_secrets` now actively load refs to catch missing env vars, unreadable files, and Vault connectivity/access issues before runtime start.
 
 ### Fixed
 
 - Go module path now matches the repository path (`github.com/nuetzliches/hookaido`), fixing module resolution and `go install` for `cmd/hookaido`.
 - Docker image build metadata flags now target the correct package variables, so `hookaido version --long` reports release metadata correctly in container builds.
+- `config validate` now rejects invalid secret-reference schemes (`pull_api/admin_api auth token`, `pull.auth token`, direct `auth hmac` secrets, direct `deliver sign hmac`, and `secrets.value`) instead of failing later at runtime start.
 
 ## [1.0.0] - 2026-02-10
 

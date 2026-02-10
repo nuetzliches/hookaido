@@ -1212,7 +1212,8 @@ func (s *Server) toolDescriptors() []toolDescriptor {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path": map[string]any{"type": "string"},
+					"path":           map[string]any{"type": "string"},
+					"strict_secrets": map[string]any{"type": "boolean"},
 				},
 				"additionalProperties": false,
 			},
@@ -1915,6 +1916,10 @@ func (s *Server) toolConfigValidate(args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	strictSecrets, err := parseBool(args, "strict_secrets")
+	if err != nil {
+		return nil, err
+	}
 
 	data, err := os.ReadFile(p)
 	if err != nil {
@@ -1930,12 +1935,15 @@ func (s *Server) toolConfigValidate(args map[string]any) (any, error) {
 			"parse_only": true,
 		}, nil
 	}
-	res := config.ValidateWithResult(cfg)
+	res := config.ValidateWithResultOptions(cfg, config.ValidationOptions{
+		SecretPreflight: strictSecrets,
+	})
 	return map[string]any{
-		"ok":       res.OK,
-		"path":     p,
-		"errors":   res.Errors,
-		"warnings": res.Warnings,
+		"ok":             res.OK,
+		"path":           p,
+		"errors":         res.Errors,
+		"warnings":       res.Warnings,
+		"strict_secrets": strictSecrets,
 	}, nil
 }
 

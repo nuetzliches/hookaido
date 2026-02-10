@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nuetzliches/hookaido/internal/httpheader"
+	"github.com/nuetzliches/hookaido/internal/secrets"
 )
 
 const (
@@ -638,6 +639,10 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				hmacSecretRefs = append(hmacSecretRefs, ref)
 				continue
 			}
+			if err := secrets.ValidateRef(ref); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac secret[%d] %v", rPath, j, err))
+				continue
+			}
 			hmacSecrets = append(hmacSecrets, ref)
 		}
 		hmacSignatureHeader := ""
@@ -838,6 +843,11 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 					res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d].sign hmac must not be empty", rPath, j))
 					deliverOK = false
 				} else {
+					if err := secrets.ValidateRef(raw); err != nil {
+						res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d].sign hmac %v", rPath, j, err))
+						deliverOK = false
+						continue
+					}
 					signing.Enabled = true
 					signing.SecretRef = raw
 				}
@@ -1048,6 +1058,11 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				raw := strings.TrimSpace(resolveValue(t, fmt.Sprintf("route %q pull.auth token[%d]", rPath, j), &res))
 				if raw == "" {
 					res.Errors = append(res.Errors, fmt.Sprintf("route %q pull.auth token must not be empty", rPath))
+					pullOK = false
+					continue
+				}
+				if err := secrets.ValidateRef(raw); err != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("route %q pull.auth token[%d] %v", rPath, j, err))
 					pullOK = false
 					continue
 				}
@@ -1536,6 +1551,10 @@ func compileSecrets(in *SecretsBlock) (map[string]SecretConfig, ValidationResult
 		value := strings.TrimSpace(resolveValue(s.Value, fmt.Sprintf("secret %q value", id), &res))
 		if value == "" {
 			res.Errors = append(res.Errors, fmt.Sprintf("secret %q value must not be empty", id))
+			continue
+		}
+		if err := secrets.ValidateRef(value); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("secret %q value %v", id, err))
 			continue
 		}
 
@@ -2449,6 +2468,10 @@ func compileAPI(name string, in *APIBlock, defaultListen string) (APIConfig, Val
 		t = strings.TrimSpace(resolveValue(t, fmt.Sprintf("%s.auth token[%d]", name, i), &res))
 		if t == "" {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s.auth token must not be empty", name))
+			continue
+		}
+		if err := secrets.ValidateRef(t); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s.auth token[%d] %v", name, i, err))
 			continue
 		}
 		out.AuthTokens = append(out.AuthTokens, t)

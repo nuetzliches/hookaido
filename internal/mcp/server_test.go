@@ -1082,6 +1082,81 @@ func TestToolConfigValidate(t *testing.T) {
 	}
 }
 
+func TestToolConfigValidateStrictSecretsMissingEnv(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
+	cfg := `pull_api {
+  auth token env:HOOKAIDO_PULL_TOKEN
+}
+"/webhooks/github" {
+  pull { path /pull/github }
+}
+`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("HOOKAIDO_PULL_TOKEN", "")
+
+	s := NewServer(nil, nil, cfgPath, "")
+	resp := callTool(t, s, "config_validate", map[string]any{"path": cfgPath, "strict_secrets": true})
+	if resp.IsError {
+		t.Fatalf("unexpected tool error: %s", resp.Content[0].Text)
+	}
+
+	out, ok := resp.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected structured content type %T", resp.StructuredContent)
+	}
+	if okVal, _ := out["ok"].(bool); okVal {
+		t.Fatalf("expected ok=false for strict secret preflight failure, got %#v", out["ok"])
+	}
+	if strict, _ := out["strict_secrets"].(bool); !strict {
+		t.Fatalf("expected strict_secrets=true in response, got %#v", out["strict_secrets"])
+	}
+	errs := anyStringSlice(out["errors"])
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "secret preflight") && strings.Contains(e, "HOOKAIDO_PULL_TOKEN") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected strict secret preflight error, got %#v", errs)
+	}
+}
+
+func TestToolConfigValidateStrictSecretsPresentEnv(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
+	cfg := `pull_api {
+  auth token env:HOOKAIDO_PULL_TOKEN
+}
+"/webhooks/github" {
+  pull { path /pull/github }
+}
+`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("HOOKAIDO_PULL_TOKEN", "test-token")
+
+	s := NewServer(nil, nil, cfgPath, "")
+	resp := callTool(t, s, "config_validate", map[string]any{"path": cfgPath, "strict_secrets": true})
+	if resp.IsError {
+		t.Fatalf("unexpected tool error: %s", resp.Content[0].Text)
+	}
+
+	out, ok := resp.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected structured content type %T", resp.StructuredContent)
+	}
+	if okVal, _ := out["ok"].(bool); !okVal {
+		t.Fatalf("expected ok=true for strict secret preflight success, got %#v", out["ok"])
+	}
+	if strict, _ := out["strict_secrets"].(bool); !strict {
+		t.Fatalf("expected strict_secrets=true in response, got %#v", out["strict_secrets"])
+	}
+}
+
 func TestToolConfigParse(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
 	cfg := `"/webhooks/github" {

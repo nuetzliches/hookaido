@@ -61,10 +61,22 @@ ingress {
 }
 
 pull_api {
-    auth token "test-secret"
+    auth token "raw:test-secret"
 }
 
 /hooks {
+    pull {
+        path /webhooks
+    }
+}
+`
+
+const strictEnvConfig = `
+pull_api {
+    auth token "env:HOOKAIDO_PULL_TOKEN"
+}
+
+"/hooks" {
     pull {
         path /webhooks
     }
@@ -234,13 +246,74 @@ ingress {
 	}
 }
 
+func TestConfigValidate_StrictSecretsMissingEnvJSON(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, strictEnvConfig)
+	t.Setenv("HOOKAIDO_PULL_TOKEN", "")
+
+	var code int
+	_, stderr := captureOutput(t, func() {
+		code = configValidate([]string{"-config", cfgPath, "-format", "json", "-strict-secrets"})
+	})
+
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+
+	var res struct {
+		OK     bool     `json:"ok"`
+		Errors []string `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(stderr), &res); err != nil {
+		t.Fatalf("stderr is not valid JSON: %s\nraw: %s", err, stderr)
+	}
+	if res.OK {
+		t.Fatal("expected ok=false for strict secret preflight failure")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "secret preflight") && strings.Contains(e, "HOOKAIDO_PULL_TOKEN") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected strict secret preflight error, got %#v", res.Errors)
+	}
+}
+
+func TestConfigValidate_StrictSecretsPresentEnvJSON(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, strictEnvConfig)
+	t.Setenv("HOOKAIDO_PULL_TOKEN", "test-token")
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = configValidate([]string{"-config", cfgPath, "-format", "json", "-strict-secrets"})
+	})
+
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; stderr: %s", code, stderr)
+	}
+
+	var res struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+		t.Fatalf("stdout is not valid JSON: %s\nraw: %s", err, stdout)
+	}
+	if !res.OK {
+		t.Fatalf("expected ok=true for strict secret preflight success, got %#v", res)
+	}
+}
+
 const diffConfigOld = `
 ingress {
     listen :8080
 }
 
 pull_api {
-    auth token "test-secret"
+    auth token "raw:test-secret"
 }
 
 /hooks {
@@ -256,7 +329,7 @@ ingress {
 }
 
 pull_api {
-    auth token "test-secret"
+    auth token "raw:test-secret"
 }
 
 /hooks {

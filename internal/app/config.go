@@ -62,6 +62,7 @@ func configValidate(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "./Hookaidofile", "path to config file")
 	format := fs.String("format", "json", "output format: json|text")
+	strictSecrets := fs.Bool("strict-secrets", false, "load and verify all configured secret refs during validation")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -76,7 +77,9 @@ func configValidate(args []string) int {
 		return configValidateError(*format, err.Error())
 	}
 
-	res := config.ValidateWithResult(cfg)
+	res := config.ValidateWithResultOptions(cfg, config.ValidationOptions{
+		SecretPreflight: *strictSecrets,
+	})
 	if *format == "text" {
 		msg := config.FormatValidationText(res)
 		if res.OK {

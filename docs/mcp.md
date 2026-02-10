@@ -58,6 +58,8 @@ Runtime control tools (`instance_start`, `instance_stop`, `instance_reload`) req
 | `config_diff`        | `read`  | Unified diff between current and candidate content       |
 | `config_apply`       | `admin` | Validate + compile + atomic write (with optional reload) |
 
+`config_validate` supports optional `strict_secrets: true` to preflight all compiled secret refs (`env`, `file`, `vault`, `raw`) during validation.
+
 `config_apply` modes:
 
 - `preview_only` — validate/compile only, no write

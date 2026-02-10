@@ -41,13 +41,15 @@ Validate Hookaidofile and return warnings/errors.
 Arguments:
 ```json
 {
-  "path": "./Hookaidofile"
+  "path": "./Hookaidofile",
+  "strict_secrets": false
 }
 ```
 
 Notes:
 - `path` is optional.
 - If set, it must match the configured `--config` path (allowlist guardrail).
+- `strict_secrets` is optional (`false` by default). When `true`, validation preflights all compiled secret refs by loading them (`env`, `file`, `vault`, `raw`) so missing env vars, unreadable files, or unreachable Vault refs fail validation.
 
 ### `config_compile`
 Compile Hookaidofile and return normalized runtime summary + validation result.

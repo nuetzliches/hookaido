@@ -741,8 +741,27 @@ type ValidationResult struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+type ValidationOptions struct {
+	// SecretPreflight loads all compiled secret refs (`env:`, `file:`, `vault:`,
+	// `raw:`) to catch missing/unreachable secrets during validation.
+	SecretPreflight bool
+}
+
 func ValidateWithResult(cfg *Config) ValidationResult {
-	_, res := Compile(cfg)
+	return ValidateWithResultOptions(cfg, ValidationOptions{})
+}
+
+func ValidateWithResultOptions(cfg *Config, options ValidationOptions) ValidationResult {
+	compiled, res := Compile(cfg)
+	if !res.OK || !options.SecretPreflight {
+		return res
+	}
+	for _, errMsg := range validateSecretPreflight(compiled) {
+		res.Errors = append(res.Errors, errMsg)
+	}
+	if len(res.Errors) > 0 {
+		res.OK = false
+	}
 	return res
 }
 

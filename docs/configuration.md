@@ -516,11 +516,16 @@ Placeholders resolve within a single value (no cross-token expansion).
 # Validate (JSON or text output)
 hookaido config validate --config ./Hookaidofile --format json
 
+# Optional strict secret preflight (env/file/vault/raw refs are loaded)
+hookaido config validate --config ./Hookaidofile --strict-secrets --format text
+
 # Format (canonical, idempotent, preserves quoting style)
 hookaido config fmt --config ./Hookaidofile
 ```
 
 Config changes are **round-trip safe** — `config fmt` is stable and diff-friendly.
+`config validate` checks secret-reference syntax for token/signing/value refs (`env:`, `file:`, `vault:`, `raw:`).
+Use `--strict-secrets` when you also want availability/reachability preflight (for example missing env vars, unreadable files, or Vault access failures).
 
 ## Hot Reload
 

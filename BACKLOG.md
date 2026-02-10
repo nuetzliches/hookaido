@@ -21,9 +21,10 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 ## P2 — Nice to Have / Post-v1.0
 
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
-- [ ] **Full code review and polish pass** — End-to-end review with prioritized findings, targeted fixes, explicit "nice to have" follow-ups, and synchronized docs updates for changed behavior.
+- [x] **~~Full code review and polish pass~~** — Moved to Completed.
 - [ ] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [ ] **Documentation UX refresh** — Improve docs structure and landing experience (hero page), add command-palette style Ctrl+K search, and evaluate whether to keep the current docs stack or migrate to an alternative OSS docs solution.
+- [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
 - [x] **~~Config `diff` CLI command~~** — `hookaido config diff old.hcl new.hcl` with exit code semantics (0=identical, 1=changed, 2=error); diff engine extracted to shared `config.FormatDiff`; 6 CLI tests (moved to Completed).
 - [x] **~~VS Code Extension (Hookaidofile)~~** — TextMate grammar, 18 snippets, file association for `Hookaidofile`/`.hookaido`/`.hkd` (moved to Completed). _Optional Phase 2: LSP backed by `config validate`/`config compile` for live diagnostics._
 - [x] **~~Graceful shutdown draining~~** — PushDispatcher uses internal stopCh+WaitGroup lifecycle; Drain(timeout) completes in-flight deliveries on SIGTERM; 3 drain unit tests + E2E coverage (moved to Completed).
@@ -32,6 +33,8 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 
 ## Completed (move here when done)
 
+- [x] **Secret preflight validation mode (nice-to-have)** — Added optional strict validation preflight for secret refs (`hookaido config validate --strict-secrets` and MCP `config_validate strict_secrets=true`) to load refs and fail early on missing env vars, unreadable files, or Vault access/connectivity errors.
+- [x] **Full code review and polish pass** — End-to-end review executed (`go test ./...`, `go vet ./...`) with prioritized findings and targeted fix: compile-time secret-ref scheme validation added for token/signing/value refs; docs/changelog synchronized.
 - [x] **Vault secret adapter** — Added `vault:` secret refs with Vault HTTP API support (KV v1/v2 field extraction), optional namespace/TLS env settings, and unit tests.
 - [x] **DSL surface complete** — All directives from DESIGN.md implemented: `vars`, `delivered_retention`, `dlq_retention`, named matchers, `match @name`, `publish` block/shorthand, `publish.direct`/`publish.managed` dot-notation, channel types.
 - [x] **Runtime reload completeness** — Fixed silently-ignored defaults (`max_body`, `max_headers`, `publish_policy`) by adding to `requiresRestartForReload`. Documented full live-reloadable vs restart-required matrix in `docs/configuration.md`.

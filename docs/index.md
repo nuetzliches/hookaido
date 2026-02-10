@@ -1,9 +1,5 @@
 # Hookaido Documentation
 
-<p align="center">
-  <img src="assets/logo/hookaido-logo.svg" alt="Hookaido logo" width="180">
-</p>
-
 Hookaido is a **webhook ingress queue** — a single binary that receives webhooks, durably enqueues them, and lets your internal services consume them at their own pace. Think of it as Caddy-style simplicity for webhook infrastructure.
 
 ## Key Properties

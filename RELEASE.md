@@ -154,6 +154,20 @@ Tag-based release workflow is defined in `.github/workflows/release.yml`.
   - `hookaido_<version>_sbom.attestation.json`
 - Publish: uploads all `dist/*` files to GitHub Releases
 
+Container publish workflow is defined in `.github/workflows/container.yml`.
+
+- Trigger: `push` tag matching `v*` (and manual `workflow_dispatch`)
+- Registry: GHCR (`ghcr.io/nuetzliches/hookaido`)
+- Platforms: `linux/amd64`, `linux/arm64`
+- Tags: semver tags (`vX.Y.Z`, `vX.Y`, `vX`), `latest`, and short `sha-*`
+- Attestation: `actions/attest-build-provenance@v3` with `push-to-registry: true`
+- Metadata: OCI labels include source URL and image description
+- Build metadata: Docker build args wire to `hookaido version --long` (`version`, `commit`, `build_date`)
+
+First-time package setup:
+
+- Ensure the GHCR package visibility is `public` if anonymous pulls should work.
+
 ## 8. Key Rotation + Revocation Playbook
 
 1. Generate a new Ed25519 PKCS#8 key pair outside the repo.
@@ -189,3 +203,7 @@ For each release, verify that:
    - manifest
    - sbom
    - provenance/sbom attestation bundles
+4. Confirm workflow `container` succeeded and published:
+   - `ghcr.io/nuetzliches/hookaido:vX.Y.Z`
+   - `ghcr.io/nuetzliches/hookaido:latest`
+   - multi-arch manifest (`linux/amd64`, `linux/arm64`)

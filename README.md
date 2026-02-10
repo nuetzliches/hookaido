@@ -2,9 +2,13 @@
 
 [![CI](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml)
 [![Release](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/nuetzliches/hookaido)](go.mod)
+[![Container CI](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml)
+[![Dependency Health](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/nuetzliches/hookaido.svg)](https://pkg.go.dev/github.com/nuetzliches/hookaido)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/nuetzliches/hookaido/badge)](https://securityscorecards.dev/viewer/?uri=github.com/nuetzliches/hookaido)
 [![License](https://img.shields.io/github/license/nuetzliches/hookaido)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/nuetzliches/hookaido?include_prereleases&sort=semver)](https://github.com/nuetzliches/hookaido/releases)
+[![Container](https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/nuetzliches/hookaido/pkgs/container/hookaido)
 
 Docs: https://nuetzliches.github.io/hookaido/
 
@@ -48,16 +52,18 @@ Hookaido receives webhooks at the edge, queues them durably, and delivers them t
 go build ./cmd/hookaido
 ```
 
-**Or use Docker:**
+**Or use Docker (official GHCR image):**
 
 ```bash
-docker build -t hookaido .
+docker pull ghcr.io/nuetzliches/hookaido:latest
 docker run -p 8080:8080 -p 9443:9443 \
   -e HOOKAIDO_PULL_TOKEN=mytoken \
   -v $(pwd)/Hookaidofile:/app/Hookaidofile:ro \
   -v hookaido-data:/app/.data \
-  hookaido
+  ghcr.io/nuetzliches/hookaido:latest
 ```
+
+For immutable deployments, pin to a release tag (for example `:v1.0.2`) or digest.
 
 **Run locally:**
 
@@ -194,7 +200,7 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 
 - Pre-built binaries: no dependencies (download from [Releases](https://github.com/nuetzliches/hookaido/releases))
 - Build from source: Go 1.25+
-- Docker: see [Docker quickstart](docs/docker.md)
+- Docker: use the official image `ghcr.io/nuetzliches/hookaido` (or build locally), see [Docker quickstart](docs/docker.md)
 - No external runtime dependencies
 
 ## Documentation

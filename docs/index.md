@@ -46,6 +46,7 @@ Alternatively, Hookaido can **push** (deliver) to your internal endpoints with c
 
 - Pre-built binaries available from [GitHub Releases](https://github.com/nuetzliches/hookaido/releases) (no Go needed)
 - Build from source: Go 1.25+
+- Official container image: `ghcr.io/nuetzliches/hookaido` (for example `docker pull ghcr.io/nuetzliches/hookaido:latest`)
 - Docker: see [Docker Quickstart](docker.md)
 
 ## Project Links

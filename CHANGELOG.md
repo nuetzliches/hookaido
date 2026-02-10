@@ -7,9 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- Official container publishing to GHCR (`ghcr.io/nuetzliches/hookaido`) via tag-triggered multi-arch workflow (`linux/amd64`, `linux/arm64`) with registry provenance attestation.
+
 ### Fixed
 
 - Go module path now matches the repository path (`github.com/nuetzliches/hookaido`), fixing module resolution and `go install` for `cmd/hookaido`.
+- Docker image build metadata flags now target the correct package variables, so `hookaido version --long` reports release metadata correctly in container builds.
 
 ## [1.0.0] - 2026-02-10
 

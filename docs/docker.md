@@ -1,27 +1,29 @@
 # Docker Quickstart
 
-Run Hookaido without installing Go. Only Docker is required.
+Run Hookaido without installing Go. Docker is enough.
 
-## Build the Image
+## Use the Official Image (Recommended)
 
-```bash
-docker build -t hookaido .
-```
-
-Or with version metadata:
+Pull from GitHub Container Registry (GHCR):
 
 ```bash
-docker build \
-  --build-arg VERSION=v0.1.0 \
-  --build-arg COMMIT=$(git rev-parse --short HEAD) \
-  --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  -t hookaido .
+docker pull ghcr.io/nuetzliches/hookaido:latest
 ```
+
+Tag guidance:
+
+- `:latest` tracks the newest stable release.
+- `:vX.Y.Z` pins an exact release (recommended for production).
+- Digest pinning (`@sha256:...`) is the strongest immutable option.
+
+Published architectures:
+
+- `linux/amd64`
+- `linux/arm64`
 
 ## Run with a Hookaidofile
 
 1. Create a `Hookaidofile` in your project directory (see [Getting Started](getting-started.md)).
-
 2. Set environment variables and start the container:
 
 ```bash
@@ -34,10 +36,10 @@ docker run -d \
   -e HOOKAIDO_INGRESS_SECRET=mysecret \
   -v $(pwd)/Hookaidofile:/app/Hookaidofile:ro \
   -v hookaido-data:/app/.data \
-  hookaido
+  ghcr.io/nuetzliches/hookaido:latest
 ```
 
-This mounts your config as read-only and persists the SQLite database in a named volume.
+This mounts config as read-only and persists SQLite data in a named volume.
 
 ## Docker Compose
 
@@ -45,7 +47,7 @@ This mounts your config as read-only and persists the SQLite database in a named
 # docker-compose.yml
 services:
   hookaido:
-    build: .
+    image: ghcr.io/nuetzliches/hookaido:latest
     ports:
       - "8080:8080" # Ingress
       - "9443:9443" # Pull API
@@ -68,6 +70,36 @@ Start with:
 docker compose up -d
 ```
 
+## Build Locally (Optional)
+
+If you want to test local Dockerfile changes:
+
+```bash
+docker build -t hookaido:local .
+```
+
+Or with explicit build metadata:
+
+```bash
+docker build \
+  --build-arg VERSION=v0.1.0 \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
+  --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t hookaido:local .
+```
+
+Run local build:
+
+```bash
+docker run -d \
+  --name hookaido-local \
+  -p 8080:8080 -p 9443:9443 -p 2019:2019 \
+  -e HOOKAIDO_PULL_TOKEN=mytoken \
+  -v $(pwd)/Hookaidofile:/app/Hookaidofile:ro \
+  -v hookaido-data:/app/.data \
+  hookaido:local
+```
+
 ## Health Check
 
 ```bash
@@ -76,7 +108,7 @@ curl http://localhost:2019/healthz
 
 ## Hot Reload
 
-Mount the config read-write and pass `--watch`:
+Mount config read-write and pass `--watch`:
 
 ```bash
 docker run -d \
@@ -85,16 +117,17 @@ docker run -d \
   -e HOOKAIDO_PULL_TOKEN=mytoken \
   -v $(pwd)/Hookaidofile:/app/Hookaidofile \
   -v hookaido-data:/app/.data \
-  hookaido run --config /app/Hookaidofile --db /app/.data/hookaido.db --watch
+  ghcr.io/nuetzliches/hookaido:latest \
+  run --config /app/Hookaidofile --db /app/.data/hookaido.db --watch
 ```
 
 ## Production Notes
 
-- Use a named volume (not a bind mount) for `/app/.data` to ensure SQLite WAL durability.
+- Use a named volume (not a bind mount) for `/app/.data` to keep SQLite WAL durable.
 - The image runs as non-root user `hookaido`.
 - For TLS, mount cert/key files and reference them in your `Hookaidofile`.
-- The Admin API defaults to `127.0.0.1:2019`. To expose it from Docker, configure `admin_api { listen :2019 }` in your Hookaidofile.
+- Admin API defaults to `127.0.0.1:2019`. To expose it from Docker, set `admin_api { listen :2019 }` in your Hookaidofile.
 
 ---
 
-← [Documentation Index](index.md)
+- [Documentation Index](index.md)

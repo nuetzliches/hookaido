@@ -1,0 +1,80 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Compute Safe Version Fragment
+        id: version_meta
+        run: |
+          SAFE_VERSION="$(echo "${GITHUB_REF_NAME}" | sed -E 's/[^A-Za-z0-9._-]+/_/g; s/^_+//; s/_+$//')"
+          if [ -z "$SAFE_VERSION" ]; then
+            SAFE_VERSION="0.0.0-dev"
+          fi
+          echo "safe_version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Require Signing Key Secret
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.HOOKAIDO_RELEASE_SIGNING_KEY_PEM }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "missing secret: HOOKAIDO_RELEASE_SIGNING_KEY_PEM" >&2
+            exit 1
+          fi
+      - name: Write Signing Key
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.HOOKAIDO_RELEASE_SIGNING_KEY_PEM }}
+        run: |
+          umask 077
+          printf "%s\n" "$RELEASE_SIGNING_KEY" > release-signing-key.pem
+      - name: Build Signed Release Artifacts
+        run: |
+          go run ./internal/tools/release \
+            -version "${GITHUB_REF_NAME}" \
+            -commit "${GITHUB_SHA::12}" \
+            -date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -out dist \
+            -signing-key release-signing-key.pem
+      - name: Verify Release Outputs
+        run: |
+          test -f "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt"
+          test -f "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt.sig"
+          test -f "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt.pub.pem"
+          test -f "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_manifest.json"
+          test -f "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.spdx.json"
+      - name: Verify Artifacts
+        run: go run ./cmd/hookaido verify-release --checksums "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt" --require-signature --require-sbom
+      - name: Attest Build Provenance
+        id: attest_provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-checksums: "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt"
+      - name: Attest SBOM
+        id: attest_sbom
+        uses: actions/attest-sbom@v3
+        with:
+          subject-checksums: "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt"
+          sbom-path: "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.spdx.json"
+      - name: Export Attestation Bundles
+        run: |
+          cp "${{ steps.attest_provenance.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_provenance.attestation.json"
+          cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.attestation.json"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

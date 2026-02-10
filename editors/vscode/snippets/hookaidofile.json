@@ -1,0 +1,198 @@
+{
+  "Ingress block": {
+    "prefix": "ingress",
+    "body": [
+      "ingress {",
+      "\tlisten ${1::8080}",
+      "}"
+    ],
+    "description": "HTTP ingress listener block"
+  },
+  "Ingress with TLS": {
+    "prefix": "ingress-tls",
+    "body": [
+      "ingress {",
+      "\tlisten ${1::8443}",
+      "\ttls {",
+      "\t\tcert_file ${2:\"/path/to/cert.pem\"}",
+      "\t\tkey_file ${3:\"/path/to/key.pem\"}",
+      "\t}",
+      "}"
+    ],
+    "description": "HTTP ingress listener with TLS"
+  },
+  "Pull API block": {
+    "prefix": "pull_api",
+    "body": [
+      "pull_api {",
+      "\tlisten ${1::9090}",
+      "\tprefix ${2:\"/pull\"}",
+      "\tauth token ${3:env:HOOKAIDO_PULL_TOKEN}",
+      "}"
+    ],
+    "description": "Pull API configuration block"
+  },
+  "Admin API block": {
+    "prefix": "admin_api",
+    "body": [
+      "admin_api {",
+      "\tlisten ${1:127.0.0.1:9091}",
+      "\tprefix ${2:\"/admin\"}",
+      "\tauth token ${3:env:HOOKAIDO_ADMIN_TOKEN}",
+      "}"
+    ],
+    "description": "Admin API configuration block"
+  },
+  "Route with pull": {
+    "prefix": "route-pull",
+    "body": [
+      "\"${1:/webhooks/example}\" {",
+      "\tpull { path ${2:/pull/example} }",
+      "}"
+    ],
+    "description": "Route block with pull endpoint"
+  },
+  "Route with deliver": {
+    "prefix": "route-deliver",
+    "body": [
+      "\"${1:/webhooks/example}\" {",
+      "\tdeliver \"${2:https://target.example.com/hook}\" {",
+      "\t\tretry exponential max ${3:8} base ${4:\"2s\"} cap ${5:\"2m\"} jitter ${6:0.2}",
+      "\t\ttimeout ${7:\"10s\"}",
+      "\t}",
+      "}"
+    ],
+    "description": "Route block with push delivery target"
+  },
+  "Route with HMAC auth": {
+    "prefix": "route-hmac",
+    "body": [
+      "\"${1:/webhooks/example}\" {",
+      "\tauth hmac ${2:env:HOOKAIDO_HMAC_SECRET}",
+      "\tdeliver \"${3:https://target.example.com/hook}\" {}",
+      "}"
+    ],
+    "description": "Route block with HMAC authentication"
+  },
+  "Outbound channel": {
+    "prefix": "outbound",
+    "body": [
+      "outbound {",
+      "\t\"${1:/hooks/example}\" {",
+      "\t\tapplication ${2:\"myapp\"}",
+      "\t\tendpoint_name ${3:\"events\"}",
+      "\t\tdeliver \"${4:https://target.example.com/hook}\" {}",
+      "\t}",
+      "}"
+    ],
+    "description": "Outbound channel type wrapper"
+  },
+  "Internal channel": {
+    "prefix": "internal",
+    "body": [
+      "internal {",
+      "\t\"${1:/internal/jobs}\" {",
+      "\t\tpull { path ${2:/pull/jobs} }",
+      "\t}",
+      "}"
+    ],
+    "description": "Internal channel type wrapper"
+  },
+  "Observability block": {
+    "prefix": "observability",
+    "body": [
+      "observability {",
+      "\taccess_log {",
+      "\t\tenabled on",
+      "\t\toutput stderr",
+      "\t\tformat json",
+      "\t}",
+      "\truntime_log {",
+      "\t\tlevel ${1:info}",
+      "\t\toutput stderr",
+      "\t\tformat json",
+      "\t}",
+      "\tmetrics {",
+      "\t\tlisten ${2:\":9900\"}",
+      "\t\tprefix ${3:\"/metrics\"}",
+      "\t}",
+      "}"
+    ],
+    "description": "Observability block with logging and metrics"
+  },
+  "Tracing block": {
+    "prefix": "tracing",
+    "body": [
+      "tracing {",
+      "\tenabled on",
+      "\tcollector \"${1:https://otel.example.com/v1/traces}\"",
+      "\ttimeout ${2:\"10s\"}",
+      "\tcompression ${3:gzip}",
+      "}"
+    ],
+    "description": "OpenTelemetry tracing configuration"
+  },
+  "Defaults block": {
+    "prefix": "defaults",
+    "body": [
+      "defaults {",
+      "\tdeliver {",
+      "\t\tretry exponential max ${1:8} base ${2:\"2s\"} cap ${3:\"2m\"} jitter ${4:0.2}",
+      "\t\ttimeout ${5:\"10s\"}",
+      "\t\tconcurrency ${6:20}",
+      "\t}",
+      "}"
+    ],
+    "description": "Global defaults block"
+  },
+  "Secrets block": {
+    "prefix": "secrets",
+    "body": [
+      "secrets {",
+      "\tsecret \"${1:my-secret}\" {",
+      "\t\tvalue ${2:env:MY_SECRET}",
+      "\t\tvalid_from ${3:\"2025-01-01T00:00:00Z\"}",
+      "\t}",
+      "}"
+    ],
+    "description": "Secrets block with secret definition"
+  },
+  "Queue limits block": {
+    "prefix": "queue_limits",
+    "body": [
+      "queue_limits {",
+      "\tmax_depth ${1:10000}",
+      "\tdrop_policy ${2:reject}",
+      "}"
+    ],
+    "description": "Global queue limits"
+  },
+  "Vars block": {
+    "prefix": "vars",
+    "body": [
+      "vars {",
+      "\t${1:MY_VAR} ${2:value}",
+      "}"
+    ],
+    "description": "Config-level variables"
+  },
+  "Egress policy": {
+    "prefix": "egress",
+    "body": [
+      "egress {",
+      "\tallow ${1:\"*.example.com\"}",
+      "\thttps_only ${2:on}",
+      "\tredirects ${3:0}",
+      "\tdns_rebind_protection ${4:on}",
+      "}"
+    ],
+    "description": "Egress policy block (inside defaults)"
+  },
+  "Env placeholder": {
+    "prefix": "env",
+    "body": [
+      "{\\$${1:VAR_NAME}}"
+    ],
+    "description": "Environment variable placeholder"
+  }
+}

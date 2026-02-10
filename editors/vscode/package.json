@@ -1,0 +1,57 @@
+{
+  "name": "hookaido",
+  "displayName": "Hookaido",
+  "description": "Syntax highlighting and snippets for Hookaidofile (Hookaido webhook queue DSL)",
+  "version": "0.1.0",
+  "publisher": "hookaido",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "hookaido",
+    "webhook",
+    "queue",
+    "hookaidofile"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hookaido/hookaido"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "hookaidofile",
+        "aliases": [
+          "Hookaidofile",
+          "hookaido"
+        ],
+        "filenames": [
+          "Hookaidofile"
+        ],
+        "extensions": [
+          ".hookaido",
+          ".hkd"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "hookaidofile",
+        "scopeName": "source.hookaidofile",
+        "path": "./syntaxes/hookaidofile.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "hookaidofile",
+        "path": "./snippets/hookaidofile.json"
+      }
+    ]
+  }
+}

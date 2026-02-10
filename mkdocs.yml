@@ -1,0 +1,63 @@
+site_name: Hookaido
+site_description: Webhook infrastructure that just works.
+site_url: https://nuetzliches.github.io/hookaido/
+repo_url: https://github.com/nuetzliches/hookaido
+repo_name: nuetzliches/hookaido
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+
+markdown_extensions:
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Configuration: configuration.md
+  - Deployment Modes: deployment-modes.md
+  - Ingress: ingress.md
+  - Pull API: pull-api.md
+  - Admin API: admin-api.md
+  - Delivery (Push): delivery.md
+  - Security: security.md
+  - Observability: observability.md
+  - Management Model: management-model.md
+  - Docker: docker.md
+  - MCP Integration: mcp.md
+
+docs_dir: docs

@@ -1,0 +1,171 @@
+# Hookaidofile (minimal pull-mode example)
+#
+# Caddyfile-inspired DSL. See DESIGN.md for the full spec.
+#
+# Supported top-level blocks:
+#   ingress, pull_api, admin_api, vars, secrets, defaults,
+#   observability, queue_limits, queue_retention, delivered_retention,
+#   dlq_retention, named matchers (@name { ... })
+#
+# Route directives:
+#   match, rate_limit, auth (basic | hmac | forward), queue,
+#   pull, deliver (with optional sign hmac), publish,
+#   application + endpoint_name
+#
+# Channel types:
+#   inbound (default), outbound (deliver required), internal (pull required)
+
+ingress {
+  # Supports placeholders: {$VAR} / {$VAR:default} / {env.VAR} / {file.PATH} / {vars.NAME}
+  listen :8080
+}
+
+# vars {
+#   PULL_ENDPOINT /pull/github
+# }
+
+pull_api {
+  # Required: explicit token allowlist. Prefer env/file refs over raw values.
+  auth token env:HOOKAIDO_PULL_TOKEN
+}
+
+# Observability (optional)
+# observability {
+#   access_log {
+#     enabled on
+#     output stderr
+#     format json
+#   }
+#   runtime_log {
+#     level info
+#     output stderr
+#     format json
+#   }
+#   metrics {
+#     listen ":9900"
+#     prefix "/metrics"
+#   }
+#   tracing {
+#     enabled off
+#     collector "https://otel.example.com/v1/traces"
+#     url_path "/v1/traces"
+#     timeout "10s"
+#     compression gzip
+#     insecure off
+#     retry {
+#       enabled on
+#       initial_interval "5s"
+#       max_interval "30s"
+#       max_elapsed_time "1m"
+#     }
+#     header "Authorization" "Bearer token"
+#   }
+# }
+
+# Queue retention (optional; defaults shown)
+# queue_retention {
+#   max_age 7d
+#   prune_interval 5m
+# }
+
+# Delivered retention (optional; off by default)
+# delivered_retention {
+#   max_age 30d
+# }
+
+# DLQ retention (optional; defaults shown)
+# dlq_retention {
+#   max_age 30d
+#   max_depth 10000
+# }
+
+# Queue limits (optional; defaults shown)
+# queue_limits {
+#   max_depth 10000
+#   drop_policy reject
+# }
+
+# Trend signal policy (optional; defaults shown)
+# defaults {
+#   trend_signals {
+#     window 15m
+#     expected_capture_interval 1m
+#     stale_grace_factor 3
+#     sustained_growth_consecutive 3
+#     sustained_growth_min_samples 5
+#     sustained_growth_min_delta 10
+#     recent_surge_min_total 20
+#     recent_surge_min_delta 10
+#     recent_surge_percent 50
+#     dead_share_high_min_total 10
+#     dead_share_high_percent 20
+#     queued_pressure_min_total 20
+#     queued_pressure_percent 75
+#     queued_pressure_leased_multiplier 2
+#   }
+# }
+
+# Defaults (optional; all sub-blocks are independent)
+# defaults {
+#   max_body 2mb
+#   max_headers 64kb
+#   egress {
+#     https_only on
+#     redirects off
+#     dns_rebind_protection on
+#   }
+#   deliver {
+#     retry exponential max 8 base 2s cap 2m jitter 0.2
+#     timeout 10s
+#     concurrency 20
+#   }
+#   publish_policy {
+#     direct on
+#     managed on
+#     allow_pull_routes on
+#     allow_deliver_routes on
+#   }
+# }
+
+# Secrets (optional; for HMAC rotation / deliver signing)
+# secrets {
+#   secret "S1" {
+#     value "env:MY_SECRET"
+#     valid_from "2026-01-01T00:00:00Z"
+#   }
+# }
+
+# Named matcher (optional; reusable across routes)
+# @github-only {
+#   method POST
+#   header_exists X-GitHub-Event
+# }
+
+/webhooks/github {
+  # Optional: ingress HMAC verification with replay protection.
+  # If set, clients must send: X-Timestamp (unix seconds), X-Nonce, X-Signature (hex).
+  # String-to-sign: ts + "\n" + method + "\n" + path + "\n" + hex(sha256(body))
+  auth hmac env:HOOKAIDO_INGRESS_SECRET
+  pull { path /pull/github }
+  # pull { path "{vars.PULL_ENDPOINT}" }
+}
+
+# Push-mode example (deliver instead of pull):
+# /webhooks/stripe {
+#   auth hmac env:HOOKAIDO_STRIPE_SECRET
+#   deliver "https://billing.internal/stripe" {
+#     timeout 10s
+#     retry exponential max 5 base 1s cap 30s jitter 0.2
+#   }
+# }
+
+# Channel-type examples:
+# outbound /jobs/deploy {
+#   deliver "https://ci.internal/deploy" { timeout 10s }
+# }
+#
+# internal {
+#   /jobs/reports {
+#     pull { path /pull/reports }
+#   }
+# }

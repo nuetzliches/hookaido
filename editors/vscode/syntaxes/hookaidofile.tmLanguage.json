@@ -1,0 +1,109 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Hookaidofile",
+  "scopeName": "source.hookaidofile",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#placeholder" },
+    { "include": "#string" },
+    { "include": "#route-path" },
+    { "include": "#named-matcher" },
+    { "include": "#channel-type" },
+    { "include": "#top-level-block" },
+    { "include": "#auth-keyword" },
+    { "include": "#directive" },
+    { "include": "#builtin-value" },
+    { "include": "#duration" },
+    { "include": "#numeric" },
+    { "include": "#size-value" },
+    { "include": "#braces" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.hookaidofile"
+    },
+    "placeholder": {
+      "patterns": [
+        {
+          "match": "\\{\\$[A-Za-z_][A-Za-z0-9_]*(:[^}]*)?\\}",
+          "name": "variable.other.placeholder.env.hookaidofile"
+        },
+        {
+          "match": "\\{env\\.[A-Za-z_][A-Za-z0-9_]*\\}",
+          "name": "variable.other.placeholder.env.hookaidofile"
+        },
+        {
+          "match": "\\{file\\.[^}]+\\}",
+          "name": "variable.other.placeholder.file.hookaidofile"
+        },
+        {
+          "match": "\\{vars\\.[A-Za-z_][A-Za-z0-9_]*\\}",
+          "name": "variable.other.placeholder.vars.hookaidofile"
+        }
+      ]
+    },
+    "string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.hookaidofile",
+      "patterns": [
+        { "include": "#placeholder" }
+      ]
+    },
+    "route-path": {
+      "match": "^\\s*(\"/[^\"]*\"|/\\S+)(?=\\s*\\{|\\s+\\{)",
+      "captures": {
+        "1": { "name": "entity.name.section.route.hookaidofile" }
+      }
+    },
+    "named-matcher": {
+      "match": "(?<=^|\\s)(@[A-Za-z_][A-Za-z0-9_-]*)\\b",
+      "name": "entity.name.tag.matcher.hookaidofile"
+    },
+    "channel-type": {
+      "match": "\\b(inbound|outbound|internal)\\b",
+      "name": "keyword.control.channel.hookaidofile"
+    },
+    "top-level-block": {
+      "match": "\\b(ingress|defaults|vars|secrets|pull_api|admin_api|observability|queue_retention|delivered_retention|dlq_retention|queue_limits)\\b",
+      "name": "keyword.other.block.hookaidofile"
+    },
+    "auth-keyword": {
+      "match": "\\b(auth|hmac|token|basic|forward|secret_ref|secret|sign)\\b",
+      "name": "keyword.other.auth.hookaidofile"
+    },
+    "directive": {
+      "match": "\\b(listen|prefix|tls|cert_file|key_file|client_ca|client_auth|rate_limit|rps|burst|max_body|max_headers|queue|backend|match|pull|deliver|deliver_concurrency|retry|timeout|concurrency|max|base|cap|jitter|application|endpoint_name|publish|publish\\.direct|publish\\.managed|enabled|direct|managed|path|access_log|runtime_log|metrics|tracing|collector|url_path|compression|insecure|proxy_url|ca_file|server_name|insecure_skip_verify|header|initial_interval|max_interval|max_elapsed_time|level|output|format|max_age|prune_interval|max_depth|drop_policy|max_batch|default_lease_ttl|max_lease_ttl|default_max_wait|max_wait|value|valid_from|valid_until|signature_header|timestamp_header|nonce_header|tolerance|copy_headers|body_limit|allow|deny|https_only|redirects|dns_rebind_protection|allow_pull_routes|allow_deliver_routes|require_actor|require_request_id|fail_closed|actor_allow|actor_prefix|window|expected_capture_interval|stale_grace_factor|sustained_growth_consecutive|sustained_growth_min_samples|sustained_growth_min_delta|recent_surge_min_total|recent_surge_min_delta|recent_surge_percent|dead_share_high_min_total|dead_share_high_percent|queued_pressure_min_total|queued_pressure_percent|queued_pressure_leased_multiplier|secret_selection|newest_valid|oldest_valid|trend_signals|egress|publish_policy)\\b",
+      "name": "support.type.directive.hookaidofile"
+    },
+    "builtin-value": {
+      "match": "\\b(true|false|on|off|sqlite|memory|reject|drop_oldest|exponential|debug|info|warn|warning|error|stdout|stderr|file|json|none|gzip|request|require_any|verify_if_given|require|require_and_verify)\\b",
+      "name": "constant.language.hookaidofile"
+    },
+    "duration": {
+      "match": "\\b\\d+(ns|us|µs|ms|s|m|h|d)\\b",
+      "name": "constant.numeric.duration.hookaidofile"
+    },
+    "numeric": {
+      "match": "\\b\\d+(\\.\\d+)?\\b",
+      "name": "constant.numeric.hookaidofile"
+    },
+    "size-value": {
+      "match": "\\b\\d+[kmgKMG][bB]?\\b",
+      "name": "constant.numeric.size.hookaidofile"
+    },
+    "braces": {
+      "patterns": [
+        {
+          "match": "\\{",
+          "name": "punctuation.section.block.begin.hookaidofile"
+        },
+        {
+          "match": "\\}",
+          "name": "punctuation.section.block.end.hookaidofile"
+        }
+      ]
+    }
+  }
+}

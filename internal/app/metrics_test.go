@@ -1,0 +1,273 @@
+package app
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"hookaido/internal/queue"
+)
+
+func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), nil)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://example/metrics", nil)
+	h.ServeHTTP(rr, req)
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		"hookaido_tracing_enabled 0",
+		"hookaido_tracing_init_failures_total 0",
+		"hookaido_tracing_export_errors_total 0",
+		"hookaido_publish_accepted_total 0",
+		"hookaido_publish_rejected_total 0",
+		"hookaido_publish_rejected_validation_total 0",
+		"hookaido_publish_rejected_policy_total 0",
+		"hookaido_publish_rejected_managed_target_mismatch_total 0",
+		"hookaido_publish_rejected_managed_resolver_missing_total 0",
+		"hookaido_publish_rejected_conflict_total 0",
+		"hookaido_publish_rejected_queue_full_total 0",
+		"hookaido_publish_rejected_store_total 0",
+		"hookaido_publish_scoped_accepted_total 0",
+		"hookaido_publish_scoped_rejected_total 0",
+		"hookaido_ingress_accepted_total 0",
+		"hookaido_ingress_rejected_total 0",
+		"hookaido_ingress_enqueued_total 0",
+		"hookaido_delivery_attempts_total 0",
+		"hookaido_delivery_acked_total 0",
+		"hookaido_delivery_retry_total 0",
+		"hookaido_delivery_dead_total 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_WithDiagnostics(t *testing.T) {
+	m := newRuntimeMetrics()
+	m.setTracingEnabled(true)
+	m.incTracingInitFailures()
+	m.incTracingExportErrors()
+	m.incTracingExportErrors()
+	m.observePublishResult(2, 0, "", false)
+	m.observePublishResult(0, 1, "invalid_body", false)
+	m.observePublishResult(0, 1, "invalid_header", false)
+	m.observePublishResult(0, 1, "managed_selector_required", false)
+	m.observePublishResult(0, 1, "managed_target_mismatch", true)
+	m.observePublishResult(0, 1, "managed_resolver_missing", false)
+	m.observePublishResult(0, 1, "route_resolver_missing", false)
+	m.observePublishResult(0, 1, "duplicate_id", true)
+	m.observePublishResult(0, 1, "queue_full", true)
+	m.observePublishResult(0, 1, "store_unavailable", false)
+	m.observePublishResult(1, 0, "", true)
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://example/metrics", nil)
+	h.ServeHTTP(rr, req)
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		"hookaido_tracing_enabled 1",
+		"hookaido_tracing_init_failures_total 1",
+		"hookaido_tracing_export_errors_total 2",
+		"hookaido_publish_accepted_total 3",
+		"hookaido_publish_rejected_total 9",
+		"hookaido_publish_rejected_validation_total 2",
+		"hookaido_publish_rejected_policy_total 4",
+		"hookaido_publish_rejected_managed_target_mismatch_total 1",
+		"hookaido_publish_rejected_managed_resolver_missing_total 1",
+		"hookaido_publish_rejected_conflict_total 1",
+		"hookaido_publish_rejected_queue_full_total 1",
+		"hookaido_publish_rejected_store_total 1",
+		"hookaido_publish_scoped_accepted_total 1",
+		"hookaido_publish_scoped_rejected_total 3",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestRuntimeMetrics_HealthDiagnosticsManagedCounters(t *testing.T) {
+	m := newRuntimeMetrics()
+	m.observePublishResult(0, 1, "managed_target_mismatch", true)
+	m.observePublishResult(0, 2, "managed_resolver_missing", false)
+
+	diag := m.healthDiagnostics()
+	publish, ok := diag["publish"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected publish diagnostics object, got %T", diag["publish"])
+	}
+	if got := intFromAny(publish["rejected_managed_target_mismatch_total"]); got != 1 {
+		t.Fatalf("expected rejected_managed_target_mismatch_total=1, got %#v", publish["rejected_managed_target_mismatch_total"])
+	}
+	if got := intFromAny(publish["rejected_managed_resolver_missing_total"]); got != 2 {
+		t.Fatalf("expected rejected_managed_resolver_missing_total=2, got %#v", publish["rejected_managed_resolver_missing_total"])
+	}
+}
+
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func TestMetricsHandler_IngressCounters(t *testing.T) {
+	m := newRuntimeMetrics()
+	m.observeIngressResult(true, 2)  // accepted, fanout to 2 targets
+	m.observeIngressResult(true, 1)  // accepted, single target
+	m.observeIngressResult(false, 0) // rejected (auth, rate-limit, etc)
+	m.observeIngressResult(false, 0) // rejected
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		"hookaido_ingress_accepted_total 2",
+		"hookaido_ingress_rejected_total 2",
+		"hookaido_ingress_enqueued_total 3",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_DeliveryCounters(t *testing.T) {
+	m := newRuntimeMetrics()
+	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
+	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
+	m.observeDeliveryAttempt(queue.AttemptOutcomeRetry)
+	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		"hookaido_delivery_attempts_total 4",
+		"hookaido_delivery_acked_total 2",
+		"hookaido_delivery_retry_total 1",
+		"hookaido_delivery_dead_total 1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_QueueDepth(t *testing.T) {
+	store := queue.NewMemoryStore()
+	// Enqueue two items
+	_ = store.Enqueue(queue.Envelope{ID: "e1", Route: "/test", Target: "pull", Payload: []byte(`{}`)})
+	_ = store.Enqueue(queue.Envelope{ID: "e2", Route: "/test", Target: "pull", Payload: []byte(`{}`)})
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_queue_depth{state="queued"} 2`,
+		`hookaido_queue_depth{state="leased"} 0`,
+		`hookaido_queue_depth{state="dead"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_QueueDepthNilStore(t *testing.T) {
+	// When no store is set, queue_depth metrics should not appear
+	m := newRuntimeMetrics()
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	if strings.Contains(body, "hookaido_queue_depth") {
+		t.Fatalf("queue_depth should not appear when store is nil:\n%s", body)
+	}
+}
+
+func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
+	m := newRuntimeMetrics()
+	m.observeIngressResult(true, 3)
+	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
+	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
+
+	diag := m.healthDiagnostics()
+
+	ingress, ok := diag["ingress"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected ingress diagnostics, got %T", diag["ingress"])
+	}
+	if got := intFromAny(ingress["accepted_total"]); got != 1 {
+		t.Fatalf("ingress accepted_total=%d, want 1", got)
+	}
+	if got := intFromAny(ingress["enqueued_total"]); got != 3 {
+		t.Fatalf("ingress enqueued_total=%d, want 3", got)
+	}
+
+	delivery, ok := diag["delivery"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected delivery diagnostics, got %T", diag["delivery"])
+	}
+	if got := intFromAny(delivery["attempt_total"]); got != 2 {
+		t.Fatalf("delivery attempt_total=%d, want 2", got)
+	}
+	if got := intFromAny(delivery["acked_total"]); got != 1 {
+		t.Fatalf("delivery acked_total=%d, want 1", got)
+	}
+	if got := intFromAny(delivery["dead_total"]); got != 1 {
+		t.Fatalf("delivery dead_total=%d, want 1", got)
+	}
+}
+
+func TestMetricsPrefixRouting(t *testing.T) {
+	rm := newRuntimeMetrics()
+	handler := mountPrefix("/custom/metrics", newMetricsHandler("test", time.Now(), rm))
+
+	// Request to /custom/metrics should return Prometheus text.
+	req := httptest.NewRequest("GET", "/custom/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /custom/metrics: got %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("Content-Type: got %q, want text/plain", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "hookaido_up 1") {
+		t.Fatalf("response should contain hookaido_up metric")
+	}
+
+	// Request to /metrics should 404.
+	req2 := httptest.NewRequest("GET", "/metrics", nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("GET /metrics: got %d, want 404", rec2.Code)
+	}
+}

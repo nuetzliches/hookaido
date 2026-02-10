@@ -1,0 +1,61 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-02-10
+
+### Added
+
+- **CLI:** `hookaido run`, `config fmt`, `config validate`, `config diff`, `mcp serve`, `verify-release`, `version` (with `--long`/`--json` build metadata).
+- **Config DSL:** Caddyfile-inspired syntax with `config fmt` round-trip stability. Env/file/vars placeholders (`{$VAR}`, `{env.VAR}`, `{file.PATH}`, `{vars.NAME}`), multi-value directives, and hot reload via `--watch`/`SIGHUP`. Channel types: `inbound` (default), `outbound` (deliver required, no ingress directives), `internal` (pull required, no ingress directives) with wrapper and shorthand forms. Channel type compile constraints enforced. Route-level `publish.direct`/`publish.managed` dot-notation shorthand.
+- **Config validation:** Deliver target URLs validated at compile time (must use `http`/`https` scheme with non-empty host). Deliver concurrency upper-bounded to 10 000.
+- **VS Code Extension:** TextMate grammar syntax highlighting and snippets for Hookaidofile DSL (`editors/vscode/`).
+- **Ingress:** HTTP server with optional TLS/mTLS. Route matching (path, method, host wildcards, headers, query, remote IP CIDR, named matchers). Per-route/global rate limiting (token-bucket, `429` on over-limit). Auth: Basic, HMAC (replay protection, secret rotation, nonce, tolerance), and forward auth callouts.
+- **Pull API:** HTTP/JSON server (`POST {endpoint}/dequeue|ack|nack|extend`) with bearer-token auth, configurable dequeue limits (`max_batch`, lease TTL caps, long-poll wait caps), per-route token overrides, strict JSON parsing, and structured error responses.
+- **Queue:** SQLite/WAL persistent store with leasing, ack/nack/extend, lease expiry requeue, long-poll, dead-lettering (`dead_reason`), queue limits (`max_depth`/`drop_policy`), retention/pruning, and duplicate-ID rejection. In-memory store for dev/tests. Per-route `queue { backend sqlite|memory }`.
+- **Push Dispatcher:** Delivers queued items for `deliver` targets with retry/timeout/backoff, per-route concurrency enforcement, and optional per-target outbound HMAC signing (multi-secret rotation with `newest_valid`/`oldest_valid` selection).
+- **Admin API:** DLQ management, message lifecycle (publish/cancel/requeue/resume by ID and by filter with `preview_only`), backlog drill-down (top queued, oldest, aging summary, trend rollups with operator-action playbooks), delivery attempts listing, management model projection, and endpoint mapping lifecycle (PUT/DELETE with config-source-of-truth mutations, atomic write, reload, rollback). Structured JSON errors, audit headers (`X-Hookaido-Audit-Reason`/`Actor`/`Request-Id`), publish-policy enforcement (direct/managed paths, route-level controls, actor identity hooks), and managed-ownership drift guardrails throughout.
+- **MCP:** Stdio JSON-RPC server with role-gated access (`--role read|operate|admin`). Read tools: `config_parse`, `config_validate`, `config_compile`, `config_fmt_preview`, `config_diff`, `admin_health`, `management_model`, `backlog_*`, `messages_list`, `attempts_list`, `dlq_list`. Mutation tools (gated via `--enable-mutations`): `config_apply`, `management_endpoint_upsert`/`delete`, queue mutations, `messages_publish`. Runtime control tools (gated via `--enable-runtime-control`): `instance_status`, `instance_logs_tail`, `instance_start`/`stop`/`reload`. Principal-authoritative actor binding, JSONL audit events, Admin-proxy mode with endpoint allowlist, and structured error surfacing.
+- **Observability:** Structured JSON logs (access + runtime) with configurable sinks. Prometheus metrics endpoint (publish mutation counters, managed-ownership rejection counters, tracing diagnostics, ingress request counters, delivery attempt/outcome counters, on-scrape queue depth gauge by state). OpenTelemetry tracing (OTLP/HTTP) with TLS/proxy/retry options. Health diagnostics (`GET /healthz?details=1`) with trend signals. MCP `admin_health` surfaces tracing config and runtime diagnostics.
+- **Defaults:** `egress { allow, deny, https_only, redirects, dns_rebind_protection }`, `deliver { retry, timeout, concurrency }`, `publish_policy { direct, managed, allow_pull_routes, allow_deliver_routes, require_actor, require_request_id, fail_closed, actor_allow, actor_prefix }`, `trend_signals { ... }`.
+- **Secrets:** `secrets { secret "ID" { value, valid_from, valid_until? } }` with `auth hmac secret_ref` and deliver `sign hmac secret_ref` support. Validity-window selection for signing.
+- **Release:** Cross-platform archives (`make dist`), signed checksums (`make dist-signed`, Ed25519), SPDX SBOM, `hookaido verify-release` with `--require-signature`/`--require-sbom`/`--require-provenance` gates, Sigstore DSSE/in-toto attestation bundle validation (provenance + SBOM attestation subject-digest cross-check), provenance manifest, and tag-based GitHub release automation with build-provenance/SBOM attestations.
+- **Graceful shutdown:** Push dispatcher drains in-flight deliveries on SIGTERM/SIGINT (15s default timeout) before process exit. Delivery contexts decoupled from signal context so in-flight HTTP requests complete cleanly.
+- **CI:** Windows added to the test matrix (`windows-latest`); pure-Go SQLite and fsnotify support Windows natively.
+- **License:** Apache-2.0.
+
+### Changed
+
+- `config diff` extracts unified diff engine from MCP to shared `config.FormatDiff` — canonical parse→format→LCS diff with configurable context lines.
+- **Breaking:** The `hooks { }` route wrapper has been removed. Use `inbound { }` or bare top-level routes (implicit inbound). `outbound` and `internal` channel wrappers are new.
+- **Breaking:** DSL restructuring — flat defaults consolidated into nested blocks: `egress_allow`/`egress_deny`/`egress_policy` → `egress { ... }`; `deliver_defaults`/`deliver_concurrency` → `deliver { ... }`; tracing `tls_*` → `tls { ... }`.
+- **Breaking:** DSL renames — `tracing { endpoint }` → `collector`; `pull { endpoint }` → `path`; route `publish_direct`/`publish_managed` → `publish { direct, managed }`; `publish_policy` inner directives shortened (e.g. `global_direct_enabled` → `direct`, `require_audit_actor` → `require_actor`).
+- DSL now supports multi-value directives across `match`, `egress`, `auth hmac`, `deliver sign`, `publish_policy`, and `auth forward copy_headers`.
+- DSL now supports shorthand forms for `metrics on|off`, `tracing on|off`, `queue sqlite|memory`, and `auth hmac` with inline options.
+- Parser hardening: duplicate scalar directives fail fast at parse-time across all blocks.
+- Observability: tracing headers validated as HTTP-safe at compile-time.
+- Admin strict body parsing: unknown JSON fields and trailing documents rejected across all mutation endpoints.
+- Admin structured JSON errors with stable `code`/`detail` across all endpoints (auth, routing, mutations, reads).
+- Admin publish policy: full preflight validation before enqueue (no partial side effects), route-level publish directives, managed-selector ownership enforcement, and ownership-source drift guardrails.
+- Admin endpoint mapping: active-backlog guardrails, managed-publish ownership constraints, target-profile compatibility on moves, and specific conflict codes.
+- Pull API: strict JSON parsing and structured error responses.
+- MCP: strict argument allowlists, mutation audit length limits, Admin-proxy harmonized error mapping with retry and rollback, managed-selector routing to endpoint-scoped Admin paths.
+- `config fmt` preserves quoted/unquoted style and channel-type wrappers.
+- Windows: runtime-control compatibility (`instance_reload` returns unsupported-signal error).
+
+### Fixed
+
+- Memory store `max_depth` now counts only queued+leased items, matching SQLite semantics (dead/delivered/canceled no longer consume depth budget).
+- Managed endpoint upsert/delete TOCTOU race: post-write backlog re-check with automatic rollback on concurrent enqueue.
+- Batch publish (`EnqueueBatch`) is now transactional — all-or-nothing semantics prevent partial commits on queue-full or duplicate-ID errors.
+- Windows compatibility for runtime/config workflows (PID handling, directory fsync).
+- Route auth validation correctly rejects `auth basic` + `auth hmac secret_ref` combination.
+- Queue backends consistently reject duplicate IDs on enqueue.
+- Egress wildcard `*` host matching.
+- MCP Admin-proxy preserves original item indexing across multi-batch publish.
+- MCP Admin-proxy best-effort rollback on partial publish failures.
+- Mixed queue backends rejected at compile time.
+- Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).

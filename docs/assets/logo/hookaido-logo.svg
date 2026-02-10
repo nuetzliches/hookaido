@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Hookaido Logo</title>
+  <desc id="desc">Round circle with a centered check mark on a transparent background.</desc>
+
+  <circle cx="512" cy="512" r="420" fill="#102a43" stroke="#ff7a00" stroke-width="52"/>
+
+  <path
+    d="M300 530 L450 680 L724 400"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="92"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

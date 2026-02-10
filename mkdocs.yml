@@ -6,6 +6,8 @@ repo_name: nuetzliches/hookaido
 
 theme:
   name: material
+  logo: assets/logo/hookaido-logo.svg
+  favicon: assets/logo/hookaido-favicon.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default

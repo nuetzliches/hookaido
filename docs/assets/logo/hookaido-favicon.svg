@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Hookaido Favicon</title>
+  <desc id="desc">Simplified Hookaido favicon with a circle and centered check mark on transparent background.</desc>
+
+  <circle cx="512" cy="512" r="436" fill="#102a43" stroke="#ff7a00" stroke-width="44"/>
+
+  <path
+    d="M312 528 L458 674 L716 416"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="112"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

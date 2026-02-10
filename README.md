@@ -1,5 +1,9 @@
 # Hookaido
 
+<p align="center">
+  <img src="docs/assets/logo/hookaido-logo.svg" alt="Hookaido logo" width="180">
+</p>
+
 [![CI](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml)
 [![Release](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml)
 [![Container CI](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml)

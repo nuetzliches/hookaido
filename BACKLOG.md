@@ -22,9 +22,12 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.
-- [ ] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
+- [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [ ] **Documentation UX refresh** — Improve docs structure and landing experience (hero page), add command-palette style Ctrl+K search, and evaluate whether to keep the current docs stack or migrate to an alternative OSS docs solution.
 - [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
+- [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
+- [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
+- [ ] **CII Best Practices badge** — Start and complete OpenSSF best-practices badge questionnaire for the repository.
 - [x] **~~Config `diff` CLI command~~** — `hookaido config diff old.hcl new.hcl` with exit code semantics (0=identical, 1=changed, 2=error); diff engine extracted to shared `config.FormatDiff`; 6 CLI tests (moved to Completed).
 - [x] **~~VS Code Extension (Hookaidofile)~~** — TextMate grammar, 18 snippets, file association for `Hookaidofile`/`.hookaido`/`.hkd` (moved to Completed). _Optional Phase 2: LSP backed by `config validate`/`config compile` for live diagnostics._
 - [x] **~~Graceful shutdown draining~~** — PushDispatcher uses internal stopCh+WaitGroup lifecycle; Drain(timeout) completes in-flight deliveries on SIGTERM; 3 drain unit tests + E2E coverage (moved to Completed).
@@ -33,6 +36,10 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 
 ## Completed (move here when done)
 
+- [x] **Scorecard: API visibility/auth follow-up** — Updated `scorecard.yml` with explicit read permissions (`contents`, `issues`, `pull-requests`, `checks`) to prevent check-run auth gaps, and added optional `SCORECARD_TOKEN` passthrough for classic branch-protection visibility.
+- [x] **Scorecard: fuzzing baseline** — Added baseline Go fuzz targets for config parse/format round-trip, Pull API auth/HTTP handlers, and ingress HMAC verification; wired scheduled fuzz smoke runs into `dependency-health` CI.
+- [x] **Scorecard: branch protection + review policy enforcement** — Applied `main` branch protection policy in GitHub (required PR reviews: 1 approval + last-push approval, stale-review dismissal, required conversation resolution, linear history, enforce admins, and required CI checks).
+- [x] **Scorecard CI hardening (permissions + pinning)** — Updated workflows to least-privilege permission scopes, pinned GitHub Actions by commit SHA, pinned Docker base images by digest, and pinned CI tool install versions for Scorecard `Token-Permissions`/`Pinned-Dependencies` improvements.
 - [x] **Secret preflight validation mode (nice-to-have)** — Added optional strict validation preflight for secret refs (`hookaido config validate --strict-secrets` and MCP `config_validate strict_secrets=true`) to load refs and fail early on missing env vars, unreadable files, or Vault access/connectivity errors.
 - [x] **Full code review and polish pass** — End-to-end review executed (`go test ./...`, `go vet ./...`) with prioritized findings and targeted fix: compile-time secret-ref scheme validation added for token/signing/value refs; docs/changelog synchronized.
 - [x] **Vault secret adapter** — Added `vault:` secret refs with Vault HTTP API support (KV v1/v2 field extraction), optional namespace/TLS env settings, and unit tests.

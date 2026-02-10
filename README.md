@@ -204,6 +204,11 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 - Docker: use the official image `ghcr.io/nuetzliches/hookaido` (or build locally), see [Docker quickstart](docs/docker.md)
 - No external runtime dependencies
 
+## Maintainer Notes
+
+- OpenSSF Scorecard runs with `GITHUB_TOKEN` by default.
+- If the repository uses **classic branch protection rules**, add a repository secret `SCORECARD_TOKEN` (fine-grained PAT with `Administration: Read-only`) so the `Branch-Protection` check can be evaluated fully.
+
 ## Documentation
 
 | Document                         | Purpose                                                                      |

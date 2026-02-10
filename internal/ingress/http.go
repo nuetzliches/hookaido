@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 type Server struct {

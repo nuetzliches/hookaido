@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"hookaido/internal/admin"
-	"hookaido/internal/config"
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/admin"
+	"github.com/nuetzliches/hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 func TestAuthorizePull_PerRouteOverridesGlobal(t *testing.T) {

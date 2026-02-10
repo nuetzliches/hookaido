@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/internal/config"
 )
 
 func TestBuildTracingTLSConfig_None(t *testing.T) {

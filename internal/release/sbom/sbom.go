@@ -208,7 +208,7 @@ func buildDocument(opts Options, modules []goModule) (spdxDocument, error) {
 
 	creators := []string{
 		"Organization: Hookaido",
-		"Tool: hookaido/internal/release/sbom",
+		"Tool: github.com/nuetzliches/hookaido/internal/release/sbom",
 	}
 	if commit := strings.TrimSpace(opts.Commit); commit != "" {
 		creators = append(creators, "Tool: commit="+commit)

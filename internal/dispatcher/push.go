@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 type RetryConfig struct {

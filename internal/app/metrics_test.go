@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {

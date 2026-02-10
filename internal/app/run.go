@@ -26,14 +26,14 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"hookaido/internal/admin"
-	"hookaido/internal/config"
-	"hookaido/internal/dispatcher"
-	"hookaido/internal/ingress"
-	"hookaido/internal/pullapi"
-	"hookaido/internal/queue"
-	"hookaido/internal/router"
-	"hookaido/internal/secrets"
+	"github.com/nuetzliches/hookaido/internal/admin"
+	"github.com/nuetzliches/hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/internal/dispatcher"
+	"github.com/nuetzliches/hookaido/internal/ingress"
+	"github.com/nuetzliches/hookaido/internal/pullapi"
+	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/router"
+	"github.com/nuetzliches/hookaido/internal/secrets"
 )
 
 const backlogTrendCaptureInterval = time.Minute

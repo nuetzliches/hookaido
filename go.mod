@@ -1,4 +1,4 @@
-module hookaido
+module github.com/nuetzliches/hookaido
 
 go 1.25
 

@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"hookaido/internal/mcp"
+	"github.com/nuetzliches/hookaido/internal/mcp"
 )
 
 func mcpCmd(args []string) int {

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 func TestShouldRetry(t *testing.T) {

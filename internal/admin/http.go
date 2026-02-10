@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"hookaido/internal/config"
-	"hookaido/internal/httpheader"
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/internal/httpheader"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 const (

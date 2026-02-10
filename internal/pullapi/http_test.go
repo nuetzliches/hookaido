@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 func TestPullAPI_DequeueAck(t *testing.T) {

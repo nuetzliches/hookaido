@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"hookaido/internal/app"
+	"github.com/nuetzliches/hookaido/internal/app"
 )
 
 func main() {

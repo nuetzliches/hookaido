@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/internal/config"
 )
 
 func configCmd(args []string) int {

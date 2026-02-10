@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"hookaido/internal/dispatcher"
-	"hookaido/internal/ingress"
-	"hookaido/internal/pullapi"
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/dispatcher"
+	"github.com/nuetzliches/hookaido/internal/ingress"
+	"github.com/nuetzliches/hookaido/internal/pullapi"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 // ---------- helpers ----------

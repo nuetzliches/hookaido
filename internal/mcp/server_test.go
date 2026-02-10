@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 func TestHandleRequest_ToolsList(t *testing.T) {

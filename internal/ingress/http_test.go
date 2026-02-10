@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"hookaido/internal/queue"
-	"hookaido/internal/router"
+	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/router"
 )
 
 func TestIngress_ResolvedRouteIsEnqueued(t *testing.T) {

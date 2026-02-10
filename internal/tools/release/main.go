@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"hookaido/internal/release/sbom"
+	"github.com/nuetzliches/hookaido/internal/release/sbom"
 )
 
 type buildTarget struct {
@@ -199,7 +199,7 @@ func buildAndPackageTarget(cfg releaseConfig, target buildTarget, archivePath, s
 	}
 	binPath := filepath.Join(tmpDir, binName)
 	ldflags := fmt.Sprintf(
-		"-X hookaido/internal/app.version=%s -X hookaido/internal/app.commit=%s -X hookaido/internal/app.buildDate=%s",
+		"-X github.com/nuetzliches/hookaido/internal/app.version=%s -X github.com/nuetzliches/hookaido/internal/app.commit=%s -X github.com/nuetzliches/hookaido/internal/app.buildDate=%s",
 		cfg.Version,
 		cfg.Commit,
 		cfg.BuildDate,

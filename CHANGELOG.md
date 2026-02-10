@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Go module path now matches the repository path (`github.com/nuetzliches/hookaido`), fixing module resolution and `go install` for `cmd/hookaido`.
+
 ## [1.0.0] - 2026-02-10
 
 ### Added

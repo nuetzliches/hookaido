@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
 type runtimeMetrics struct {

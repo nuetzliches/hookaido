@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"hookaido/internal/httpheader"
+	"github.com/nuetzliches/hookaido/internal/httpheader"
 )
 
 const (

@@ -27,7 +27,7 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 - [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
 - [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
 - [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
-- [ ] **CII Best Practices badge** — Start and complete OpenSSF best-practices badge questionnaire for the repository.
+- [ ] **CII Best Practices badge** — Submit and maintain the OpenSSF best-practices badge questionnaire on bestpractices.dev (external/manual step).
 - [x] **~~Config `diff` CLI command~~** — `hookaido config diff old.hcl new.hcl` with exit code semantics (0=identical, 1=changed, 2=error); diff engine extracted to shared `config.FormatDiff`; 6 CLI tests (moved to Completed).
 - [x] **~~VS Code Extension (Hookaidofile)~~** — TextMate grammar, 18 snippets, file association for `Hookaidofile`/`.hookaido`/`.hkd` (moved to Completed). _Optional Phase 2: LSP backed by `config validate`/`config compile` for live diagnostics._
 - [x] **~~Graceful shutdown draining~~** — PushDispatcher uses internal stopCh+WaitGroup lifecycle; Drain(timeout) completes in-flight deliveries on SIGTERM; 3 drain unit tests + E2E coverage (moved to Completed).
@@ -36,6 +36,7 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 
 ## Completed (move here when done)
 
+- [x] **CII badge readiness docs** — Added `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`, `GOVERNANCE.md`, and `.github/CODEOWNERS`; linked governance/security docs from `README.md` and `docs/index.md` to prepare badge evidence links.
 - [x] **Scorecard: API visibility/auth follow-up** — Updated `scorecard.yml` with explicit read permissions (`contents`, `issues`, `pull-requests`, `checks`) to prevent check-run auth gaps, and added optional `SCORECARD_TOKEN` passthrough for classic branch-protection visibility.
 - [x] **Scorecard: fuzzing baseline** — Added baseline Go fuzz targets for config parse/format round-trip, Pull API auth/HTTP handlers, and ingress HMAC verification; wired scheduled fuzz smoke runs into `dependency-health` CI.
 - [x] **Scorecard: branch protection + review policy enforcement** — Applied `main` branch protection policy in GitHub (required PR reviews: 1 approval + last-push approval, stale-review dismissal, required conversation resolution, linear history, enforce admins, and required CI checks).

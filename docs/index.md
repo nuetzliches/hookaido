@@ -52,5 +52,9 @@ Alternatively, Hookaido can **push** (deliver) to your internal endpoints with c
 ## Project Links
 
 - [DESIGN.md](https://github.com/nuetzliches/hookaido/blob/main/DESIGN.md) — canonical specification
+- [CONTRIBUTING.md](https://github.com/nuetzliches/hookaido/blob/main/CONTRIBUTING.md) — contribution workflow
+- [CODE_OF_CONDUCT.md](https://github.com/nuetzliches/hookaido/blob/main/CODE_OF_CONDUCT.md) — community standards
+- [SECURITY.md](https://github.com/nuetzliches/hookaido/blob/main/SECURITY.md) — vulnerability reporting policy
+- [GOVERNANCE.md](https://github.com/nuetzliches/hookaido/blob/main/GOVERNANCE.md) — maintainership and decisions
 - [CHANGELOG.md](https://github.com/nuetzliches/hookaido/blob/main/CHANGELOG.md) — notable changes
 - [STATUS.md](https://github.com/nuetzliches/hookaido/blob/main/STATUS.md) — development status

@@ -216,6 +216,11 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 | [docs/](docs/index.md)           | User-facing documentation (getting started, configuration, APIs, deployment) |
 | [docs/docker.md](docs/docker.md) | Docker / Docker Compose quickstart                                           |
 | [DESIGN.md](DESIGN.md)           | Canonical DSL and API specification                                          |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and expectations                                      |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community conduct expectations                                       |
+| [SECURITY.md](SECURITY.md)       | Vulnerability reporting and security response policy                         |
+| [SUPPORT.md](SUPPORT.md)         | Support channels and issue quality guidance                                  |
+| [GOVERNANCE.md](GOVERNANCE.md)   | Maintainer roles and decision process                                        |
 | [CHANGELOG.md](CHANGELOG.md)     | User-visible changes                                                         |
 | [STATUS.md](STATUS.md)           | Development progress snapshot                                                |
 | [BACKLOG.md](BACKLOG.md)         | Prioritized work items                                                       |

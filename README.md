@@ -5,7 +5,7 @@
 [![Container CI](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml)
 [![Dependency Health](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/nuetzliches/hookaido.svg)](https://pkg.go.dev/github.com/nuetzliches/hookaido)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/nuetzliches/hookaido/badge)](https://securityscorecards.dev/viewer/?uri=github.com/nuetzliches/hookaido)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nuetzliches/hookaido/badge)](https://scorecard.dev/viewer/?uri=github.com/nuetzliches/hookaido)
 [![License](https://img.shields.io/github/license/nuetzliches/hookaido)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/nuetzliches/hookaido?include_prereleases&sort=semver)](https://github.com/nuetzliches/hookaido/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/nuetzliches/hookaido/pkgs/container/hookaido)

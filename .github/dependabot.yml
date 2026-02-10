@@ -20,6 +20,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      go-major-manual:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -34,6 +39,18 @@ updates:
       - "ci"
     commit-message:
       prefix: "deps"
+    groups:
+      actions-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      actions-major-manual:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -48,3 +65,15 @@ updates:
       - "docker"
     commit-message:
       prefix: "deps"
+    groups:
+      docker-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-major-manual:
+        patterns:
+          - "*"
+        update-types:
+          - "major"

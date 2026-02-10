@@ -108,11 +108,22 @@ Use Hookaido's built-in `tls { cert_file, key_file }` when you need:
 
 Secrets should never appear as plaintext in config files. Hookaido supports several reference types:
 
-| Reference | Example                 | Description             |
-| --------- | ----------------------- | ----------------------- |
-| `env:`    | `env:MY_SECRET`         | Environment variable    |
-| `file:`   | `file:/run/secrets/key` | File content            |
-| `raw:`    | `raw:literal-value`     | Inline value (dev only) |
+| Reference | Example                             | Description                              |
+| --------- | ----------------------------------- | ---------------------------------------- |
+| `env:`    | `env:MY_SECRET`                     | Environment variable                     |
+| `file:`   | `file:/run/secrets/key`             | File content                             |
+| `vault:`  | `vault:secret/data/hookaido#token`  | HashiCorp Vault (or compatible HTTP API) |
+| `raw:`    | `raw:literal-value`                 | Inline value (dev only)                  |
+
+For `vault:` refs, configure access via environment variables:
+
+- `HOOKAIDO_VAULT_ADDR` (required): Vault base URL, e.g. `https://vault.example.com:8200`
+- `HOOKAIDO_VAULT_TOKEN` (required): Vault token used as `X-Vault-Token`
+- `HOOKAIDO_VAULT_NAMESPACE` (optional): sent as `X-Vault-Namespace`
+- `HOOKAIDO_VAULT_TIMEOUT` (optional): request timeout (default `5s`)
+- `HOOKAIDO_VAULT_CACERT` (optional): CA bundle path for TLS verification
+- `HOOKAIDO_VAULT_CLIENT_CERT` + `HOOKAIDO_VAULT_CLIENT_KEY` (optional): mTLS client cert/key pair
+- `HOOKAIDO_VAULT_INSECURE_SKIP_VERIFY` (optional): `on|off` / `true|false` / `1|0`
 
 ### Named Secrets with Rotation
 
@@ -254,7 +265,7 @@ Per-route publish control:
 ## Security Checklist
 
 - [ ] Use HMAC or forward auth on all ingress routes
-- [ ] Never put secrets as plaintext in the Hookaidofile — use `env:` or `file:` refs
+- [ ] Never put secrets as plaintext in the Hookaidofile — use `env:`, `file:`, or `vault:` refs
 - [ ] Enable TLS on all externally accessible listeners (ingress, Pull API)
 - [ ] Admin API: keep on localhost or protect with mTLS + token auth
 - [ ] Configure `egress.deny` for internal network ranges

@@ -126,6 +126,7 @@ internal {
 ```
 
 Placeholders keep secrets out of config: `{$VAR}`, `{env.VAR}`, `{file./run/secrets/key}`, `{vars.NAME}`.
+Secret refs for auth/signing support `env:`, `file:`, `vault:`, and `raw:` schemes.
 
 Full DSL reference → [DESIGN.md](DESIGN.md)
 

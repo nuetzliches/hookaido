@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13027,6 +13028,33 @@ func adminProxyFallbackDetailCases() []struct {
 		{code: "not_found", detail: "resource not found"},
 		{code: "backlog_unavailable", detail: "backlog trend store is not supported by queue backend"},
 		{code: "management_model_unavailable", detail: "management model is not configured"},
+	}
+}
+
+func TestLoadAdminHealthToken_VaultRef(t *testing.T) {
+	var seenToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenToken = r.Header.Get("X-Vault-Token")
+		if r.URL.Path != "/v1/secret/data/hookaido/admin" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"data":{"token":"admin-vault-token"}}}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("HOOKAIDO_VAULT_ADDR", srv.URL)
+	t.Setenv("HOOKAIDO_VAULT_TOKEN", "mcp-vault-token")
+
+	token, err := loadAdminHealthToken([]string{"vault:secret/data/hookaido/admin#token"})
+	if err != nil {
+		t.Fatalf("loadAdminHealthToken(vault): %v", err)
+	}
+	if token != "admin-vault-token" {
+		t.Fatalf("unexpected token %q", token)
+	}
+	if seenToken != "mcp-vault-token" {
+		t.Fatalf("unexpected X-Vault-Token header %q", seenToken)
 	}
 }
 

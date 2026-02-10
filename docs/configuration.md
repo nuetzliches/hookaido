@@ -157,7 +157,7 @@ pull_api {
 | ------------------- | ------------ | ------------------------------------------ |
 | `listen`            | `:9443`      | Bind address                               |
 | `prefix`            | —            | URL path prefix for all pull endpoints     |
-| `auth token`        | **required** | Bearer token allowlist (env/file ref)      |
+| `auth token`        | **required** | Bearer token allowlist (`env:`/`file:`/`vault:`/`raw:` ref) |
 | `max_batch`         | `100`        | Max items per dequeue request              |
 | `default_lease_ttl` | `30s`        | Lease TTL when client omits it             |
 | `max_lease_ttl`     | off          | Optional upper cap for effective lease TTL |
@@ -249,6 +249,7 @@ secrets {
 - `valid_from` is inclusive, `valid_until` is exclusive.
 - Omit `valid_until` for "no expiry".
 - Referenced via `secret_ref "S1"` in auth and signing blocks.
+- `value` accepts `env:`, `file:`, `vault:`, and `raw:` refs.
 
 ### `vars`
 

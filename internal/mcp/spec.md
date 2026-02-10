@@ -117,6 +117,7 @@ Mode enum:
 Notes:
 - `reload_timeout` is optional and only used by `write_and_reload` (default `5s`).
 - Admin auth tokens are loaded for the health check; unresolved token refs fail `write_and_reload`.
+- Token refs used by MCP health/reload flows support `env:`, `file:`, `vault:`, and `raw:` schemes via the shared secrets resolver.
 
 ### `admin_health`
 Return local read-only snapshot (`config_readable`, `db_exists`, `db_readable`).

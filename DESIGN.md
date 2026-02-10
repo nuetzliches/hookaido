@@ -321,7 +321,7 @@ Egress policy notes:
 - Policy is enforced for push deliveries (dispatcher).
 
 ## Security
-- Secrets via env/file (Vault adapter later).
+- Secrets via env/file/Vault refs (with `raw:` kept for dev/tests).
 - Inbound HMAC supports replay protection (timestamp + nonce + tolerance).
 - Outbound `deliver` HMAC signing is optional per target via `sign hmac`.
 - Egress is SSRF-safe by default (see defaults).
@@ -330,7 +330,7 @@ Egress policy notes:
 
 ### Outbound Deliver Signing (MVP)
 - Configure per-target signing in `deliver` blocks with `sign hmac <secret-ref>`.
-- `sign hmac` supports direct refs (`env:...`, `file:...`, `raw:...`) and indirection via one or more `sign hmac secret_ref <ID>` entries from the top-level `secrets` block.
+- `sign hmac` supports direct refs (`env:...`, `file:...`, `vault:...`, `raw:...`) and indirection via one or more `sign hmac secret_ref <ID>` entries from the top-level `secrets` block.
 - `sign secret_selection` controls multi-`secret_ref` selection: `newest_valid` (default) or `oldest_valid`; it requires `sign hmac secret_ref ...` entries.
 - For multiple `secret_ref` entries, signing selects a secret version valid at signing timestamp (`valid_from` inclusive, `valid_until` exclusive) using configured selection mode.
 - Canonical string:
@@ -343,6 +343,7 @@ Egress policy notes:
 To keep configs diff-friendly, prefer referencing secrets by ID:
 - `secret "S1" { value "env:MY_SECRET" valid_from "..." valid_until "..." }`
 - `auth hmac ... secret_ref "S1" { ... }`
+- direct refs support `env:`, `file:`, `vault:`, and `raw:` schemes.
 
 Secret rotation semantics:
 - `valid_from` is inclusive; `valid_until` is exclusive (omit `valid_until` for "no end").

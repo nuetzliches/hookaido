@@ -20,7 +20,7 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 
 ## P2 — Nice to Have / Post-v1.0
 
-- [ ] **Vault secret adapter** — Secrets from HashiCorp Vault (or compatible API) in addition to env/file refs. _Deferred: env/file covers most deployments pre-v1.0._
+- [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [ ] **Full code review and polish pass** — End-to-end review with prioritized findings, targeted fixes, explicit "nice to have" follow-ups, and synchronized docs updates for changed behavior.
 - [ ] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [ ] **Documentation UX refresh** — Improve docs structure and landing experience (hero page), add command-palette style Ctrl+K search, and evaluate whether to keep the current docs stack or migrate to an alternative OSS docs solution.
@@ -32,6 +32,7 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 
 ## Completed (move here when done)
 
+- [x] **Vault secret adapter** — Added `vault:` secret refs with Vault HTTP API support (KV v1/v2 field extraction), optional namespace/TLS env settings, and unit tests.
 - [x] **DSL surface complete** — All directives from DESIGN.md implemented: `vars`, `delivered_retention`, `dlq_retention`, named matchers, `match @name`, `publish` block/shorthand, `publish.direct`/`publish.managed` dot-notation, channel types.
 - [x] **Runtime reload completeness** — Fixed silently-ignored defaults (`max_body`, `max_headers`, `publish_policy`) by adding to `requiresRestartForReload`. Documented full live-reloadable vs restart-required matrix in `docs/configuration.md`.
 - [x] **Queue publish hardening** — 22 new tests covering empty/oversized batch, duplicate IDs, queue-full (single + mid-batch partial), round-trip field fidelity, store unavailable, invalid timestamps/base64, missing ID, malformed JSON, ObservePublishResult callback, audit request-id policy, payload-too-large global fallback, scoped-path empty batch/queue-full/store-unavailable/endpoint-not-found/resolver-missing/no-targets.

@@ -61,5 +61,6 @@ nav:
   - Management Model: management-model.md
   - Docker: docker.md
   - MCP Integration: mcp.md
+  - OpenSSF Best Practices: ossf-best-practices.md
 
 docs_dir: docs

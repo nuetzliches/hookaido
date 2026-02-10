@@ -215,6 +215,7 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 | -------------------------------- | ---------------------------------------------------------------------------- |
 | [docs/](docs/index.md)           | User-facing documentation (getting started, configuration, APIs, deployment) |
 | [docs/docker.md](docs/docker.md) | Docker / Docker Compose quickstart                                           |
+| [docs/ossf-best-practices.md](docs/ossf-best-practices.md) | OpenSSF badge evidence and checklist             |
 | [DESIGN.md](DESIGN.md)           | Canonical DSL and API specification                                          |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and expectations                                      |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community conduct expectations                                       |

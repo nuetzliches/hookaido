@@ -41,6 +41,7 @@ Alternatively, Hookaido can **push** (deliver) to your internal endpoints with c
 | [Management Model](management-model.md) | Application/endpoint labels, publish policies                 |
 | [Docker Quickstart](docker.md)          | Run Hookaido with Docker / Docker Compose                     |
 | [MCP Integration](mcp.md)               | AI-assisted operations via Model Context Protocol             |
+| [OpenSSF Best Practices](ossf-best-practices.md) | Badge evidence links and maintenance checklist         |
 
 ## Requirements
 

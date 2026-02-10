@@ -21,6 +21,9 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 ## P2 — Nice to Have / Post-v1.0
 
 - [ ] **Vault secret adapter** — Secrets from HashiCorp Vault (or compatible API) in addition to env/file refs. _Deferred: env/file covers most deployments pre-v1.0._
+- [ ] **Full code review and polish pass** — End-to-end review with prioritized findings, targeted fixes, explicit "nice to have" follow-ups, and synchronized docs updates for changed behavior.
+- [ ] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
+- [ ] **Documentation UX refresh** — Improve docs structure and landing experience (hero page), add command-palette style Ctrl+K search, and evaluate whether to keep the current docs stack or migrate to an alternative OSS docs solution.
 - [x] **~~Config `diff` CLI command~~** — `hookaido config diff old.hcl new.hcl` with exit code semantics (0=identical, 1=changed, 2=error); diff engine extracted to shared `config.FormatDiff`; 6 CLI tests (moved to Completed).
 - [x] **~~VS Code Extension (Hookaidofile)~~** — TextMate grammar, 18 snippets, file association for `Hookaidofile`/`.hookaido`/`.hkd` (moved to Completed). _Optional Phase 2: LSP backed by `config validate`/`config compile` for live diagnostics._
 - [x] **~~Graceful shutdown draining~~** — PushDispatcher uses internal stopCh+WaitGroup lifecycle; Drain(timeout) completes in-flight deliveries on SIGTERM; 3 drain unit tests + E2E coverage (moved to Completed).

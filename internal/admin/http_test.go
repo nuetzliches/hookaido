@@ -8538,3 +8538,77 @@ func TestServer_ApplicationEndpointPublishManagedEndpointNoTargets(t *testing.T)
 		t.Fatalf("expected code %q, got %q", publishCodeManagedEndpointNoTargets, errResp.Code)
 	}
 }
+
+func TestDecodeJSONBodyStrict_RejectsOversizedBody(t *testing.T) {
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"http://example/applications/billing/endpoints/hooks",
+		strings.NewReader(`{"route":"`+strings.Repeat("a", int(defaultMaxBodyBytes))+`"}`),
+	)
+
+	var payload managementEndpointUpsertPayload
+	err := decodeJSONBodyStrict(req, &payload)
+	if !errors.Is(err, errRequestBodyTooLarge) {
+		t.Fatalf("expected errRequestBodyTooLarge, got %v", err)
+	}
+}
+
+func TestServer_ApplicationEndpointUpsert_RejectsOversizedBody(t *testing.T) {
+	srv := NewServer(queue.NewMemoryStore())
+	srv.UpsertManagedEndpoint = func(req ManagementEndpointUpsertRequest) (ManagementEndpointMutationResult, error) {
+		return ManagementEndpointMutationResult{}, nil
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"http://example/applications/billing/endpoints/hooks",
+		strings.NewReader(`{"route":"`+strings.Repeat("a", int(defaultMaxBodyBytes))+`"}`),
+	)
+	req.Header.Set(auditReasonHeader, "test")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	errResp := decodeManagementError(t, rr)
+	if errResp.Code != publishCodeInvalidBody {
+		t.Fatalf("expected code=%q, got %q", publishCodeInvalidBody, errResp.Code)
+	}
+	if !strings.Contains(errResp.Detail, "exceeds") {
+		t.Fatalf("expected oversized-body detail, got %q", errResp.Detail)
+	}
+}
+
+func TestServer_MessagesPublish_RejectsOversizedBody(t *testing.T) {
+	srv := NewServer(queue.NewMemoryStore())
+	srv.TargetsForRoute = func(route string) []string {
+		return []string{"https://example.test/hook"}
+	}
+	srv.ModeForRoute = func(route string) string { return "deliver" }
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"http://example/messages/publish",
+		strings.NewReader(`{"items":[{"id":"evt_1","route":"/hooks","payload_b64":"`+strings.Repeat("a", int(defaultMaxBodyBytes))+`"}]}`),
+	)
+	req.Header.Set(auditReasonHeader, "test")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp publishErrorResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Code != publishCodeInvalidBody {
+		t.Fatalf("expected code=%q, got %q", publishCodeInvalidBody, resp.Code)
+	}
+	if !strings.Contains(resp.Detail, "exceeds") {
+		t.Fatalf("expected oversized-body detail, got %q", resp.Detail)
+	}
+}

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -101,6 +102,7 @@ var (
 	ErrManagementEndpointNotFound = errors.New("management endpoint not found")
 	ErrManagementConflict         = errors.New("management conflict")
 	errManagedPolicyLookupMissing = errors.New("managed policy lookup is unavailable")
+	errRequestBodyTooLarge        = errors.New("request body too large")
 )
 
 type managedOwnershipMismatchError struct {
@@ -4241,6 +4243,9 @@ func parseManagementEndpointUpsert(r *http.Request) (string, string, bool) {
 	}
 	var payload managementEndpointUpsertPayload
 	if err := decodeJSONBodyStrict(r, &payload); err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			return "", fmt.Sprintf("request body exceeds %d bytes", defaultMaxBodyBytes), false
+		}
 		return "", "request body must be valid JSON with route", false
 	}
 	route, ok := parseOptionalRoutePath(payload.Route)
@@ -4257,7 +4262,16 @@ func decodeJSONBodyStrict(r *http.Request, out any) error {
 	if r == nil || r.Body == nil {
 		return errors.New("request body is missing")
 	}
-	dec := json.NewDecoder(r.Body)
+	maxBytes := int64(defaultMaxBodyBytes)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > maxBytes {
+		return errRequestBodyTooLarge
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
 		return err
@@ -4884,9 +4898,13 @@ func parseScopedPublishItems(r *http.Request) ([]messagesPublishItem, *publishPa
 func parsePublishItemsWithSelectorRequirement(r *http.Request, requireSelector bool) ([]messagesPublishItem, *publishParseError) {
 	var req messagesPublishRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
+		detail := "request body must be valid JSON with items"
+		if errors.Is(err, errRequestBodyTooLarge) {
+			detail = fmt.Sprintf("request body exceeds %d bytes", defaultMaxBodyBytes)
+		}
 		return nil, &publishParseError{
 			Code:      publishCodeInvalidBody,
-			Detail:    "request body must be valid JSON with items",
+			Detail:    detail,
 			ItemIndex: -1,
 		}
 	}

@@ -1,0 +1,61 @@
+name: Work Item
+description: Focused issue for one concrete change.
+title: "[work] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing right now?
+      placeholder: Clear statement of the current problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Change
+      description: What exactly should be implemented?
+      placeholder: One concrete change, not multiple unrelated changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How do we know this is done?
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Match project backlog priority.
+      options:
+        - P0 — Must Have
+        - P1 — Should Have
+        - P2 — Nice to Have
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context (Optional)
+      description: Relevant links, logs, screenshots, PRs, or docs references.
+      placeholder: DESIGN.md section, BACKLOG item, failing command output, etc.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-Submission Check
+      options:
+        - label: I checked existing issues and this is not a duplicate.
+          required: true

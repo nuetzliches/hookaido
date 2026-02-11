@@ -23,7 +23,7 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.
 - [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
-- [ ] **Documentation UX refresh** — Improve docs structure and landing experience (hero page), add command-palette style Ctrl+K search, and evaluate whether to keep the current docs stack or migrate to an alternative OSS docs solution.
+- [x] **~~Documentation UX refresh~~** — Moved to Completed.
 - [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
 - [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
 - [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
@@ -36,6 +36,7 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 
 ## Completed (move here when done)
 
+- [x] **Documentation UX refresh** — Refreshed docs information architecture in `mkdocs.yml` (grouped navigation), rebuilt `docs/index.md` with a landing hero + task-oriented quick paths, added command-palette style search shortcut (`Ctrl+K`) via `docs/assets/javascripts/command-palette.js`, added docs UX styling in `docs/assets/stylesheets/extra.css`, and documented docs-stack evaluation/decision in `docs/documentation-platform.md` (keep MkDocs Material for current roadmap window).
 - [x] **CII badge readiness docs** — Added `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`, `GOVERNANCE.md`, and `.github/CODEOWNERS`; linked governance/security docs from `README.md` and `docs/index.md` to prepare badge evidence links.
 - [x] **Scorecard: API visibility/auth follow-up** — Updated `scorecard.yml` with explicit read permissions (`contents`, `issues`, `pull-requests`, `checks`) to prevent check-run auth gaps, and added optional `SCORECARD_TOKEN` passthrough for classic branch-protection visibility.
 - [x] **Scorecard: fuzzing baseline** — Added baseline Go fuzz targets for config parse/format round-trip, Pull API auth/HTTP handlers, and ingress HMAC verification; wired scheduled fuzz smoke runs into `dependency-health` CI.

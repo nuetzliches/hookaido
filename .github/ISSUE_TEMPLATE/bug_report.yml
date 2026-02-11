@@ -4,6 +4,13 @@ title: "[bug] "
 labels:
   - bug
 body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security vulnerabilities in public issues.**
+        Use private advisory reporting instead:
+        https://github.com/nuetzliches/hookaido/security/advisories/new
+
   - type: textarea
     id: summary
     attributes:

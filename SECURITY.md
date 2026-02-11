@@ -12,7 +12,7 @@
 
 Please report vulnerabilities privately via GitHub Security Advisories:
 
-- `https://github.com/nuetzliches/hookaido/security/advisories/new`
+- [Create a private security advisory](https://github.com/nuetzliches/hookaido/security/advisories/new)
 
 Do not open public issues for unpatched vulnerabilities.
 
@@ -32,4 +32,3 @@ Do not open public issues for unpatched vulnerabilities.
 ## Disclosure
 
 We follow coordinated disclosure. Once a fix is available, maintainers publish release notes and, if applicable, a security advisory.
-

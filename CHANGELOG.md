@@ -16,12 +16,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ### Changed
 
 - Documentation UX refresh: docs navigation is now grouped by workflow area, `docs/index.md` is rebuilt as a landing page with quick-start/task-oriented entry points, search now supports command-palette style `Ctrl+K`, and docs stack evaluation is documented in `docs/documentation-platform.md` (decision: keep MkDocs Material for current roadmap window).
+- CI now runs on pull requests and pushes to `main` only, and cancels superseded in-progress runs per ref to reduce duplicate workflow executions.
 
 ### Fixed
 
 - Go module path now matches the repository path (`github.com/nuetzliches/hookaido`), fixing module resolution and `go install` for `cmd/hookaido`.
 - Docker image build metadata flags now target the correct package variables, so `hookaido version --long` reports release metadata correctly in container builds.
 - `config validate` now rejects invalid secret-reference schemes (`pull_api/admin_api auth token`, `pull.auth token`, direct `auth hmac` secrets, direct `deliver sign hmac`, and `secrets.value`) instead of failing later at runtime start.
+- Docs landing page links now use MkDocs directory URLs (`/page/`) so GitHub Pages navigation no longer points to missing `*.md` endpoints.
 
 ## [1.0.0] - 2026-02-10
 

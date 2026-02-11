@@ -8,9 +8,9 @@
     and lets internal workers consume at their own pace through pull or push flows.
   </p>
   <div class="hk-actions">
-    <a class="hk-button hk-button-primary" href="getting-started.md">Start in 5 minutes</a>
-    <a class="hk-button hk-button-secondary" href="configuration.md">Read the DSL reference</a>
-    <a class="hk-button hk-button-secondary" href="deployment-modes.md">Choose deployment mode</a>
+    <a class="hk-button hk-button-primary" href="getting-started/">Start in 5 minutes</a>
+    <a class="hk-button hk-button-secondary" href="configuration/">Read the DSL reference</a>
+    <a class="hk-button hk-button-secondary" href="deployment-modes/">Choose deployment mode</a>
   </div>
 </div>
 
@@ -22,22 +22,22 @@ Use <span class="hk-kbd">Ctrl</span> + <span class="hk-kbd">K</span> to open sea
   <div class="hk-card">
     <h3>Run Pull Mode</h3>
     <p>Use the DMZ default: ingress + queue in DMZ, internal workers dequeue and ack.</p>
-    <p><a href="pull-api.md">Pull API reference</a></p>
+    <p><a href="pull-api/">Pull API reference</a></p>
   </div>
   <div class="hk-card">
     <h3>Run Push Mode</h3>
     <p>Deliver to internal endpoints with retry, backoff, and optional outbound signing.</p>
-    <p><a href="delivery.md">Delivery reference</a></p>
+    <p><a href="delivery/">Delivery reference</a></p>
   </div>
   <div class="hk-card">
     <h3>Operate the Queue</h3>
     <p>Inspect health, DLQ, and backlog trends from the Admin API.</p>
-    <p><a href="admin-api.md">Admin API reference</a></p>
+    <p><a href="admin-api/">Admin API reference</a></p>
   </div>
   <div class="hk-card">
     <h3>Integrate with MCP</h3>
     <p>Expose typed ops tools for AI agents with role-gated read and mutation controls.</p>
-    <p><a href="mcp.md">MCP integration</a></p>
+    <p><a href="mcp/">MCP integration</a></p>
   </div>
 </div>
 

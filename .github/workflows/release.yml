@@ -5,18 +5,19 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
+permissions: read-all
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25.x"
       - name: Compute Safe Version Fragment
@@ -60,12 +61,12 @@ jobs:
         run: go run ./cmd/hookaido verify-release --checksums "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt" --require-signature --require-sbom
       - name: Attest Build Provenance
         id: attest_provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-checksums: "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt"
       - name: Attest SBOM
         id: attest_sbom
-        uses: actions/attest-sbom@v3
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
         with:
           subject-checksums: "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_checksums.txt"
           sbom-path: "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.spdx.json"
@@ -74,7 +75,7 @@ jobs:
           cp "${{ steps.attest_provenance.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_provenance.attestation.json"
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.attestation.json"
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           files: dist/*
           generate_release_notes: true

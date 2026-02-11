@@ -17,6 +17,10 @@ jobs:
     permissions:
       security-events: write
       id-token: write
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
 
     steps:
       - name: Checkout
@@ -29,6 +33,8 @@ jobs:
         with:
           results_file: results.sarif
           results_format: sarif
+          # Optional: set SCORECARD_TOKEN (fine-grained PAT) to read classic branch protection rules.
+          repo_token: ${{ secrets.SCORECARD_TOKEN != '' && secrets.SCORECARD_TOKEN || github.token }}
           publish_results: true
 
       - name: Upload Scorecard artifact

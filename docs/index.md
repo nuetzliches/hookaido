@@ -1,9 +1,5 @@
 # Hookaido Documentation
 
-<p align="center">
-  <img src="assets/logo/hookaido-logo.svg" alt="Hookaido logo" width="180">
-</p>
-
 Hookaido is a **webhook ingress queue** — a single binary that receives webhooks, durably enqueues them, and lets your internal services consume them at their own pace. Think of it as Caddy-style simplicity for webhook infrastructure.
 
 ## Key Properties
@@ -45,6 +41,7 @@ Alternatively, Hookaido can **push** (deliver) to your internal endpoints with c
 | [Management Model](management-model.md) | Application/endpoint labels, publish policies                 |
 | [Docker Quickstart](docker.md)          | Run Hookaido with Docker / Docker Compose                     |
 | [MCP Integration](mcp.md)               | AI-assisted operations via Model Context Protocol             |
+| [OpenSSF Best Practices](ossf-best-practices.md) | Badge evidence links and maintenance checklist         |
 
 ## Requirements
 
@@ -56,5 +53,9 @@ Alternatively, Hookaido can **push** (deliver) to your internal endpoints with c
 ## Project Links
 
 - [DESIGN.md](https://github.com/nuetzliches/hookaido/blob/main/DESIGN.md) — canonical specification
+- [CONTRIBUTING.md](https://github.com/nuetzliches/hookaido/blob/main/CONTRIBUTING.md) — contribution workflow
+- [CODE_OF_CONDUCT.md](https://github.com/nuetzliches/hookaido/blob/main/CODE_OF_CONDUCT.md) — community standards
+- [SECURITY.md](https://github.com/nuetzliches/hookaido/blob/main/SECURITY.md) — vulnerability reporting policy
+- [GOVERNANCE.md](https://github.com/nuetzliches/hookaido/blob/main/GOVERNANCE.md) — maintainership and decisions
 - [CHANGELOG.md](https://github.com/nuetzliches/hookaido/blob/main/CHANGELOG.md) — notable changes
 - [STATUS.md](https://github.com/nuetzliches/hookaido/blob/main/STATUS.md) — development status

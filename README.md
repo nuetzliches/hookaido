@@ -1,9 +1,5 @@
 # Hookaido
 
-<p align="center">
-  <img src="docs/assets/logo/hookaido-logo.svg" alt="Hookaido logo" width="180">
-</p>
-
 [![CI](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml)
 [![Release](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml)
 [![Container CI](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml)
@@ -208,13 +204,24 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 - Docker: use the official image `ghcr.io/nuetzliches/hookaido` (or build locally), see [Docker quickstart](docs/docker.md)
 - No external runtime dependencies
 
+## Maintainer Notes
+
+- OpenSSF Scorecard runs with `GITHUB_TOKEN` by default.
+- If the repository uses **classic branch protection rules**, add a repository secret `SCORECARD_TOKEN` (fine-grained PAT with `Administration: Read-only`) so the `Branch-Protection` check can be evaluated fully.
+
 ## Documentation
 
 | Document                         | Purpose                                                                      |
 | -------------------------------- | ---------------------------------------------------------------------------- |
 | [docs/](docs/index.md)           | User-facing documentation (getting started, configuration, APIs, deployment) |
 | [docs/docker.md](docs/docker.md) | Docker / Docker Compose quickstart                                           |
+| [docs/ossf-best-practices.md](docs/ossf-best-practices.md) | OpenSSF badge evidence and checklist             |
 | [DESIGN.md](DESIGN.md)           | Canonical DSL and API specification                                          |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and expectations                                      |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community conduct expectations                                       |
+| [SECURITY.md](SECURITY.md)       | Vulnerability reporting and security response policy                         |
+| [SUPPORT.md](SUPPORT.md)         | Support channels and issue quality guidance                                  |
+| [GOVERNANCE.md](GOVERNANCE.md)   | Maintainer roles and decision process                                        |
 | [CHANGELOG.md](CHANGELOG.md)     | User-visible changes                                                         |
 | [STATUS.md](STATUS.md)           | Development progress snapshot                                                |
 | [BACKLOG.md](BACKLOG.md)         | Prioritized work items                                                       |

@@ -34,7 +34,7 @@ func canonicalize(in []byte) []byte {
 		in = in[3:]
 	}
 
-	out := make([]byte, 0, len(in)+1)
+	out := make([]byte, 0, len(in))
 	for i := 0; i < len(in); i++ {
 		b := in[i]
 		if b == '\r' {

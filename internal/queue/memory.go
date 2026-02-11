@@ -1405,7 +1405,7 @@ func (s *MemoryStore) ListAttempts(req AttemptListRequest) (AttemptListResponse,
 		limit = 1000
 	}
 
-	items := make([]DeliveryAttempt, 0, limit)
+	items := make([]DeliveryAttempt, 0)
 	for _, attempt := range s.attempts {
 		if req.Route != "" && attempt.Route != req.Route {
 			continue

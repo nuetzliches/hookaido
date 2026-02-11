@@ -4,13 +4,13 @@ Thanks for contributing to Hookaido.
 
 ## Before You Start
 
-- Be respectful and collaborative. See `CODE_OF_CONDUCT.md`.
-- For security issues, do **not** open a public issue. See `SECURITY.md`.
-- Check `BACKLOG.md` before starting larger work to align with project priorities.
+- Be respectful and collaborative. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- For security issues, do **not** open a public issue. See [SECURITY.md](SECURITY.md).
+- Check [BACKLOG.md](BACKLOG.md) before starting larger work to align with project priorities.
 
 ## Development Setup
 
-1. Install Go `1.25.x` (see `go.mod`).
+1. Install Go `1.25.x` (see [go.mod](go.mod)).
 2. Clone the repository.
 3. Run tests:
 
@@ -23,10 +23,10 @@ go test ./...
 - Keep changes focused and small where possible.
 - Add or update tests for behavior changes.
 - Keep docs in sync for user-visible behavior:
-  - `DESIGN.md` for DSL/API/runtime semantics.
-  - `CHANGELOG.md` for user-visible behavior changes.
-  - `BACKLOG.md` for priority and completion tracking.
-  - `STATUS.md` only for milestone-level shifts.
+  - [DESIGN.md](DESIGN.md) for DSL/API/runtime semantics.
+  - [CHANGELOG.md](CHANGELOG.md) for user-visible behavior changes.
+  - [BACKLOG.md](BACKLOG.md) for priority and completion tracking.
+  - [STATUS.md](STATUS.md) only for milestone-level shifts.
 
 ## Pull Requests
 
@@ -36,6 +36,6 @@ go test ./...
    - what changed,
    - why it changed,
    - how it was validated.
+   - following [the PR template](.github/PULL_REQUEST_TEMPLATE.md).
 
 PRs must pass CI and branch protection checks before merge.
-

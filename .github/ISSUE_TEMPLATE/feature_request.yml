@@ -1,0 +1,74 @@
+name: Feature Request
+description: Propose a user-visible improvement or new capability.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What user or operator problem should this solve?
+      placeholder: Describe the current pain point.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: What should Hookaido do differently?
+      placeholder: Describe one focused, concrete solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and Impact
+      description: Which areas are affected (DSL, API, runtime, docs, MCP)?
+      placeholder: List affected surfaces and expected impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered (Optional)
+      description: What alternatives did you evaluate and why were they rejected?
+      placeholder: Optional alternatives and tradeoffs.
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Conditions that define done.
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Match project backlog priority.
+      options:
+        - P0 - Must Have
+        - P1 - Should Have
+        - P2 - Nice to Have
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-Submission Check
+      options:
+        - label: I checked existing issues and this is not a duplicate.
+          required: true
+        - label: This request is aligned with DESIGN.md and current guardrails.
+          required: true

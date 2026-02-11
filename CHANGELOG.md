@@ -13,6 +13,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Vault secret adapter for secret refs via `vault:...` (HashiCorp Vault-compatible HTTP API), including KV v1/v2 field extraction and env-configured namespace/TLS options.
 - Optional strict secret preflight in config validation: `hookaido config validate --strict-secrets` and MCP `config_validate` argument `strict_secrets` now actively load refs to catch missing env vars, unreadable files, and Vault connectivity/access issues before runtime start.
 
+### Changed
+
+- Documentation UX refresh: docs navigation is now grouped by workflow area, `docs/index.md` is rebuilt as a landing page with quick-start/task-oriented entry points, search now supports command-palette style `Ctrl+K`, and docs stack evaluation is documented in `docs/documentation-platform.md` (decision: keep MkDocs Material for current roadmap window).
+
 ### Fixed
 
 - Go module path now matches the repository path (`github.com/nuetzliches/hookaido`), fixing module resolution and `go install` for `cmd/hookaido`.

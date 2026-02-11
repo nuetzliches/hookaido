@@ -27,8 +27,11 @@ theme:
     - navigation.instant
     - navigation.tracking
     - navigation.sections
+    - navigation.expand
     - navigation.top
     - search.suggest
+    - search.highlight
+    - search.share
     - content.code.copy
 
 markdown_extensions:
@@ -49,18 +52,30 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
-  - Configuration: configuration.md
-  - Deployment Modes: deployment-modes.md
-  - Ingress: ingress.md
-  - Pull API: pull-api.md
-  - Admin API: admin-api.md
-  - Delivery (Push): delivery.md
-  - Security: security.md
-  - Observability: observability.md
-  - Management Model: management-model.md
-  - Docker: docker.md
-  - MCP Integration: mcp.md
-  - OpenSSF Best Practices: ossf-best-practices.md
+  - Start Here:
+      - Getting Started: getting-started.md
+      - Deployment Modes: deployment-modes.md
+      - Docker: docker.md
+  - Runtime:
+      - Configuration: configuration.md
+      - Ingress: ingress.md
+      - Pull API: pull-api.md
+      - Delivery (Push): delivery.md
+      - Admin API: admin-api.md
+      - Management Model: management-model.md
+  - Operations:
+      - Security: security.md
+      - Observability: observability.md
+  - Integrations:
+      - MCP Integration: mcp.md
+  - Project:
+      - Docs Platform Decision: documentation-platform.md
+      - OpenSSF Best Practices: ossf-best-practices.md
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+extra_javascript:
+  - assets/javascripts/command-palette.js
 
 docs_dir: docs

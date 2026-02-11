@@ -1438,8 +1438,15 @@ func TestSQLiteStore_ConcurrentEnqueueDequeueStress(t *testing.T) {
 					continue
 				}
 				for _, it := range resp.Items {
-					_ = s.Ack(it.LeaseID)
-					acked <- it.ID
+					// Count only successful acks; expired/missing leases can be redelivered.
+					if err := s.Ack(it.LeaseID); err != nil {
+						continue
+					}
+					select {
+					case acked <- it.ID:
+					case <-stop:
+						return
+					}
 				}
 				if len(resp.Items) == 0 {
 					time.Sleep(2 * time.Millisecond)

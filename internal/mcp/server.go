@@ -2363,7 +2363,7 @@ func (s *Server) toolAdminHealth(args map[string]any) (any, error) {
 				if details, ok := adminProbe["details"].(map[string]any); ok {
 					if diagnostics, ok := details["diagnostics"].(map[string]any); ok {
 						if queueDiag, ok := diagnostics["queue"].(map[string]any); ok {
-							proxyQueue := make(map[string]any, len(queueDiag)+2)
+							proxyQueue := make(map[string]any)
 							for k, v := range queueDiag {
 								proxyQueue[k] = v
 							}

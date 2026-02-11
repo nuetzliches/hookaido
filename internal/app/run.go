@@ -892,7 +892,7 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			}
 			auth.SelectSecrets = func(at time.Time) [][]byte {
 				valid := set.ValidAt(at)
-				out := make([][]byte, 0, len(valid)+len(secs))
+				out := make([][]byte, 0, len(valid))
 				for _, v := range valid {
 					out = append(out, v.Value)
 				}

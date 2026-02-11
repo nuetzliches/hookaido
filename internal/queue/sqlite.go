@@ -834,7 +834,7 @@ WHERE state = ?
 	}
 	defer rows.Close()
 
-	out := make([]Envelope, 0, batch)
+	out := make([]Envelope, 0)
 	for rows.Next() {
 		var env Envelope
 		var receivedAtNanos int64
@@ -1081,7 +1081,7 @@ WHERE state = ?`
 	}
 	defer rows.Close()
 
-	items := make([]Envelope, 0, limit)
+	items := make([]Envelope, 0)
 	for rows.Next() {
 		var env Envelope
 		var receivedAtNanos int64
@@ -1261,7 +1261,7 @@ WHERE 1 = 1`
 	}
 	defer rows.Close()
 
-	items := make([]Envelope, 0, limit)
+	items := make([]Envelope, 0)
 	for rows.Next() {
 		var env Envelope
 		var receivedAtNanos int64
@@ -1933,7 +1933,7 @@ WHERE 1 = 1`
 	}
 	defer rows.Close()
 
-	ids := make([]string, 0, limit)
+	ids := make([]string, 0)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -2036,7 +2036,7 @@ WHERE 1 = 1`
 	}
 	defer rows.Close()
 
-	items := make([]DeliveryAttempt, 0, limit)
+	items := make([]DeliveryAttempt, 0)
 	for rows.Next() {
 		var item DeliveryAttempt
 		var createdAtNanos int64

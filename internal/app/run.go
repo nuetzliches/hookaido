@@ -1711,6 +1711,18 @@ func startServers(
 	pullHandler.MaxLeaseTTL = compiled.PullAPI.MaxLeaseTTL
 	pullHandler.DefaultMaxWait = compiled.PullAPI.DefaultMaxWait
 	pullHandler.MaxWait = compiled.PullAPI.MaxWait
+	pullHandler.ObserveDequeue = func(route string, statusCode int, items []queue.Envelope) {
+		appMetrics.observePullDequeue(route, statusCode, items)
+	}
+	pullHandler.ObserveAck = func(route string, statusCode int, leaseID string, leaseExpired bool) {
+		appMetrics.observePullAck(route, statusCode, leaseID, leaseExpired)
+	}
+	pullHandler.ObserveNack = func(route string, statusCode int, leaseID string, leaseExpired bool) {
+		appMetrics.observePullNack(route, statusCode, leaseID, leaseExpired)
+	}
+	pullHandler.ObserveExtend = func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
+		appMetrics.observePullExtend(route, statusCode, leaseID, extendBy, leaseExpired)
+	}
 
 	adminH := admin.NewServer(store)
 	adminH.Authorize = state.authorizeAdmin

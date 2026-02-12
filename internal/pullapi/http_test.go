@@ -91,6 +91,164 @@ func TestPullAPI_DequeueAck(t *testing.T) {
 	}
 }
 
+func TestPullAPI_ObserverCallbacks(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+	if err := store.Enqueue(queue.Envelope{
+		ID:         "evt_1",
+		Route:      "/webhooks/github",
+		Target:     "pull",
+		ReceivedAt: nowVar,
+		NextRunAt:  nowVar,
+		Payload:    []byte(`{"x":1}`),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	var dequeueObserved struct {
+		route  string
+		status int
+		items  []queue.Envelope
+	}
+	var ackObserved struct {
+		route        string
+		status       int
+		leaseID      string
+		leaseExpired bool
+	}
+	srv.ObserveDequeue = func(route string, statusCode int, items []queue.Envelope) {
+		dequeueObserved.route = route
+		dequeueObserved.status = statusCode
+		dequeueObserved.items = append([]queue.Envelope(nil), items...)
+	}
+	srv.ObserveAck = func(route string, statusCode int, leaseID string, leaseExpired bool) {
+		ackObserved.route = route
+		ackObserved.status = statusCode
+		ackObserved.leaseID = leaseID
+		ackObserved.leaseExpired = leaseExpired
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1}`))
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rr.Code)
+	}
+
+	if dequeueObserved.route != "/webhooks/github" {
+		t.Fatalf("observe dequeue route: got %q", dequeueObserved.route)
+	}
+	if dequeueObserved.status != http.StatusOK {
+		t.Fatalf("observe dequeue status: got %d", dequeueObserved.status)
+	}
+	if len(dequeueObserved.items) != 1 {
+		t.Fatalf("observe dequeue item count: got %d", len(dequeueObserved.items))
+	}
+	leaseID := dequeueObserved.items[0].LeaseID
+	if leaseID == "" {
+		t.Fatalf("observe dequeue should include lease_id")
+	}
+
+	rrAck := httptest.NewRecorder()
+	reqAck := httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(`{"lease_id":"`+leaseID+`"}`))
+	srv.ServeHTTP(rrAck, reqAck)
+	if rrAck.Code != http.StatusNoContent {
+		t.Fatalf("ack status: got %d", rrAck.Code)
+	}
+	if ackObserved.route != "/webhooks/github" {
+		t.Fatalf("observe ack route: got %q", ackObserved.route)
+	}
+	if ackObserved.status != http.StatusNoContent {
+		t.Fatalf("observe ack status: got %d", ackObserved.status)
+	}
+	if ackObserved.leaseID != leaseID {
+		t.Fatalf("observe ack lease_id: got %q, want %q", ackObserved.leaseID, leaseID)
+	}
+	if ackObserved.leaseExpired {
+		t.Fatalf("observe ack leaseExpired should be false")
+	}
+}
+
+func TestPullAPI_ObserverAckExpiredConflict(t *testing.T) {
+	store := &stubStore{ackErr: queue.ErrLeaseExpired}
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+
+	var observed struct {
+		route        string
+		status       int
+		leaseID      string
+		leaseExpired bool
+	}
+	srv.ObserveAck = func(route string, statusCode int, leaseID string, leaseExpired bool) {
+		observed.route = route
+		observed.status = statusCode
+		observed.leaseID = leaseID
+		observed.leaseExpired = leaseExpired
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/x/ack", strings.NewReader(`{"lease_id":"lease_1"}`))
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rr.Code)
+	}
+	if observed.route != "/x" {
+		t.Fatalf("observe ack route: got %q", observed.route)
+	}
+	if observed.status != http.StatusConflict {
+		t.Fatalf("observe ack status: got %d", observed.status)
+	}
+	if observed.leaseID != "lease_1" {
+		t.Fatalf("observe ack lease_id: got %q", observed.leaseID)
+	}
+	if !observed.leaseExpired {
+		t.Fatalf("observe ack should mark leaseExpired=true")
+	}
+}
+
+func TestPullAPI_ObserverDequeueBadBody(t *testing.T) {
+	store := &stubStore{}
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	var observed struct {
+		route  string
+		status int
+	}
+	srv.ObserveDequeue = func(route string, statusCode int, _ []queue.Envelope) {
+		observed.route = route
+		observed.status = statusCode
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1,"unknown":1}`))
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	if observed.route != "/webhooks/github" {
+		t.Fatalf("observe dequeue route: got %q", observed.route)
+	}
+	if observed.status != http.StatusBadRequest {
+		t.Fatalf("observe dequeue status: got %d", observed.status)
+	}
+}
+
 func TestPullAPI_ExpiredLeaseIs409(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now

@@ -342,6 +342,44 @@ ingress {
 	}
 }
 
+func TestAllowIngressEnqueue_AdaptiveBackpressure(t *testing.T) {
+	compiled := compileForReloadTest(t, `
+defaults {
+  adaptive_backpressure {
+    enabled on
+    min_total 1
+    queued_percent 50
+    ready_lag 10m
+    oldest_queued_age 10m
+    sustained_growth off
+  }
+}
+
+pull_api { auth token "raw:t" }
+
+"/x" {
+  pull { path "/e" }
+}
+`)
+	state := newRuntimeState(compiled)
+	store := queue.NewMemoryStore()
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/x", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	state.setQueueStore(store)
+
+	allowed, statusCode, reason := state.allowIngressEnqueue("/x")
+	if allowed {
+		t.Fatal("expected adaptive backpressure to reject enqueue")
+	}
+	if statusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d", statusCode)
+	}
+	if reason != "queued_pressure" {
+		t.Fatalf("reason: got %q", reason)
+	}
+}
+
 func TestRuntimeState_ResolveManagedEndpoint(t *testing.T) {
 	compiled := compileForReloadTest(t, `
 pull_api { auth token "raw:t" }

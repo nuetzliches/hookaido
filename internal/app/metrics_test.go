@@ -3,7 +3,9 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +38,8 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 		"hookaido_ingress_accepted_total 0",
 		"hookaido_ingress_rejected_total 0",
 		"hookaido_ingress_enqueued_total 0",
+		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 0`,
+		"hookaido_ingress_adaptive_backpressure_applied_total 0",
 		"hookaido_delivery_attempts_total 0",
 		"hookaido_delivery_acked_total 0",
 		"hookaido_delivery_retry_total 0",
@@ -131,6 +135,9 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 	m.observeIngressResult(true, 1)  // accepted, single target
 	m.observeIngressResult(false, 0) // rejected (auth, rate-limit, etc)
 	m.observeIngressResult(false, 0) // rejected
+	m.observeIngressAdaptiveBackpressure("queued_pressure")
+	m.observeIngressAdaptiveBackpressure("ready_lag")
+	m.observeIngressAdaptiveBackpressure("")
 
 	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
 	rr := httptest.NewRecorder()
@@ -141,6 +148,10 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 		"hookaido_ingress_accepted_total 2",
 		"hookaido_ingress_rejected_total 2",
 		"hookaido_ingress_enqueued_total 3",
+		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 1`,
+		`hookaido_ingress_adaptive_backpressure_total{reason="ready_lag"} 1`,
+		`hookaido_ingress_adaptive_backpressure_total{reason="unspecified"} 1`,
+		"hookaido_ingress_adaptive_backpressure_applied_total 3",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
@@ -211,9 +222,115 @@ func TestMetricsHandler_QueueDepthNilStore(t *testing.T) {
 	}
 }
 
+func TestMetricsHandler_UsesCachedQueueDepthWhenRefreshIsSlow(t *testing.T) {
+	base := queue.NewMemoryStore()
+	if err := base.Enqueue(queue.Envelope{ID: "evt_cache_1", Route: "/r", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	blockCh := make(chan struct{})
+	var statsCalls atomic.Int64
+	store := &appStatsOverrideStore{
+		Store: base,
+		statsFn: func() (queue.Stats, error) {
+			call := statsCalls.Add(1)
+			if call >= 2 {
+				<-blockCh
+			}
+			return base.Stats()
+		},
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+	m.queueStats.ttl = 0
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+
+	// Warm cache.
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("warm metrics status: got %d", rr1.Code)
+	}
+
+	// Second scrape should use stale cached depth while async refresh is blocked.
+	start := time.Now()
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second metrics status: got %d", rr2.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expected cached metrics response to be fast, got %s", elapsed)
+	}
+	if body := rr2.Body.String(); !strings.Contains(body, `hookaido_queue_depth{state="queued"} 1`) {
+		t.Fatalf("expected cached queue depth in metrics output:\n%s", body)
+	}
+
+	close(blockCh)
+}
+
+func TestMetricsHandler_SQLiteStoreRuntimeMetrics(t *testing.T) {
+	now := time.Unix(500, 0).UTC()
+	nowVar := now
+	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
+	store, err := queue.NewSQLiteStore(
+		dbPath,
+		queue.WithSQLiteNowFunc(func() time.Time { return nowVar }),
+		queue.WithSQLiteQueueLimits(10000, "reject"),
+		queue.WithSQLiteCheckpointInterval(0),
+	)
+	if err != nil {
+		t.Fatalf("new sqlite store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected 1 dequeued item, got %d", len(resp.Items))
+	}
+	if err := store.Ack(resp.Items[0].LeaseID); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	h := newMetricsHandler("dev", now, m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_store_sqlite_write_seconds_bucket{le="+Inf"}`,
+		`hookaido_store_sqlite_write_seconds_count `,
+		`hookaido_store_sqlite_dequeue_seconds_bucket{le="+Inf"}`,
+		`hookaido_store_sqlite_dequeue_seconds_count `,
+		`hookaido_store_sqlite_checkpoint_seconds_bucket{le="+Inf"}`,
+		`hookaido_store_sqlite_busy_total `,
+		`hookaido_store_sqlite_retry_total `,
+		`hookaido_store_sqlite_tx_commit_total `,
+		`hookaido_store_sqlite_tx_rollback_total `,
+		`hookaido_store_sqlite_checkpoint_total `,
+		`hookaido_store_sqlite_checkpoint_errors_total `,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
 func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	m := newRuntimeMetrics()
 	m.observeIngressResult(true, 3)
+	m.observeIngressAdaptiveBackpressure("ready_lag")
 	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
 	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
 
@@ -228,6 +345,16 @@ func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	}
 	if got := intFromAny(ingress["enqueued_total"]); got != 3 {
 		t.Fatalf("ingress enqueued_total=%d, want 3", got)
+	}
+	if got := intFromAny(ingress["adaptive_backpressure_applied_total"]); got != 1 {
+		t.Fatalf("ingress adaptive_backpressure_applied_total=%d, want 1", got)
+	}
+	adaptiveByReason, ok := ingress["adaptive_backpressure_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected adaptive_backpressure_by_reason map, got %T", ingress["adaptive_backpressure_by_reason"])
+	}
+	if got := intFromAny(adaptiveByReason["ready_lag"]); got != 1 {
+		t.Fatalf("ingress adaptive_backpressure_by_reason.ready_lag=%d, want 1", got)
 	}
 
 	delivery, ok := diag["delivery"].(map[string]any)
@@ -363,4 +490,16 @@ func TestMetricsPrefixRouting(t *testing.T) {
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("GET /metrics: got %d, want 404", rec2.Code)
 	}
+}
+
+type appStatsOverrideStore struct {
+	queue.Store
+	statsFn func() (queue.Stats, error)
+}
+
+func (s *appStatsOverrideStore) Stats() (queue.Stats, error) {
+	if s == nil || s.statsFn == nil {
+		return queue.Stats{}, nil
+	}
+	return s.statsFn()
 }

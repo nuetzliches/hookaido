@@ -128,6 +128,8 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_ingress_accepted_total` | counter | Ingress requests accepted and enqueued            |
 | `hookaido_ingress_rejected_total` | counter | Ingress requests rejected (auth, rate-limit, etc) |
 | `hookaido_ingress_enqueued_total` | counter | Items enqueued via ingress (>accepted if fanout)  |
+| `hookaido_ingress_adaptive_backpressure_total{reason}` | counter | Ingress requests rejected by adaptive backpressure (by trigger reason) |
+| `hookaido_ingress_adaptive_backpressure_applied_total` | counter | Total ingress requests rejected by adaptive backpressure |
 
 **Delivery metrics:**
 
@@ -149,6 +151,20 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_pull_nack_conflict_total`   | counter | Pull nack lease conflicts (`409`) by `route`                                 |
 | `hookaido_pull_lease_active`          | gauge   | Active Pull leases currently tracked by `route`                              |
 | `hookaido_pull_lease_expired_total`   | counter | Lease expirations observed during Pull `ack`/`nack`/`extend` by `route`      |
+
+**Store/SQLite metrics:**
+
+| Metric                                           | Type      | Description                                                                |
+| ------------------------------------------------ | --------- | -------------------------------------------------------------------------- |
+| `hookaido_store_sqlite_write_seconds`            | histogram | SQLite write transaction duration (queue mutation paths)                   |
+| `hookaido_store_sqlite_dequeue_seconds`          | histogram | SQLite dequeue transaction duration                                        |
+| `hookaido_store_sqlite_checkpoint_seconds`       | histogram | SQLite WAL checkpoint duration (periodic passive checkpoints)              |
+| `hookaido_store_sqlite_busy_total`               | counter   | SQLite busy/locked errors observed in instrumented paths                   |
+| `hookaido_store_sqlite_retry_total`              | counter   | SQLite begin-transaction retry attempts after busy/locked errors           |
+| `hookaido_store_sqlite_tx_commit_total`          | counter   | Committed SQLite transactions in instrumented queue paths                  |
+| `hookaido_store_sqlite_tx_rollback_total`        | counter   | Rolled-back SQLite transactions in instrumented queue paths                |
+| `hookaido_store_sqlite_checkpoint_total`         | counter   | Successful periodic SQLite WAL checkpoints                                 |
+| `hookaido_store_sqlite_checkpoint_errors_total`  | counter   | Failed periodic SQLite WAL checkpoints                                     |
 
 **Publish metrics:**
 
@@ -255,7 +271,27 @@ The Admin API health endpoint (`GET /healthz?details=1`) aggregates observabilit
 - Queue state rollups with age/lag indicators
 - Backlog trend signals with operator action playbooks
 - Tracing counters (init failures, export errors)
+- Ingress adaptive-backpressure diagnostics (`adaptive_backpressure_applied_total`, `adaptive_backpressure_by_reason`)
 - Top route/target backlog buckets
+- Queue diagnostics are cached (short TTL) and served stale-while-refresh under heavy load to keep control-plane endpoints responsive.
+
+Operational guidance for control-plane responsiveness:
+
+- Keep SLO probes on `GET /healthz` (without details) for the fastest liveness path.
+- Use `GET /healthz?details=1` and `GET /metrics` for diagnostics/monitoring; under queue saturation these endpoints prioritize bounded latency over strictly real-time queue snapshots.
+
+## Saturation Notes
+
+Queue saturation analysis showed one hot path in the ingest/admission write flow: with `queue_limits.max_depth` enabled, each enqueue previously executed `COUNT(*)` over active queue states (`queued` + `leased`) inside a write transaction.
+
+At high occupancy, that repeated count increased write transaction time and lock contention (`hookaido_store_sqlite_write_seconds`, `hookaido_store_sqlite_busy_total`, `hookaido_store_sqlite_retry_total`).
+
+Hookaido now maintains O(1) active-depth counters (`queue_counters`) via SQLite triggers and uses them for `max_depth` admission checks.
+
+To validate improvements in your environment, compare before/after load runs using:
+- p95/p99 ingress latency and 503 rate
+- `hookaido_store_sqlite_write_seconds` histogram shape
+- `hookaido_store_sqlite_busy_total` and `hookaido_store_sqlite_retry_total` growth rate
 
 See [Admin API](admin-api.md) for details.
 

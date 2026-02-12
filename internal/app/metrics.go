@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -30,9 +31,12 @@ type runtimeMetrics struct {
 	publishScopedRejectedTotal                 atomic.Int64
 
 	// Ingress counters
-	ingressAcceptedTotal atomic.Int64
-	ingressRejectedTotal atomic.Int64
-	ingressEnqueuedTotal atomic.Int64
+	ingressAcceptedTotal    atomic.Int64
+	ingressRejectedTotal    atomic.Int64
+	ingressEnqueuedTotal    atomic.Int64
+	ingressAdaptiveTotal    atomic.Int64
+	ingressAdaptiveMu       sync.Mutex
+	ingressAdaptiveByReason map[string]int64
 
 	// Delivery counters
 	deliveryAttemptTotal atomic.Int64
@@ -42,6 +46,14 @@ type runtimeMetrics struct {
 
 	// Queue store for on-scrape stats
 	queueStore queue.Store
+	queueStats struct {
+		mu         sync.Mutex
+		ttl        time.Duration
+		cached     queue.Stats
+		cachedAt   time.Time
+		cachedOK   bool
+		refreshing bool
+	}
 
 	pullMu      sync.Mutex
 	pullByRoute map[string]*pullRouteMetrics
@@ -75,11 +87,14 @@ type pullRouteSnapshot struct {
 }
 
 func newRuntimeMetrics() *runtimeMetrics {
-	return &runtimeMetrics{
-		pullByRoute: make(map[string]*pullRouteMetrics),
-		pullLeases:  make(map[string]pullLease),
-		now:         time.Now,
+	m := &runtimeMetrics{
+		pullByRoute:             make(map[string]*pullRouteMetrics),
+		pullLeases:              make(map[string]pullLease),
+		now:                     time.Now,
+		ingressAdaptiveByReason: make(map[string]int64),
 	}
+	m.queueStats.ttl = time.Second
+	return m
 }
 
 func (m *runtimeMetrics) setTracingEnabled(enabled bool) {
@@ -119,6 +134,20 @@ func (m *runtimeMetrics) observeIngressResult(accepted bool, enqueued int) {
 	if enqueued > 0 {
 		m.ingressEnqueuedTotal.Add(int64(enqueued))
 	}
+}
+
+func (m *runtimeMetrics) observeIngressAdaptiveBackpressure(reason string) {
+	if m == nil {
+		return
+	}
+	normalized := normalizeAdaptiveBackpressureReason(reason)
+	m.ingressAdaptiveTotal.Add(1)
+	m.ingressAdaptiveMu.Lock()
+	if m.ingressAdaptiveByReason == nil {
+		m.ingressAdaptiveByReason = make(map[string]int64)
+	}
+	m.ingressAdaptiveByReason[normalized]++
+	m.ingressAdaptiveMu.Unlock()
 }
 
 func (m *runtimeMetrics) observeDeliveryAttempt(outcome queue.AttemptOutcome) {
@@ -170,6 +199,92 @@ func (m *runtimeMetrics) observePublishResult(accepted, rejected int, code strin
 			m.publishRejectedManagedResolverMissingTotal.Add(int64(rejected))
 		}
 	}
+}
+
+func (m *runtimeMetrics) queueStatsSnapshot() (queue.Stats, bool) {
+	if m == nil || m.queueStore == nil {
+		return queue.Stats{}, false
+	}
+
+	now := time.Now()
+	m.queueStats.mu.Lock()
+	if m.queueStats.cachedOK && (m.queueStats.ttl <= 0 || now.Sub(m.queueStats.cachedAt) <= m.queueStats.ttl) {
+		stats := m.queueStats.cached
+		m.queueStats.mu.Unlock()
+		return stats, true
+	}
+
+	// Cold-start: no cache yet. Perform one blocking read to seed cache.
+	if !m.queueStats.cachedOK {
+		if m.queueStats.refreshing {
+			m.queueStats.mu.Unlock()
+			return queue.Stats{}, false
+		}
+		m.queueStats.refreshing = true
+		m.queueStats.mu.Unlock()
+		return m.refreshQueueStatsSync()
+	}
+
+	// Stale cache: return stale snapshot and refresh in background.
+	if !m.queueStats.refreshing {
+		m.queueStats.refreshing = true
+		go m.refreshQueueStatsAsync()
+	}
+	stats := m.queueStats.cached
+	m.queueStats.mu.Unlock()
+	return stats, true
+}
+
+func (m *runtimeMetrics) refreshQueueStatsSync() (queue.Stats, bool) {
+	if m == nil || m.queueStore == nil {
+		if m != nil {
+			m.queueStats.mu.Lock()
+			m.queueStats.refreshing = false
+			m.queueStats.mu.Unlock()
+		}
+		return queue.Stats{}, false
+	}
+
+	stats, err := m.queueStore.Stats()
+	at := time.Now()
+
+	m.queueStats.mu.Lock()
+	defer m.queueStats.mu.Unlock()
+	m.queueStats.refreshing = false
+	if err == nil {
+		m.queueStats.cached = stats
+		m.queueStats.cachedAt = at
+		m.queueStats.cachedOK = true
+		return stats, true
+	}
+	if m.queueStats.cachedOK {
+		return m.queueStats.cached, true
+	}
+	return queue.Stats{}, false
+}
+
+func (m *runtimeMetrics) refreshQueueStatsAsync() {
+	if m == nil || m.queueStore == nil {
+		if m != nil {
+			m.queueStats.mu.Lock()
+			m.queueStats.refreshing = false
+			m.queueStats.mu.Unlock()
+		}
+		return
+	}
+
+	stats, err := m.queueStore.Stats()
+	at := time.Now()
+
+	m.queueStats.mu.Lock()
+	defer m.queueStats.mu.Unlock()
+	m.queueStats.refreshing = false
+	if err != nil {
+		return
+	}
+	m.queueStats.cached = stats
+	m.queueStats.cachedAt = at
+	m.queueStats.cachedOK = true
 }
 
 func (m *runtimeMetrics) observePullDequeue(route string, statusCode int, items []queue.Envelope) {
@@ -413,6 +528,15 @@ func pullStatusLabel(statusCode int) string {
 
 var pullStatusPreferredOrder = []string{"200", "204", "4xx", "5xx"}
 
+var adaptiveBackpressureReasonOrder = []string{
+	"queued_pressure",
+	"ready_lag",
+	"oldest_queued_age",
+	"sustained_growth",
+	"unspecified",
+	"other",
+}
+
 func orderedPullStatuses(byStatus map[string]int64) []string {
 	seen := make(map[string]struct{}, len(byStatus))
 	out := make([]string, 0, len(byStatus)+len(pullStatusPreferredOrder))
@@ -439,6 +563,39 @@ func sortedRoutes(snapshot map[string]pullRouteSnapshot) []string {
 	}
 	sort.Strings(routes)
 	return routes
+}
+
+func normalizeAdaptiveBackpressureReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "queued_pressure":
+		return "queued_pressure"
+	case "ready_lag":
+		return "ready_lag"
+	case "oldest_queued_age":
+		return "oldest_queued_age"
+	case "sustained_growth":
+		return "sustained_growth"
+	case "":
+		return "unspecified"
+	default:
+		return "other"
+	}
+}
+
+func (m *runtimeMetrics) ingressAdaptiveSnapshot() map[string]int64 {
+	out := make(map[string]int64, len(adaptiveBackpressureReasonOrder))
+	for _, reason := range adaptiveBackpressureReasonOrder {
+		out[reason] = 0
+	}
+	if m == nil {
+		return out
+	}
+	m.ingressAdaptiveMu.Lock()
+	defer m.ingressAdaptiveMu.Unlock()
+	for reason, count := range m.ingressAdaptiveByReason {
+		out[reason] = count
+	}
+	return out
 }
 
 func pullDiagnostics(snapshot map[string]pullRouteSnapshot) map[string]any {
@@ -531,6 +688,11 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 		return map[string]any{}
 	}
 	pullSnapshot := m.pullSnapshot()
+	ingressAdaptiveByReason := m.ingressAdaptiveSnapshot()
+	ingressAdaptiveByReasonAny := make(map[string]any, len(ingressAdaptiveByReason))
+	for reason, count := range ingressAdaptiveByReason {
+		ingressAdaptiveByReasonAny[reason] = count
+	}
 	return map[string]any{
 		"tracing": map[string]any{
 			"enabled":             m.tracingEnabled.Load() == 1,
@@ -551,9 +713,11 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 			"scoped_rejected_total":                   m.publishScopedRejectedTotal.Load(),
 		},
 		"ingress": map[string]any{
-			"accepted_total": m.ingressAcceptedTotal.Load(),
-			"rejected_total": m.ingressRejectedTotal.Load(),
-			"enqueued_total": m.ingressEnqueuedTotal.Load(),
+			"accepted_total":                      m.ingressAcceptedTotal.Load(),
+			"rejected_total":                      m.ingressRejectedTotal.Load(),
+			"enqueued_total":                      m.ingressEnqueuedTotal.Load(),
+			"adaptive_backpressure_applied_total": m.ingressAdaptiveTotal.Load(),
+			"adaptive_backpressure_by_reason":     ingressAdaptiveByReasonAny,
 		},
 		"delivery": map[string]any{
 			"attempt_total": m.deliveryAttemptTotal.Load(),
@@ -581,6 +745,11 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		publishRejectedStoreTotal := int64(0)
 		publishScopedAcceptedTotal := int64(0)
 		publishScopedRejectedTotal := int64(0)
+		ingressAdaptiveTotal := int64(0)
+		ingressAdaptiveByReason := make(map[string]int64, len(adaptiveBackpressureReasonOrder))
+		for _, reason := range adaptiveBackpressureReasonOrder {
+			ingressAdaptiveByReason[reason] = 0
+		}
 		var pullSnapshot map[string]pullRouteSnapshot
 		if rm != nil {
 			tracingEnabled = rm.tracingEnabled.Load()
@@ -597,6 +766,8 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			publishRejectedStoreTotal = rm.publishRejectedStoreTotal.Load()
 			publishScopedAcceptedTotal = rm.publishScopedAcceptedTotal.Load()
 			publishScopedRejectedTotal = rm.publishScopedRejectedTotal.Load()
+			ingressAdaptiveTotal = rm.ingressAdaptiveTotal.Load()
+			ingressAdaptiveByReason = rm.ingressAdaptiveSnapshot()
 			pullSnapshot = rm.pullSnapshot()
 		}
 
@@ -671,6 +842,14 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_enqueued_total Total number of items enqueued via ingress (may exceed accepted if fanout targets > 1).\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_enqueued_total counter\n")
 		_, _ = fmt.Fprintf(w, "hookaido_ingress_enqueued_total %d\n", ingressEnqueued)
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_adaptive_backpressure_total Total number of ingress requests rejected by adaptive backpressure, partitioned by reason.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_adaptive_backpressure_total counter\n")
+		for _, reason := range adaptiveBackpressureReasonOrder {
+			_, _ = fmt.Fprintf(w, "hookaido_ingress_adaptive_backpressure_total{reason=%q} %d\n", reason, ingressAdaptiveByReason[reason])
+		}
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_adaptive_backpressure_applied_total Total number of ingress requests rejected by adaptive backpressure.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_adaptive_backpressure_applied_total counter\n")
+		_, _ = fmt.Fprintf(w, "hookaido_ingress_adaptive_backpressure_applied_total %d\n", ingressAdaptiveTotal)
 
 		// --- Delivery metrics ---
 		deliveryAttempt := int64(0)
@@ -736,7 +915,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			queueStore = rm.queueStore
 		}
 		if queueStore != nil {
-			if stats, err := queueStore.Stats(); err == nil {
+			if stats, ok := rm.queueStatsSnapshot(); ok {
 				queued := stats.ByState[queue.StateQueued]
 				leased := stats.ByState[queue.StateLeased]
 				dead := stats.ByState[queue.StateDead]
@@ -746,6 +925,66 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 				_, _ = fmt.Fprintf(w, "hookaido_queue_depth{state=\"leased\"} %d\n", leased)
 				_, _ = fmt.Fprintf(w, "hookaido_queue_depth{state=\"dead\"} %d\n", dead)
 			}
+
+			if provider, ok := queueStore.(queue.RuntimeMetricsProvider); ok {
+				if runtime := provider.RuntimeMetrics(); runtime.SQLite != nil {
+					sqliteMetrics := runtime.SQLite
+					writePrometheusHistogram(
+						w,
+						"hookaido_store_sqlite_write_seconds",
+						"SQLite write transaction duration in seconds.",
+						sqliteMetrics.WriteDurationSeconds,
+					)
+					writePrometheusHistogram(
+						w,
+						"hookaido_store_sqlite_dequeue_seconds",
+						"SQLite dequeue transaction duration in seconds.",
+						sqliteMetrics.DequeueDurationSeconds,
+					)
+					writePrometheusHistogram(
+						w,
+						"hookaido_store_sqlite_checkpoint_seconds",
+						"SQLite WAL checkpoint duration in seconds.",
+						sqliteMetrics.CheckpointDurationSeconds,
+					)
+
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_busy_total Total number of SQLite busy/locked errors.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_busy_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_busy_total %d\n", sqliteMetrics.BusyTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_retry_total Total number of SQLite retry attempts after busy/locked errors.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_retry_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_retry_total %d\n", sqliteMetrics.RetryTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_tx_commit_total Total number of committed SQLite transactions in instrumented queue paths.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_tx_commit_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_tx_commit_total %d\n", sqliteMetrics.TxCommitTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_tx_rollback_total Total number of rolled-back SQLite transactions in instrumented queue paths.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_tx_rollback_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_tx_rollback_total %d\n", sqliteMetrics.TxRollbackTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_checkpoint_total Total number of periodic SQLite WAL checkpoints.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_checkpoint_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_checkpoint_total %d\n", sqliteMetrics.CheckpointTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_checkpoint_errors_total Total number of periodic SQLite WAL checkpoint errors.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_checkpoint_errors_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_checkpoint_errors_total %d\n", sqliteMetrics.CheckpointErrorTotal)
+				}
+			}
 		}
 	})
+}
+
+func writePrometheusHistogram(w http.ResponseWriter, name string, help string, snapshot queue.HistogramSnapshot) {
+	_, _ = fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	_, _ = fmt.Fprintf(w, "# TYPE %s histogram\n", name)
+	for _, bucket := range snapshot.Buckets {
+		_, _ = fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", name, prometheusLe(bucket.Le), bucket.Count)
+	}
+	_, _ = fmt.Fprintf(w, "%s_sum %.9f\n", name, snapshot.Sum)
+	_, _ = fmt.Fprintf(w, "%s_count %d\n", name, snapshot.Count)
+}
+
+func prometheusLe(v float64) string {
+	if math.IsInf(v, 1) {
+		return "+Inf"
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }

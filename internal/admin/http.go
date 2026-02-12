@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nuetzliches/hookaido/internal/config"
@@ -22,15 +23,16 @@ import (
 )
 
 const (
-	defaultListLimit          = 100
-	maxListLimit              = 1000
-	defaultBacklogTrendWindow = time.Hour
-	defaultBacklogTrendStep   = 5 * time.Minute
-	minBacklogTrendStep       = time.Minute
-	maxBacklogTrendStep       = time.Hour
-	maxBacklogTrendWindow     = 7 * 24 * time.Hour
-	maxBacklogTrendSamples    = 20000
-	healthTrendSignalSamples  = 2000
+	defaultListLimit           = 100
+	maxListLimit               = 1000
+	defaultBacklogTrendWindow  = time.Hour
+	defaultBacklogTrendStep    = 5 * time.Minute
+	minBacklogTrendStep        = time.Minute
+	maxBacklogTrendStep        = time.Hour
+	maxBacklogTrendWindow      = 7 * 24 * time.Hour
+	maxBacklogTrendSamples     = 20000
+	healthTrendSignalSamples   = 500
+	defaultQueueHealthCacheTTL = time.Second
 
 	auditReasonHeader     = "X-Hookaido-Audit-Reason"
 	auditActorHeader      = "X-Hookaido-Audit-Actor"
@@ -185,6 +187,14 @@ type Server struct {
 	ObservePublishResult               func(event PublishResultEvent)
 	UpsertManagedEndpoint              func(req ManagementEndpointUpsertRequest) (ManagementEndpointMutationResult, error)
 	DeleteManagedEndpoint              func(req ManagementEndpointDeleteRequest) (ManagementEndpointMutationResult, error)
+
+	queueHealth struct {
+		mu         sync.Mutex
+		ttl        time.Duration
+		cached     map[string]any
+		cachedAt   time.Time
+		refreshing bool
+	}
 }
 
 type PublishResultEvent struct {
@@ -195,7 +205,7 @@ type PublishResultEvent struct {
 }
 
 func NewServer(store queue.Store) *Server {
-	return &Server{
+	s := &Server{
 		Store:                          store,
 		RequireManagementAuditReason:   true,
 		MaxBodyBytes:                   defaultMaxBodyBytes,
@@ -208,6 +218,8 @@ func NewServer(store queue.Store) *Server {
 		PublishRequireAuditRequestID:   false,
 		PublishScopedManagedFailClosed: false,
 	}
+	s.queueHealth.ttl = defaultQueueHealthCacheTTL
+	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -471,7 +483,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if s.Store != nil {
-		diagnostics["queue"] = queueHealthDiagnostics(s.Store, s.trendSignalConfig())
+		diagnostics["queue"] = s.queueHealthDiagnosticsSnapshot()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -480,6 +492,67 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"time":        time.Now().UTC().Format(time.RFC3339Nano),
 		"diagnostics": diagnostics,
 	})
+}
+
+func (s *Server) queueHealthDiagnosticsSnapshot() map[string]any {
+	if s == nil || s.Store == nil {
+		return map[string]any{
+			"ok":    false,
+			"error": "queue store is not configured",
+		}
+	}
+
+	now := time.Now()
+	s.queueHealth.mu.Lock()
+	if s.queueHealth.cached != nil && (s.queueHealth.ttl <= 0 || now.Sub(s.queueHealth.cachedAt) <= s.queueHealth.ttl) {
+		diag := s.queueHealth.cached
+		s.queueHealth.mu.Unlock()
+		return diag
+	}
+
+	// Cold-start: build queue diagnostics synchronously once.
+	if s.queueHealth.cached == nil {
+		if s.queueHealth.refreshing {
+			s.queueHealth.mu.Unlock()
+			return map[string]any{
+				"ok":     false,
+				"status": "warming",
+			}
+		}
+		s.queueHealth.refreshing = true
+		s.queueHealth.mu.Unlock()
+		return s.refreshQueueHealthDiagnosticsSync()
+	}
+
+	// Stale cache: return stale diagnostics immediately and refresh async.
+	if !s.queueHealth.refreshing {
+		s.queueHealth.refreshing = true
+		go s.refreshQueueHealthDiagnosticsAsync()
+	}
+	diag := s.queueHealth.cached
+	s.queueHealth.mu.Unlock()
+	return diag
+}
+
+func (s *Server) refreshQueueHealthDiagnosticsSync() map[string]any {
+	diag := queueHealthDiagnostics(s.Store, s.trendSignalConfig())
+
+	s.queueHealth.mu.Lock()
+	s.queueHealth.cached = diag
+	s.queueHealth.cachedAt = time.Now()
+	s.queueHealth.refreshing = false
+	s.queueHealth.mu.Unlock()
+	return diag
+}
+
+func (s *Server) refreshQueueHealthDiagnosticsAsync() {
+	diag := queueHealthDiagnostics(s.Store, s.trendSignalConfig())
+
+	s.queueHealth.mu.Lock()
+	s.queueHealth.cached = diag
+	s.queueHealth.cachedAt = time.Now()
+	s.queueHealth.refreshing = false
+	s.queueHealth.mu.Unlock()
 }
 
 func queueHealthDiagnostics(store queue.Store, signalCfg queue.BacklogTrendSignalConfig) map[string]any {

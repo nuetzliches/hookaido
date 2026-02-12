@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,6 +193,75 @@ func TestServer_HealthzDetails(t *testing.T) {
 	if _, ok := trendSignals["operator_actions"]; !ok {
 		t.Fatalf("expected trend_signals.operator_actions")
 	}
+}
+
+func TestServer_HealthzDetails_UsesCachedQueueDiagnosticsWhenRefreshIsSlow(t *testing.T) {
+	now := time.Now().UTC()
+	base := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return now }))
+	if err := base.Enqueue(queue.Envelope{
+		ID:         "q_cached_1",
+		Route:      "/r",
+		Target:     "pull",
+		State:      queue.StateQueued,
+		ReceivedAt: now.Add(-1 * time.Minute),
+		NextRunAt:  now.Add(-10 * time.Second),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	blockCh := make(chan struct{})
+	var statsCalls atomic.Int64
+	store := &adminStatsOverrideStore{
+		Store: base,
+		statsFn: func() (queue.Stats, error) {
+			call := statsCalls.Add(1)
+			if call >= 2 {
+				<-blockCh
+			}
+			return base.Stats()
+		},
+	}
+
+	srv := NewServer(store)
+	srv.queueHealth.ttl = 0
+
+	// Warm cache.
+	req1 := httptest.NewRequest(http.MethodGet, "http://example/healthz?details=1", nil)
+	rr1 := httptest.NewRecorder()
+	srv.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first details call: expected 200, got %d", rr1.Code)
+	}
+
+	// Second call should return stale snapshot immediately while async refresh is blocked.
+	start := time.Now()
+	req2 := httptest.NewRequest(http.MethodGet, "http://example/healthz?details=1", nil)
+	rr2 := httptest.NewRecorder()
+	srv.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second details call: expected 200, got %d", rr2.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expected cached response to be fast, got %s", elapsed)
+	}
+
+	var out map[string]any
+	if err := json.NewDecoder(rr2.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	diag, ok := out["diagnostics"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected diagnostics object, got %T", out["diagnostics"])
+	}
+	queueDiag, ok := diag["queue"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected queue diagnostics object, got %T", diag["queue"])
+	}
+	if okVal, _ := queueDiag["ok"].(bool); !okVal {
+		t.Fatalf("expected queue diagnostics ok=true, got %#v", queueDiag)
+	}
+
+	close(blockCh)
 }
 
 func TestBacklogTrendsFromSamples_UsesTrendSignalConfig(t *testing.T) {
@@ -8611,4 +8681,16 @@ func TestServer_MessagesPublish_RejectsOversizedBody(t *testing.T) {
 	if !strings.Contains(resp.Detail, "exceeds") {
 		t.Fatalf("expected oversized-body detail, got %q", resp.Detail)
 	}
+}
+
+type adminStatsOverrideStore struct {
+	queue.Store
+	statsFn func() (queue.Stats, error)
+}
+
+func (s *adminStatsOverrideStore) Stats() (queue.Stats, error) {
+	if s == nil || s.statsFn == nil {
+		return queue.Stats{}, nil
+	}
+	return s.statsFn()
 }

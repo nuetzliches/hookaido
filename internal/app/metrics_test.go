@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,6 +211,55 @@ func TestMetricsHandler_QueueDepthNilStore(t *testing.T) {
 	if strings.Contains(body, "hookaido_queue_depth") {
 		t.Fatalf("queue_depth should not appear when store is nil:\n%s", body)
 	}
+}
+
+func TestMetricsHandler_UsesCachedQueueDepthWhenRefreshIsSlow(t *testing.T) {
+	base := queue.NewMemoryStore()
+	if err := base.Enqueue(queue.Envelope{ID: "evt_cache_1", Route: "/r", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	blockCh := make(chan struct{})
+	var statsCalls atomic.Int64
+	store := &appStatsOverrideStore{
+		Store: base,
+		statsFn: func() (queue.Stats, error) {
+			call := statsCalls.Add(1)
+			if call >= 2 {
+				<-blockCh
+			}
+			return base.Stats()
+		},
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+	m.queueStats.ttl = 0
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+
+	// Warm cache.
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("warm metrics status: got %d", rr1.Code)
+	}
+
+	// Second scrape should use stale cached depth while async refresh is blocked.
+	start := time.Now()
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second metrics status: got %d", rr2.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expected cached metrics response to be fast, got %s", elapsed)
+	}
+	if body := rr2.Body.String(); !strings.Contains(body, `hookaido_queue_depth{state="queued"} 1`) {
+		t.Fatalf("expected cached queue depth in metrics output:\n%s", body)
+	}
+
+	close(blockCh)
 }
 
 func TestMetricsHandler_SQLiteStoreRuntimeMetrics(t *testing.T) {
@@ -420,4 +470,16 @@ func TestMetricsPrefixRouting(t *testing.T) {
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("GET /metrics: got %d, want 404", rec2.Code)
 	}
+}
+
+type appStatsOverrideStore struct {
+	queue.Store
+	statsFn func() (queue.Stats, error)
+}
+
+func (s *appStatsOverrideStore) Stats() (queue.Stats, error) {
+	if s == nil || s.statsFn == nil {
+		return queue.Stats{}, nil
+	}
+	return s.statsFn()
 }

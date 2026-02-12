@@ -28,7 +28,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 - [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
 - [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
 - [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
-- [ ] **CII Best Practices badge** — Submit and maintain the OpenSSF best-practices badge questionnaire on bestpractices.dev (external/manual step).
+- [x] **~~CII Best Practices badge~~** — Moved to Completed.
 - [x] **~~Config `diff` CLI command~~** — `hookaido config diff old.hcl new.hcl` with exit code semantics (0=identical, 1=changed, 2=error); diff engine extracted to shared `config.FormatDiff`; 6 CLI tests (moved to Completed).
 - [x] **~~VS Code Extension (Hookaidofile)~~** — TextMate grammar, 18 snippets, file association for `Hookaidofile`/`.hookaido`/`.hkd` (moved to Completed). _Optional Phase 2: LSP backed by `config validate`/`config compile` for live diagnostics._
 - [x] **~~Graceful shutdown draining~~** — PushDispatcher uses internal stopCh+WaitGroup lifecycle; Drain(timeout) completes in-flight deliveries on SIGTERM; 3 drain unit tests + E2E coverage (moved to Completed).
@@ -37,6 +37,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## Completed (move here when done)
 
+- [x] **CII Best Practices badge** — OpenSSF Best Practices badge published at <https://www.bestpractices.dev/projects/11921>; `README.md` badge/link and docs references updated. Ongoing evidence/maintenance notes live in `docs/ossf-best-practices.md`.
 - [x] **Documentation UX refresh** — Refreshed docs information architecture in `mkdocs.yml` (grouped navigation), rebuilt `docs/index.md` with a landing hero + task-oriented quick paths, added command-palette style search shortcut (`Ctrl+K`) via `docs/assets/javascripts/command-palette.js`, added docs UX styling in `docs/assets/stylesheets/extra.css`, and documented docs-stack evaluation/decision in `docs/documentation-platform.md` (keep MkDocs Material for current roadmap window).
 - [x] **CII badge readiness docs** — Added `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`, `GOVERNANCE.md`, and `.github/CODEOWNERS`; linked governance/security docs from `README.md` and `docs/index.md` to prepare badge evidence links.
 - [x] **Scorecard: API visibility/auth follow-up** — Updated `scorecard.yml` with explicit read permissions (`contents`, `issues`, `pull-requests`, `checks`) to prevent check-run auth gaps, and added optional `SCORECARD_TOKEN` passthrough for classic branch-protection visibility.

@@ -6,6 +6,7 @@
 [![Dependency Health](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/nuetzliches/hookaido.svg)](https://pkg.go.dev/github.com/nuetzliches/hookaido)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nuetzliches/hookaido/badge)](https://scorecard.dev/viewer/?uri=github.com/nuetzliches/hookaido)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11921/badge)](https://www.bestpractices.dev/projects/11921)
 [![License](https://img.shields.io/github/license/nuetzliches/hookaido)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/nuetzliches/hookaido?include_prereleases&sort=semver)](https://github.com/nuetzliches/hookaido/releases)
 [![Container](https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/nuetzliches/hookaido/pkgs/container/hookaido)
@@ -207,6 +208,7 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 ## Maintainer Notes
 
 - OpenSSF Scorecard runs with `GITHUB_TOKEN` by default.
+- OpenSSF Best Practices badge page: <https://www.bestpractices.dev/projects/11921>.
 - If the repository uses **classic branch protection rules**, add a repository secret `SCORECARD_TOKEN` (fine-grained PAT with `Administration: Read-only`) so the `Branch-Protection` check can be evaluated fully.
 
 ## Documentation
@@ -215,7 +217,7 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 | -------------------------------- | ---------------------------------------------------------------------------- |
 | [docs/](docs/index.md)           | User-facing documentation (getting started, configuration, APIs, deployment) |
 | [docs/docker.md](docs/docker.md) | Docker / Docker Compose quickstart                                           |
-| [docs/ossf-best-practices.md](docs/ossf-best-practices.md) | OpenSSF badge evidence and checklist             |
+| [docs/ossf-best-practices.md](docs/ossf-best-practices.md) | OpenSSF badge maintenance notes (portal is status SoT) |
 | [DESIGN.md](DESIGN.md)           | Canonical DSL and API specification                                          |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and expectations                                      |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community conduct expectations                                       |

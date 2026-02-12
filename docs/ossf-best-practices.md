@@ -2,8 +2,14 @@
 
 This page tracks evidence and draft answers for the OpenSSF Best Practices Badge questionnaire.
 
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11921/badge)](https://www.bestpractices.dev/projects/11921)
+
+Badge status source of truth (SoT): <https://www.bestpractices.dev/projects/11921>.  
+This document is a project-maintained evidence map and answer-prep checklist.
+
 ## Badge Entry
 
+- Badge page (SoT): <https://www.bestpractices.dev/projects/11921>
 - Portal: <https://www.bestpractices.dev/>
 - Project repo: <https://github.com/nuetzliches/hookaido>
 - Last reviewed: 2026-02-12
@@ -78,8 +84,6 @@ Legend:
   - Evidence: `go build ./cmd/hookaido`, `Makefile`, OSS toolchain in `go.mod`
 - `static_analysis`, `static_analysis_often`, `static_analysis_common_vulnerabilities`
   - Evidence: CodeQL (`.github/workflows/codeql.yml`), govulncheck (`.github/workflows/dependency-health.yml`)
-- `static_analysis_fixed`
-  - Evidence: enforced PR + CI flow (`.artifacts/main-protection.json`, `.github/workflows/*`)
 - `vulnerability_report_process`, `vulnerability_report_private`
   - Evidence: `SECURITY.md` with private advisory link and coordinated disclosure policy
 - `delivery_unsigned`, `delivery_mitm`
@@ -91,12 +95,73 @@ Legend:
 - `maintained`
   - Evidence: active CI, release, dependency, and security workflows under `.github/workflows/`
 
+### Portal Text Snippets (High-Confidence Criteria)
+
+- `description_good`, `interact`, `english`, `documentation_basics`, `documentation_interface`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido provides clear, English, user-facing documentation of purpose, usage, and external interfaces in `README.md` and `docs/` (including configuration, ingress, pull/admin APIs, delivery, and deployment guidance)."
+- `repo_public`, `repo_track`, `repo_distributed`, `repo_interim`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Development is tracked in a public, distributed Git repository on GitHub with full commit history and interim development snapshots."
+- `floss_license`, `floss_license_osi`, `license_location`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido is released under an OSI-approved license (Apache-2.0), with license text available in `LICENSE` and referenced from `README.md`."
+- `version_tags`, `version_unique`, `version_semver`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Releases are uniquely tagged in GitHub using semantic versioning (`vMAJOR.MINOR.PATCH`), with release automation and changelog alignment."
+- `release_notes`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "User-visible release changes are documented via `CHANGELOG.md` and GitHub Releases."
+- `contribution`, `contribution_requirements`, `discussion`, `report_tracker`, `report_archive`, `report_process`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Contribution and reporting processes are documented (`CONTRIBUTING.md`, issue/PR templates), and all reports are tracked in the public GitHub issue/PR system."
+- `sites_https`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Project sites and artifacts are served via HTTPS (GitHub repository/docs/releases/workflows)."
+- `test`, `test_invocation`, `test_continuous_integration`, `test_most`, `test_policy`, `tests_are_added`, `tests_documented_added`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Automated tests are documented (`go test ./...`), run in CI on push/PR, and contribution guidance requires tests for behavior changes."
+- `build`, `build_common_tools`, `build_floss_tools`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido builds with common, FLOSS tooling (`go build`, `Makefile`, Go toolchain), with no proprietary build requirement."
+- `vulnerability_report_process`, `vulnerability_report_private`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "A documented vulnerability disclosure process exists in `SECURITY.md`, including private reporting through GitHub security advisories."
+- `delivery_unsigned`, `delivery_mitm`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Release delivery is protected by HTTPS transport and signed artifact verification (`verify-release` with required signature/SBOM checks)."
+- `know_secure_design`, `know_common_errors`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Secure design and common misuse/error guidance are documented in `docs/security.md` and `DESIGN.md`."
+- `no_leaked_credentials`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Repository policy and PR checks require that secrets are not committed; tracked examples use placeholder development values."
+- `maintained`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "The project is actively maintained with regular CI runs, release workflows, dependency updates, and security scanning."
+
 ### Likely `Yes`, But `Manual confirm`
 
 - `report_responses`, `enhancement_responses`
   - Confirm from issue/PR response history in GitHub UI.
 - `vulnerability_report_response`
   - `SECURITY.md` defines response targets; confirm process adherence in practice.
+- `static_analysis_fixed`
+  - Confirm from current alert backlog/triage state at submission time.
 - `vulnerabilities_critical_fixed`, `vulnerabilities_fixed_60_days`
   - Confirm vulnerability history/remediation timelines in advisories/issues.
 - `release_notes_vulns`
@@ -125,16 +190,110 @@ Use these snippets directly in the questionnaire comment/evidence fields and adj
   - Suggested text:
     - "Release notes are published through GitHub Releases and `CHANGELOG.md`; `SECURITY.md` states that once a fix is available, maintainers publish release notes and a security advisory when applicable."
 
+### Portal Text Snippets (Static Analysis Criteria)
+
+- `static_analysis`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido uses static analysis in CI, including CodeQL (`.github/workflows/codeql.yml`) and `go vet` (`make lint`)."
+- `static_analysis_often`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Static analysis runs regularly on push/PR and scheduled workflows (CodeQL and dependency-health/govulncheck jobs)."
+- `static_analysis_common_vulnerabilities`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "CodeQL and govulncheck are used to detect common vulnerability classes in Go code and dependencies."
+- `static_analysis_fixed`
+  - Suggested answer: `Manual confirm`
+  - Suggested text:
+    - "Before submission, confirm that current static-analysis findings are fixed or explicitly triaged/accepted per project policy."
+
+### Portal Text Snippets (Requested Security Criteria)
+
+Use these snippets for the criteria that were flagged as wording-sensitive during review.
+
+- `crypto_call`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido uses standard, well-vetted cryptography libraries (Go `crypto/*`) and does not implement custom cryptographic primitives."
+- `crypto_floss`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "The cryptographic functionality used by Hookaido is provided by FLOSS components (Go standard library and open-source dependencies)."
+- `crypto_keylength`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido uses modern cryptographic mechanisms (HMAC-SHA256, Ed25519, TLS from Go's maintained stack) and does not rely on weak key-length defaults."
+- `crypto_working`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido's security-sensitive paths use currently accepted algorithms (for example HMAC-SHA256 and Ed25519), not deprecated broken primitives."
+- `crypto_weaknesses`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Security mechanisms in Hookaido avoid algorithms and modes with known severe weaknesses; defaults and documentation focus on standard secure primitives."
+- `crypto_published`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido relies on publicly documented and peer-reviewed cryptographic standards and implementations (including HMAC-SHA256, TLS, and Ed25519)."
+- `crypto_pfs`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "When TLS is enabled, Hookaido uses Go's modern TLS implementation, which supports forward secrecy through ephemeral key exchange (noting deployment may terminate TLS at a reverse proxy)."
+- `crypto_password_storage`
+  - Suggested answer: `N/A`
+  - Suggested text:
+    - "Hookaido does not provide a user password database or account password storage feature; authentication is based on configured tokens/secrets and optional route basic-auth credentials."
+- `crypto_random`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Hookaido uses cryptographically secure randomness (`crypto/rand`) in security-relevant code paths."
+- `delivery_mitm`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Project delivery uses HTTPS channels (GitHub/GitHub Actions) and signed release verification steps, reducing MITM risk during artifact distribution."
+- `delivery_unsigned`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Release checksums are signed with Ed25519, and verification (`hookaido verify-release --require-signature`) is part of CI/release policy."
+- `vulnerabilities_fixed_60_days`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "As of 2026-02-12, the repository has no published GitHub security advisories, so there are no known unresolved vulnerabilities older than 60 days."
+- `vulnerabilities_critical_fixed`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "As of 2026-02-12, there are no published critical GitHub security advisories for this repository; `SECURITY.md` documents coordinated disclosure and remediation commitments."
+- `no_leaked_credentials`
+  - Suggested answer: `Yes`
+  - Suggested text:
+    - "Repository policy and PR checklist explicitly require that no credentials are committed, and tracked examples use development placeholders rather than production secrets."
+
 ### Review Carefully (wording-sensitive)
 
 - `dynamic_analysis`, `dynamic_analysis_fixed`, `dynamic_analysis_unsafe`
-  - Evidence exists via fuzzing (`.github/workflows/dependency-health.yml`), but questionnaire wording may expect broader dynamic tooling.
+  - Suggested answer:
+    - `dynamic_analysis`: `Yes`
+    - `dynamic_analysis_fixed`: `Manual confirm`
+    - `dynamic_analysis_unsafe`: `Yes`
+  - Suggested text:
+    - "Hookaido runs automated dynamic analysis via Go fuzz tests in `.github/workflows/dependency-health.yml` (e.g., `FuzzParseFormatRoundTrip`, `FuzzPullAPIServer`, `FuzzHMACAuthVerify`). These targets exercise untrusted/unsafe input paths; confirm at submission time that any discovered dynamic-analysis findings are fixed or explicitly tracked."
 - `dynamic_analysis_enable_assertions`
-  - Go does not have a universal "assertions build mode"; answer according to criterion wording and documented equivalent practice.
+  - Suggested answer: `N/A`
+  - Suggested text:
+    - "Go does not provide a universal project-level assertions build mode comparable to C/C++ assertions toggles; equivalent invariants are covered through tests and runtime checks."
 - `warnings`, `warnings_fixed`, `warnings_strict`
-  - Go has limited compiler-warning model; map to `go vet`, CI strictness, and fail-on-error behavior.
+  - Suggested answer:
+    - `warnings`: `Yes`
+    - `warnings_fixed`: `Manual confirm`
+    - `warnings_strict`: `No` (current state)
+  - Suggested text:
+    - "Static analysis is enabled (CodeQL workflow and `go vet` via `make lint`). Confirm at submission time that warning-level findings are fixed or explicitly accepted. Branch protection currently enforces test and release-package checks, but does not require dedicated warning/static-analysis jobs as strict merge blockers."
 - `crypto_call`, `crypto_floss`, `crypto_keylength`, `crypto_random`, `crypto_working`, `crypto_weaknesses`, `crypto_published`, `crypto_pfs`, `crypto_password_storage`
-  - Security design is documented (`docs/security.md`, `DESIGN.md`) and uses standard libraries/protocols; exact answers depend on criterion details and whether a criterion is applicable (`N/A`) to Hookaido's threat model.
+  - Suggested answer: see dedicated snippets above
+  - Suggested text:
+    - "Use the dedicated crypto snippets above and validate final wording against the exact portal criterion text at submission time."
 
 ## Suggested Fill Order
 
@@ -144,7 +303,6 @@ Use these snippets directly in the questionnaire comment/evidence fields and adj
 
 ## Remaining Manual Steps
 
-1. Create/confirm the project entry on `bestpractices.dev`.
-2. Fill questionnaire answers using the draft above and evidence links.
-3. Record badge URL in `README.md` once issued.
-4. Keep this page updated as policies/workflows change.
+1. Keep `bestpractices.dev` answers aligned with current repository state after security/process changes.
+2. Re-review this page when workflows, policies, or release/security controls change.
+3. Keep README/docs badge links aligned with the current badge URL.

@@ -69,7 +69,7 @@ graph LR
 | [Management Model](management-model.md) | Application and endpoint mapping semantics |
 | [MCP Integration](mcp.md) | Tooling model, roles, and runtime controls |
 | [Docs Platform Decision](documentation-platform.md) | Why docs currently stay on MkDocs Material |
-| [OpenSSF Best Practices](ossf-best-practices.md) | Badge evidence links and maintenance checklist |
+| [OpenSSF Best Practices](ossf-best-practices.md) | Badge maintenance notes (portal page is status SoT) |
 
 ## Project Links
 

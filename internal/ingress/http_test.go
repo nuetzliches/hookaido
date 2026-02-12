@@ -159,6 +159,52 @@ func TestIngress_RateLimited(t *testing.T) {
 	}
 }
 
+func TestIngress_AdaptiveBackpressureRejected(t *testing.T) {
+	store := queue.NewMemoryStore()
+	srv := NewServer(store)
+	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
+		if router.MatchPath(requestPath, "/webhooks/github") {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+	srv.AllowEnqueueFor = func(route string) (bool, int, string) {
+		if route == "/webhooks/github" {
+			return false, http.StatusServiceUnavailable, "ready_lag"
+		}
+		return true, 0, ""
+	}
+
+	var (
+		observedAccepted bool
+		observedEnqueued int
+		observedReason   string
+	)
+	srv.ObserveResult = func(accepted bool, enqueued int) {
+		observedAccepted = accepted
+		observedEnqueued = enqueued
+	}
+	srv.ObserveAdaptiveReject = func(_ string, reason string) {
+		observedReason = reason
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/webhooks/github", strings.NewReader(`{"x":1}`))
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rr.Code)
+	}
+	if observedAccepted {
+		t.Fatal("expected ObserveResult accepted=false")
+	}
+	if observedEnqueued != 0 {
+		t.Fatalf("expected enqueued=0, got %d", observedEnqueued)
+	}
+	if observedReason != "ready_lag" {
+		t.Fatalf("expected reason ready_lag, got %q", observedReason)
+	}
+}
+
 func TestIngress_HMACAuth_ReplayRejected(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now

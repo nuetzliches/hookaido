@@ -315,8 +315,25 @@ defaults {
     queued_pressure_percent 75
     queued_pressure_leased_multiplier 2
   }
+
+  adaptive_backpressure {
+    enabled off
+    min_total 200
+    queued_percent 80
+    ready_lag 30s
+    oldest_queued_age 60s
+    sustained_growth on
+  }
 }
 ```
+
+`adaptive_backpressure` is an optional soft-pressure ingress guardrail that applies `503` before hard `queue_limits.max_depth` is reached.
+- `enabled`: turn adaptive backpressure on/off.
+- `min_total`: minimum queue total (`queued+leased+dead`) before guardrails evaluate.
+- `queued_percent`: reject when queued share reaches this percentage.
+- `ready_lag`: reject when queue `ready_lag_seconds` reaches this duration.
+- `oldest_queued_age`: reject when `oldest_queued_age_seconds` reaches this duration.
+- `sustained_growth`: when `on`, also reject on sustained backlog growth signals (if trend samples are available).
 
 ### `observability`
 
@@ -507,6 +524,12 @@ Placeholders resolve within a single value (no cross-token expansion).
 | `deliver.retry`                  | `exponential max 8 base 2s cap 2m jitter 0.2` |
 | `deliver.timeout`                | `10s`                                         |
 | `deliver.concurrency`            | `20`                                          |
+| `defaults.adaptive_backpressure.enabled` | `false`                              |
+| `defaults.adaptive_backpressure.min_total` | `200`                               |
+| `defaults.adaptive_backpressure.queued_percent` | `80`                         |
+| `defaults.adaptive_backpressure.ready_lag` | `30s`                              |
+| `defaults.adaptive_backpressure.oldest_queued_age` | `60s`                     |
+| `defaults.adaptive_backpressure.sustained_growth` | `true`                      |
 | `pull_api.max_batch`             | `100`                                         |
 | `pull_api.default_lease_ttl`     | `30s`                                         |
 

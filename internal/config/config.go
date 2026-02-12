@@ -57,6 +57,8 @@ type DefaultsBlock struct {
 
 	Deliver      *DeliverBlock
 	TrendSignals *TrendSignalsBlock
+
+	AdaptiveBackpressure *AdaptiveBackpressureBlock
 }
 
 type VarsBlock struct {
@@ -672,6 +674,32 @@ type TrendSignalsBlock struct {
 	QueuedPressureLeasedMultiplier       string
 	QueuedPressureLeasedMultiplierQuoted bool
 	QueuedPressureLeasedMultiplierSet    bool
+}
+
+type AdaptiveBackpressureBlock struct {
+	Enabled       string
+	EnabledQuoted bool
+	EnabledSet    bool
+
+	MinTotal       string
+	MinTotalQuoted bool
+	MinTotalSet    bool
+
+	QueuedPercent       string
+	QueuedPercentQuoted bool
+	QueuedPercentSet    bool
+
+	ReadyLag       string
+	ReadyLagQuoted bool
+	ReadyLagSet    bool
+
+	OldestQueuedAge       string
+	OldestQueuedAgeQuoted bool
+	OldestQueuedAgeSet    bool
+
+	SustainedGrowth       string
+	SustainedGrowthQuoted bool
+	SustainedGrowthSet    bool
 }
 
 type RetryBlock struct {

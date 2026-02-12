@@ -287,33 +287,37 @@ func run() int {
 }
 
 type runtimeState struct {
-	mu                 sync.RWMutex
-	routes             []config.CompiledRoute
-	pathToRoute        map[string]string
-	trendSignals       config.TrendSignalsConfig
-	pullAuthorize      pullapi.Authorizer
-	adminAuthorize     admin.Authorizer
-	pullByRoute        map[string]pullapi.Authorizer
-	basicByRoute       map[string]*ingress.BasicAuth
-	forwardByRoute     map[string]*ingress.ForwardAuth
-	hmacByRoute        map[string]*ingress.HMACAuth
-	ingressGlobalLimit *tokenBucketLimiter
-	ingressRouteLimits map[string]*tokenBucketLimiter
-	now                func() time.Time
+	mu                   sync.RWMutex
+	routes               []config.CompiledRoute
+	pathToRoute          map[string]string
+	trendSignals         config.TrendSignalsConfig
+	adaptiveBackpressure config.AdaptiveBackpressureConfig
+	pullAuthorize        pullapi.Authorizer
+	adminAuthorize       admin.Authorizer
+	pullByRoute          map[string]pullapi.Authorizer
+	basicByRoute         map[string]*ingress.BasicAuth
+	forwardByRoute       map[string]*ingress.ForwardAuth
+	hmacByRoute          map[string]*ingress.HMACAuth
+	ingressGlobalLimit   *tokenBucketLimiter
+	ingressRouteLimits   map[string]*tokenBucketLimiter
+	adaptiveController   *adaptiveAdmissionController
+	now                  func() time.Time
 }
 
 func newRuntimeState(compiled config.Compiled) *runtimeState {
 	s := &runtimeState{
-		routes:             compiled.Routes,
-		pathToRoute:        compiled.PathToRoute,
-		trendSignals:       compiled.Defaults.TrendSignals,
-		pullByRoute:        make(map[string]pullapi.Authorizer),
-		basicByRoute:       make(map[string]*ingress.BasicAuth),
-		forwardByRoute:     make(map[string]*ingress.ForwardAuth),
-		hmacByRoute:        make(map[string]*ingress.HMACAuth),
-		ingressRouteLimits: make(map[string]*tokenBucketLimiter),
-		now:                time.Now,
+		routes:               compiled.Routes,
+		pathToRoute:          compiled.PathToRoute,
+		trendSignals:         compiled.Defaults.TrendSignals,
+		adaptiveBackpressure: compiled.Defaults.AdaptiveBackpressure,
+		pullByRoute:          make(map[string]pullapi.Authorizer),
+		basicByRoute:         make(map[string]*ingress.BasicAuth),
+		forwardByRoute:       make(map[string]*ingress.ForwardAuth),
+		hmacByRoute:          make(map[string]*ingress.HMACAuth),
+		ingressRouteLimits:   make(map[string]*tokenBucketLimiter),
+		now:                  time.Now,
 	}
+	s.adaptiveController = newAdaptiveAdmissionController(compiled.Defaults.AdaptiveBackpressure, compiled.Defaults.TrendSignals)
 	s.configureIngressRateLimits(compiled)
 	return s
 }
@@ -324,6 +328,10 @@ func (s *runtimeState) updateAll(compiled config.Compiled) {
 	s.routes = compiled.Routes
 	s.pathToRoute = compiled.PathToRoute
 	s.trendSignals = compiled.Defaults.TrendSignals
+	s.adaptiveBackpressure = compiled.Defaults.AdaptiveBackpressure
+	if s.adaptiveController != nil {
+		s.adaptiveController.updateConfig(compiled.Defaults.AdaptiveBackpressure, compiled.Defaults.TrendSignals)
+	}
 	s.configureIngressRateLimits(compiled)
 }
 
@@ -365,6 +373,29 @@ func (s *runtimeState) allowIngress(route string) bool {
 		return s.ingressGlobalLimit.AllowAt(now)
 	}
 	return true
+}
+
+func (s *runtimeState) allowIngressEnqueue(_ string) (bool, int, string) {
+	s.mu.RLock()
+	controller := s.adaptiveController
+	s.mu.RUnlock()
+	if controller == nil {
+		return true, 0, ""
+	}
+	apply, reason := controller.evaluate()
+	if !apply {
+		return true, 0, ""
+	}
+	return false, http.StatusServiceUnavailable, reason
+}
+
+func (s *runtimeState) setQueueStore(store queue.Store) {
+	s.mu.RLock()
+	controller := s.adaptiveController
+	s.mu.RUnlock()
+	if controller != nil {
+		controller.setStore(store)
+	}
 }
 
 func (s *runtimeState) resolveIngress(r *http.Request, requestPath string) (string, bool) {
@@ -1683,11 +1714,13 @@ func startServers(
 	if runtimeLogger == nil {
 		runtimeLogger = slog.Default()
 	}
+	state.setQueueStore(store)
 
 	ing := ingress.NewServer(store)
 	ing.ResolveRoute = state.resolveIngress
 	ing.AllowedMethodsFor = state.allowedMethodsFor
 	ing.AllowRequestFor = state.allowIngress
+	ing.AllowEnqueueFor = state.allowIngressEnqueue
 	ing.BasicAuthFor = state.basicAuthFor
 	ing.ForwardAuthFor = state.forwardAuthFor
 	ing.HMACAuthFor = state.hmacAuthFor
@@ -1696,7 +1729,14 @@ func startServers(
 	ing.MaxBodyBytes = compiled.Defaults.MaxBodyBytes
 	ing.MaxHeaderBytes = compiled.Defaults.MaxHeaderBytes
 	ing.ObserveResult = func(accepted bool, enqueued int) {
-		appMetrics.observeIngressResult(accepted, enqueued)
+		if appMetrics != nil {
+			appMetrics.observeIngressResult(accepted, enqueued)
+		}
+	}
+	ing.ObserveAdaptiveReject = func(_ string, reason string) {
+		if appMetrics != nil {
+			appMetrics.observeIngressAdaptiveBackpressure(reason)
+		}
 	}
 
 	pullHandler := pullapi.NewServer(store)

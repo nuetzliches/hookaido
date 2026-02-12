@@ -12,19 +12,21 @@ import (
 )
 
 type Server struct {
-	Store             queue.Store
-	Target            string
-	ResolveRoute      func(r *http.Request, requestPath string) (route string, ok bool)
-	AllowedMethodsFor func(r *http.Request, requestPath string) []string
-	AllowRequestFor   func(route string) bool
-	BasicAuthFor      func(route string) *BasicAuth
-	ForwardAuthFor    func(route string) *ForwardAuth
-	HMACAuthFor       func(route string) *HMACAuth
-	LimitsFor         func(route string) (maxBodyBytes int64, maxHeaderBytes int)
-	TargetsFor        func(route string) []string
-	ObserveResult     func(accepted bool, enqueued int)
-	MaxBodyBytes      int64
-	MaxHeaderBytes    int
+	Store                 queue.Store
+	Target                string
+	ResolveRoute          func(r *http.Request, requestPath string) (route string, ok bool)
+	AllowedMethodsFor     func(r *http.Request, requestPath string) []string
+	AllowRequestFor       func(route string) bool
+	AllowEnqueueFor       func(route string) (allowed bool, statusCode int, reason string)
+	BasicAuthFor          func(route string) *BasicAuth
+	ForwardAuthFor        func(route string) *ForwardAuth
+	HMACAuthFor           func(route string) *HMACAuth
+	LimitsFor             func(route string) (maxBodyBytes int64, maxHeaderBytes int)
+	TargetsFor            func(route string) []string
+	ObserveResult         func(accepted bool, enqueued int)
+	ObserveAdaptiveReject func(route string, reason string)
+	MaxBodyBytes          int64
+	MaxHeaderBytes        int
 }
 
 func NewServer(store queue.Store) *Server {
@@ -59,6 +61,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		s.observe(false, 0)
 		return
+	}
+	if s.AllowEnqueueFor != nil {
+		allowed, statusCode, reason := s.AllowEnqueueFor(route)
+		if !allowed {
+			if statusCode <= 0 {
+				statusCode = http.StatusServiceUnavailable
+			}
+			w.WriteHeader(statusCode)
+			s.observe(false, 0)
+			if s.ObserveAdaptiveReject != nil {
+				s.ObserveAdaptiveReject(route, strings.TrimSpace(reason))
+			}
+			return
+		}
 	}
 
 	if s.BasicAuthFor != nil {

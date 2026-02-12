@@ -14,6 +14,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Optional strict secret preflight in config validation: `hookaido config validate --strict-secrets` and MCP `config_validate` argument `strict_secrets` now actively load refs to catch missing env vars, unreadable files, and Vault connectivity/access issues before runtime start.
 - First-class Pull Prometheus metrics by route: dequeue totals (`status` labels `200|204|4xx|5xx`), ack/nack totals, ack/nack conflict totals, active lease gauge, and lease-expired totals.
 - SQLite/store contention metrics on `/metrics`: write/dequeue/checkpoint duration histograms plus busy/retry, transaction commit/rollback, and checkpoint success/error counters.
+- Adaptive ingress backpressure guardrails (`defaults.adaptive_backpressure`) with soft-pressure 503 admission before hard `max_depth`, plus reason-labeled Prometheus counters and health diagnostics (`adaptive_backpressure_applied_total`, `adaptive_backpressure_by_reason`).
 
 ### Changed
 
@@ -21,6 +22,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - CI now runs on pull requests and pushes to `main` only, and cancels superseded in-progress runs per ref to reduce duplicate workflow executions.
 - Release workflow now exports Sigstore attestation bundles as `*.intoto.jsonl` assets (plus compatibility `*.attestation.json` copies), and `hookaido verify-release` now auto-detects either naming scheme with `.intoto.jsonl` preference.
 - Control-plane hardening under saturation: `/metrics` queue depth and `/healthz?details=1` queue diagnostics now use short-TTL stale-while-refresh snapshots, reducing contention-coupled latency spikes during high queue pressure.
+- SQLite `max_depth` admission checks now use trigger-maintained active-depth counters (`queue_counters`) instead of per-enqueue `COUNT(*)` scans, reducing write-path contention near saturation.
 
 ### Fixed
 

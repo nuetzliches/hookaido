@@ -19,7 +19,7 @@ import (
 	sqlite3 "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 const backlogTrendRetention = 30 * 24 * time.Hour
 const defaultSQLiteCheckpointInterval = time.Minute
 
@@ -108,6 +108,44 @@ CREATE INDEX IF NOT EXISTS idx_backlog_trend_time
   ON backlog_trend_samples(captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_backlog_trend_route_target_time
   ON backlog_trend_samples(route, target, captured_at DESC);
+`
+
+const schemaV6 = `
+CREATE TABLE IF NOT EXISTS queue_counters (
+  id     INTEGER PRIMARY KEY CHECK (id = 1),
+  queued INTEGER NOT NULL,
+  leased INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO queue_counters(id, queued, leased)
+VALUES (1, 0, 0);
+UPDATE queue_counters
+SET queued = COALESCE((SELECT COUNT(*) FROM queue_items WHERE state = 'queued'), 0),
+    leased = COALESCE((SELECT COUNT(*) FROM queue_items WHERE state = 'leased'), 0)
+WHERE id = 1;
+CREATE TRIGGER IF NOT EXISTS trg_queue_items_counter_insert
+AFTER INSERT ON queue_items
+BEGIN
+  UPDATE queue_counters
+  SET queued = queued + CASE WHEN NEW.state = 'queued' THEN 1 ELSE 0 END,
+      leased = leased + CASE WHEN NEW.state = 'leased' THEN 1 ELSE 0 END
+  WHERE id = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_queue_items_counter_delete
+AFTER DELETE ON queue_items
+BEGIN
+  UPDATE queue_counters
+  SET queued = queued - CASE WHEN OLD.state = 'queued' THEN 1 ELSE 0 END,
+      leased = leased - CASE WHEN OLD.state = 'leased' THEN 1 ELSE 0 END
+  WHERE id = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_queue_items_counter_state_update
+AFTER UPDATE OF state ON queue_items
+BEGIN
+  UPDATE queue_counters
+  SET queued = queued + CASE WHEN NEW.state = 'queued' THEN 1 ELSE 0 END - CASE WHEN OLD.state = 'queued' THEN 1 ELSE 0 END,
+      leased = leased + CASE WHEN NEW.state = 'leased' THEN 1 ELSE 0 END - CASE WHEN OLD.state = 'leased' THEN 1 ELSE 0 END
+  WHERE id = 1;
+END;
 `
 
 type SQLiteOption func(*SQLiteStore)
@@ -421,6 +459,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 			if _, err := conn.ExecContext(ctx, schemaV5); err != nil {
 				return fmt.Errorf("sqlite: migrate v5: %w", err)
 			}
+		case 6:
+			if _, err := conn.ExecContext(ctx, schemaV6); err != nil {
+				return fmt.Errorf("sqlite: migrate v6: %w", err)
+			}
 		default:
 			return fmt.Errorf("sqlite: unknown migration %d", v)
 		}
@@ -555,12 +597,7 @@ func (s *SQLiteStore) enqueueWithLimit(env Envelope, headersJSON any, traceJSON 
 		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 	}()
 
-	var count int
-	err = conn.QueryRowContext(ctx, `
-SELECT COUNT(*)
-FROM queue_items
-WHERE state IN (?, ?);
-`, string(StateQueued), string(StateLeased)).Scan(&count)
+	count, err := s.activeDepthCountTx(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -615,6 +652,33 @@ INSERT INTO queue_items (
 	committed = true
 	s.signal()
 	return nil
+}
+
+func (s *SQLiteStore) activeDepthCountTx(ctx context.Context, conn *sql.Conn) (int, error) {
+	var queued int
+	var leased int
+	err := conn.QueryRowContext(ctx, `
+SELECT queued, leased
+FROM queue_counters
+WHERE id = 1;
+`).Scan(&queued, &leased)
+	if err == nil {
+		return queued + leased, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) && !isSQLiteMissingCounterError(err) {
+		return 0, err
+	}
+
+	// Fallback for databases created before counter migration initialization.
+	var count int
+	if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM queue_items
+WHERE state IN (?, ?);
+`, string(StateQueued), string(StateLeased)).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // EnqueueBatch atomically enqueues all items or none (all-or-nothing) in a
@@ -695,10 +759,8 @@ func (s *SQLiteStore) EnqueueBatch(items []Envelope) (int, error) {
 
 	// Check depth limit for all items at once.
 	if s.maxDepth > 0 {
-		var count int
-		if err := conn.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM queue_items WHERE state IN (?, ?);
-`, string(StateQueued), string(StateLeased)).Scan(&count); err != nil {
+		count, err := s.activeDepthCountTx(ctx, conn)
+		if err != nil {
 			return 0, err
 		}
 		needed := count + len(prepared)
@@ -2617,4 +2679,12 @@ func isSQLiteBusyError(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "database is locked") || strings.Contains(text, "database is busy")
+}
+
+func isSQLiteMissingCounterError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no such table: queue_counters")
 }

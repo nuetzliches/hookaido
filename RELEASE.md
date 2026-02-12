@@ -136,6 +136,8 @@ Notes:
   - `<checksums>.sig`
   - `<checksums>.pub.pem`
 - If `--sbom` is omitted, verifier auto-detects one `*_sbom.spdx.json` entry from checksums.
+- If `--provenance` is omitted, verifier auto-detects `*_provenance.intoto.jsonl` and falls back to `*_provenance.attestation.json`.
+- If `--sbom-attestation` is omitted, verifier auto-detects `*_sbom.intoto.jsonl` and falls back to `*_sbom.attestation.json`.
 - `--base-dir` can be used when artifact files are not beside the checksums file.
 
 ## 7. Upload Automation Policy
@@ -150,6 +152,8 @@ Tag-based release workflow is defined in `.github/workflows/release.yml`.
   - `actions/attest-build-provenance@v3` for release artifacts (`subject-checksums`)
   - `actions/attest-sbom@v3` bound to `hookaido_<version>_sbom.spdx.json`
 - Exported attestation bundles:
+  - `hookaido_<version>_provenance.intoto.jsonl`
+  - `hookaido_<version>_sbom.intoto.jsonl`
   - `hookaido_<version>_provenance.attestation.json`
   - `hookaido_<version>_sbom.attestation.json`
 - Publish: uploads all `dist/*` files to GitHub Releases
@@ -185,6 +189,8 @@ For each release, verify that:
 
 1. `hookaido verify-release --require-signature --require-sbom` succeeds locally against the downloaded assets.
 2. Release assets include:
+   - `hookaido_<version>_provenance.intoto.jsonl`
+   - `hookaido_<version>_sbom.intoto.jsonl`
    - `hookaido_<version>_provenance.attestation.json`
    - `hookaido_<version>_sbom.attestation.json`
 3. Attestation bundles reference the same release subject checksums file that was published.
@@ -202,7 +208,7 @@ For each release, verify that:
    - checksum signature/public key
    - manifest
    - sbom
-   - provenance/sbom attestation bundles
+   - provenance/sbom attestation bundles (`*.intoto.jsonl` + compatibility `*.attestation.json`)
 4. Confirm workflow `container` succeeded and published:
    - `ghcr.io/nuetzliches/hookaido:vX.Y.Z`
    - `ghcr.io/nuetzliches/hookaido:latest`

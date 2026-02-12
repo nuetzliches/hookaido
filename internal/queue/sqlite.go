@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,22 @@ import (
 
 const schemaVersion = 5
 const backlogTrendRetention = 30 * 24 * time.Hour
+const defaultSQLiteCheckpointInterval = time.Minute
+
+var sqliteDurationHistogramBounds = []float64{
+	0.001, // 1ms
+	0.002, // 2ms
+	0.005, // 5ms
+	0.01,  // 10ms
+	0.025, // 25ms
+	0.05,  // 50ms
+	0.1,   // 100ms
+	0.25,  // 250ms
+	0.5,   // 500ms
+	1.0,   // 1s
+	2.0,   // 2s
+	5.0,   // 5s
+}
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS queue_items (
@@ -111,6 +128,16 @@ func WithSQLitePollInterval(d time.Duration) SQLiteOption {
 	}
 }
 
+func WithSQLiteCheckpointInterval(d time.Duration) SQLiteOption {
+	return func(s *SQLiteStore) {
+		if d > 0 {
+			s.checkpointInterval = d
+		} else {
+			s.checkpointInterval = 0
+		}
+	}
+}
+
 func WithSQLiteRetention(maxAge, pruneInterval time.Duration) SQLiteOption {
 	return func(s *SQLiteStore) {
 		if maxAge > 0 {
@@ -167,6 +194,89 @@ type SQLiteStore struct {
 	deliveredRetentionMaxAge time.Duration
 	dlqRetentionMaxAge       time.Duration
 	dlqMaxDepth              int
+	checkpointInterval       time.Duration
+	checkpointStop           chan struct{}
+	checkpointDone           chan struct{}
+
+	metrics *sqliteRuntimeMetrics
+}
+
+type sqliteRuntimeMetrics struct {
+	mu sync.Mutex
+
+	writeDuration      sqliteHistogram
+	dequeueDuration    sqliteHistogram
+	checkpointDuration sqliteHistogram
+
+	busyTotal            int64
+	retryTotal           int64
+	txCommitTotal        int64
+	txRollbackTotal      int64
+	checkpointTotal      int64
+	checkpointErrorTotal int64
+}
+
+type sqliteHistogram struct {
+	bounds []float64
+	counts []int64
+	count  int64
+	sum    float64
+}
+
+func newSQLiteRuntimeMetrics() *sqliteRuntimeMetrics {
+	return &sqliteRuntimeMetrics{
+		writeDuration:      newSQLiteHistogram(sqliteDurationHistogramBounds),
+		dequeueDuration:    newSQLiteHistogram(sqliteDurationHistogramBounds),
+		checkpointDuration: newSQLiteHistogram(sqliteDurationHistogramBounds),
+	}
+}
+
+func newSQLiteHistogram(bounds []float64) sqliteHistogram {
+	cp := append([]float64(nil), bounds...)
+	return sqliteHistogram{
+		bounds: cp,
+		counts: make([]int64, len(cp)+1), // +Inf
+	}
+}
+
+func (h *sqliteHistogram) observe(seconds float64) {
+	if h == nil {
+		return
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	idx := len(h.counts) - 1 // +Inf bucket
+	for i, bound := range h.bounds {
+		if seconds <= bound {
+			idx = i
+			break
+		}
+	}
+	h.counts[idx]++
+	h.count++
+	h.sum += seconds
+}
+
+func (h *sqliteHistogram) snapshot() HistogramSnapshot {
+	if h == nil {
+		return HistogramSnapshot{}
+	}
+	out := HistogramSnapshot{
+		Buckets: make([]HistogramBucket, 0, len(h.counts)),
+		Count:   h.count,
+		Sum:     h.sum,
+	}
+	cumulative := int64(0)
+	for i := range h.counts {
+		cumulative += h.counts[i]
+		le := math.Inf(1)
+		if i < len(h.bounds) {
+			le = h.bounds[i]
+		}
+		out.Buckets = append(out.Buckets, HistogramBucket{Le: le, Count: cumulative})
+	}
+	return out
 }
 
 func NewSQLiteStore(dbPath string, opts ...SQLiteOption) (*SQLiteStore, error) {
@@ -189,11 +299,13 @@ func NewSQLiteStore(dbPath string, opts ...SQLiteOption) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &SQLiteStore{
-		db:           db,
-		nowFn:        time.Now,
-		notify:       make(chan struct{}),
-		pollInterval: 25 * time.Millisecond,
-		dropPolicy:   "reject",
+		db:                 db,
+		nowFn:              time.Now,
+		notify:             make(chan struct{}),
+		pollInterval:       25 * time.Millisecond,
+		dropPolicy:         "reject",
+		metrics:            newSQLiteRuntimeMetrics(),
+		checkpointInterval: defaultSQLiteCheckpointInterval,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -203,6 +315,7 @@ func NewSQLiteStore(dbPath string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	s.startCheckpointLoop()
 
 	return s, nil
 }
@@ -219,6 +332,7 @@ func WithSQLiteQueueLimits(maxDepth int, dropPolicy string) SQLiteOption {
 }
 
 func (s *SQLiteStore) Close() error {
+	s.stopCheckpointLoop()
 	return s.db.Close()
 }
 
@@ -253,7 +367,8 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
 		return err
 	}
 	committed := false
@@ -261,7 +376,7 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 		if committed {
 			return
 		}
-		_, _ = conn.ExecContext(ctx, "ROLLBACK;")
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 	}()
 
 	if _, err := conn.ExecContext(ctx, `
@@ -317,7 +432,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 		return err
 	}
 	committed = true
@@ -388,6 +503,7 @@ func (s *SQLiteStore) Enqueue(env Envelope) error {
 		return s.enqueueWithLimit(env, headersJSON, traceJSON)
 	}
 
+	startedAt := time.Now()
 	_, err = s.db.ExecContext(context.Background(), `
 INSERT INTO queue_items (
   id, route, target, state, received_at, attempt, next_run_at,
@@ -409,9 +525,12 @@ INSERT INTO queue_items (
 		deadReason,
 	)
 	if err != nil {
+		s.observeSQLiteError(err)
+		s.observeSQLiteTx(sqliteTxClassWrite, startedAt, false)
 		return mapQueueInsertError(err)
 	}
 
+	s.observeSQLiteTx(sqliteTxClassWrite, startedAt, true)
 	s.signal()
 	return nil
 }
@@ -424,7 +543,8 @@ func (s *SQLiteStore) enqueueWithLimit(env Envelope, headersJSON any, traceJSON 
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
 		return err
 	}
 	committed := false
@@ -432,7 +552,7 @@ func (s *SQLiteStore) enqueueWithLimit(env Envelope, headersJSON any, traceJSON 
 		if committed {
 			return
 		}
-		_, _ = conn.ExecContext(ctx, "ROLLBACK;")
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 	}()
 
 	var count int
@@ -489,7 +609,7 @@ INSERT INTO queue_items (
 		return mapQueueInsertError(err)
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 		return err
 	}
 	committed = true
@@ -562,13 +682,14 @@ func (s *SQLiteStore) EnqueueBatch(items []Envelope) (int, error) {
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
 		return 0, err
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK;")
+			s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 		}
 	}()
 
@@ -624,7 +745,7 @@ INSERT INTO queue_items (
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 		return 0, err
 	}
 	committed = true
@@ -796,7 +917,8 @@ func (s *SQLiteStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.D
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
 		return DequeueResponse{}, err
 	}
 	committed := false
@@ -804,7 +926,7 @@ func (s *SQLiteStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.D
 		if committed {
 			return
 		}
-		_, _ = conn.ExecContext(ctx, "ROLLBACK;")
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassDequeue)
 	}()
 
 	if err := s.requeueExpiredLeases(ctx, conn, now); err != nil {
@@ -898,7 +1020,7 @@ WHERE id = ? AND state = ?;
 		return DequeueResponse{}, err
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
 		return DequeueResponse{}, err
 	}
 	committed = true
@@ -1724,7 +1846,8 @@ GROUP BY route, target, state;
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
 		return err
 	}
 	committed := false
@@ -1732,7 +1855,7 @@ GROUP BY route, target, state;
 		if committed {
 			return
 		}
-		_, _ = conn.ExecContext(ctx, "ROLLBACK;")
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 	}()
 
 	capturedNanos := capturedAt.UnixNano()
@@ -1774,7 +1897,7 @@ VALUES (?, ?, ?, ?, ?, ?);
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 		return err
 	}
 	committed = true
@@ -2104,7 +2227,8 @@ func (s *SQLiteStore) withLease(leaseID string, fn func(ctx context.Context, con
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
 		return err
 	}
 	committed := false
@@ -2112,7 +2236,7 @@ func (s *SQLiteStore) withLease(leaseID string, fn func(ctx context.Context, con
 		if committed {
 			return
 		}
-		_, _ = conn.ExecContext(ctx, "ROLLBACK;")
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 	}()
 
 	var item leaseItem
@@ -2143,7 +2267,7 @@ LIMIT 1;
 
 	if err := fn(ctx, conn, item); err != nil {
 		if errors.Is(err, ErrLeaseExpired) {
-			if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+			if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 				return err
 			}
 			committed = true
@@ -2152,7 +2276,7 @@ LIMIT 1;
 		return err
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 		return err
 	}
 	committed = true
@@ -2205,6 +2329,205 @@ func (s *SQLiteStore) waitCh() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.notify
+}
+
+type sqliteTxClass int
+
+const (
+	sqliteTxClassWrite sqliteTxClass = iota
+	sqliteTxClassDequeue
+)
+
+func (s *SQLiteStore) RuntimeMetrics() StoreRuntimeMetrics {
+	out := StoreRuntimeMetrics{Backend: "sqlite"}
+	if s == nil || s.metrics == nil {
+		return out
+	}
+
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+
+	sqliteMetrics := &SQLiteRuntimeMetrics{
+		WriteDurationSeconds:      s.metrics.writeDuration.snapshot(),
+		DequeueDurationSeconds:    s.metrics.dequeueDuration.snapshot(),
+		CheckpointDurationSeconds: s.metrics.checkpointDuration.snapshot(),
+		BusyTotal:                 s.metrics.busyTotal,
+		RetryTotal:                s.metrics.retryTotal,
+		TxCommitTotal:             s.metrics.txCommitTotal,
+		TxRollbackTotal:           s.metrics.txRollbackTotal,
+		CheckpointTotal:           s.metrics.checkpointTotal,
+		CheckpointErrorTotal:      s.metrics.checkpointErrorTotal,
+	}
+	out.SQLite = sqliteMetrics
+	return out
+}
+
+func (s *SQLiteStore) beginImmediateWithRetry(ctx context.Context, conn *sql.Conn) (time.Time, error) {
+	const maxAttempts = 3
+	const baseBackoff = 2 * time.Millisecond
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+			s.observeSQLiteError(err)
+			if !isSQLiteBusyError(err) {
+				return time.Time{}, err
+			}
+			if attempt < maxAttempts-1 {
+				s.incSQLiteRetry()
+				time.Sleep(time.Duration(attempt+1) * baseBackoff)
+				continue
+			}
+			return time.Time{}, err
+		}
+		return time.Now(), nil
+	}
+	return time.Time{}, errors.New("sqlite: begin immediate retry exhausted")
+}
+
+func (s *SQLiteStore) commitTx(ctx context.Context, conn *sql.Conn, startedAt time.Time, class sqliteTxClass) error {
+	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
+		s.observeSQLiteError(err)
+		s.observeSQLiteTx(class, startedAt, false)
+		return err
+	}
+	s.observeSQLiteTx(class, startedAt, true)
+	return nil
+}
+
+func (s *SQLiteStore) rollbackTx(ctx context.Context, conn *sql.Conn, startedAt time.Time, class sqliteTxClass) {
+	if _, err := conn.ExecContext(ctx, "ROLLBACK;"); err != nil {
+		s.observeSQLiteError(err)
+		return
+	}
+	s.observeSQLiteTx(class, startedAt, false)
+}
+
+func (s *SQLiteStore) observeSQLiteTx(class sqliteTxClass, startedAt time.Time, committed bool) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	if startedAt.IsZero() {
+		return
+	}
+	seconds := time.Since(startedAt).Seconds()
+
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+
+	if committed {
+		s.metrics.txCommitTotal++
+	} else {
+		s.metrics.txRollbackTotal++
+	}
+	switch class {
+	case sqliteTxClassDequeue:
+		s.metrics.dequeueDuration.observe(seconds)
+	default:
+		s.metrics.writeDuration.observe(seconds)
+	}
+}
+
+func (s *SQLiteStore) observeSQLiteError(err error) {
+	if s == nil || s.metrics == nil || err == nil {
+		return
+	}
+	if !isSQLiteBusyError(err) {
+		return
+	}
+	s.metrics.mu.Lock()
+	s.metrics.busyTotal++
+	s.metrics.mu.Unlock()
+}
+
+func (s *SQLiteStore) incSQLiteRetry() {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	s.metrics.mu.Lock()
+	s.metrics.retryTotal++
+	s.metrics.mu.Unlock()
+}
+
+func (s *SQLiteStore) observeSQLiteCheckpoint(duration time.Duration, err error) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	seconds := duration.Seconds()
+	if seconds < 0 {
+		seconds = 0
+	}
+
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+
+	if err != nil {
+		s.metrics.checkpointErrorTotal++
+		s.metrics.checkpointDuration.observe(seconds)
+		return
+	}
+	s.metrics.checkpointTotal++
+	s.metrics.checkpointDuration.observe(seconds)
+}
+
+func (s *SQLiteStore) checkpointPassive() error {
+	startedAt := time.Now()
+	var busyPages int
+	var walPages int
+	var checkpointedPages int
+	err := s.db.QueryRowContext(context.Background(), "PRAGMA wal_checkpoint(PASSIVE);").
+		Scan(&busyPages, &walPages, &checkpointedPages)
+	s.observeSQLiteCheckpoint(time.Since(startedAt), err)
+	return err
+}
+
+func (s *SQLiteStore) startCheckpointLoop() {
+	if s == nil || s.checkpointInterval <= 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.checkpointStop != nil {
+		s.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	s.checkpointStop = stopCh
+	s.checkpointDone = doneCh
+	interval := s.checkpointInterval
+	s.mu.Unlock()
+
+	go func() {
+		defer close(doneCh)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				_ = s.checkpointPassive()
+			}
+		}
+	}()
+}
+
+func (s *SQLiteStore) stopCheckpointLoop() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	stopCh := s.checkpointStop
+	doneCh := s.checkpointDone
+	s.checkpointStop = nil
+	s.checkpointDone = nil
+	s.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+	}
+	if doneCh != nil {
+		<-doneCh
+	}
 }
 
 func marshalStringMap(in map[string]string) (any, error) {
@@ -2276,4 +2599,22 @@ func isSQLiteConstraintError(err error) bool {
 	// Extended sqlite result codes include base code in the lower 8 bits.
 	const sqliteConstraintBase = 19
 	return sqliteErr.Code()&0xff == sqliteConstraintBase
+}
+
+func isSQLiteBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		// Extended sqlite result codes include base code in the lower 8 bits.
+		const (
+			sqliteBusyBase   = 5
+			sqliteLockedBase = 6
+		)
+		base := sqliteErr.Code() & 0xff
+		return base == sqliteBusyBase || base == sqliteLockedBase
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "database is locked") || strings.Contains(text, "database is busy")
 }

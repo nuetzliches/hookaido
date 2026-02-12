@@ -238,6 +238,38 @@ type Stats struct {
 	TopQueued []BacklogBucket
 }
 
+type HistogramBucket struct {
+	Le    float64
+	Count int64
+}
+
+type HistogramSnapshot struct {
+	Buckets []HistogramBucket
+	Count   int64
+	Sum     float64
+}
+
+type SQLiteRuntimeMetrics struct {
+	WriteDurationSeconds      HistogramSnapshot
+	DequeueDurationSeconds    HistogramSnapshot
+	CheckpointDurationSeconds HistogramSnapshot
+	BusyTotal                 int64
+	RetryTotal                int64
+	TxCommitTotal             int64
+	TxRollbackTotal           int64
+	CheckpointTotal           int64
+	CheckpointErrorTotal      int64
+}
+
+type StoreRuntimeMetrics struct {
+	Backend string
+	SQLite  *SQLiteRuntimeMetrics
+}
+
+type RuntimeMetricsProvider interface {
+	RuntimeMetrics() StoreRuntimeMetrics
+}
+
 type Store interface {
 	Enqueue(env Envelope) error
 	Dequeue(req DequeueRequest) (DequeueResponse, error)

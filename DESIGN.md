@@ -224,10 +224,11 @@ Status codes (MVP):
 - 200 (dequeue; may return `items: []`)
 - 204 (ack/nack/extend)
 - 400 (invalid JSON body; unknown fields or trailing JSON documents are rejected)
-- 401/403 (auth)
+- 401 (auth)
+- 404 (pull endpoint or operation not found)
 - 409 (invalid/expired lease)
-- 429 (rate limit)
-- 503 (queue overload)
+- 500 (unexpected store failure)
+- 503 (store unavailable / queue overload)
 
 Error body (non-2xx):
 ```json

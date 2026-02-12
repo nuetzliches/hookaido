@@ -63,7 +63,7 @@ docker run -p 8080:8080 -p 9443:9443 \
   ghcr.io/nuetzliches/hookaido:latest
 ```
 
-For immutable deployments, pin to a release tag (for example `:v1.0.2`) or digest.
+For immutable deployments, pin to a release tag (for example `:v1.0.3`) or digest.
 
 **Run locally:**
 
@@ -192,7 +192,7 @@ Exposes queue state, config inspection, health diagnostics, and backlog analysis
 Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance attestations:
 
 ```bash
-./hookaido verify-release --checksums hookaido_v1.0.0_checksums.txt \
+./hookaido verify-release --checksums hookaido_v1.0.3_checksums.txt \
   --public-key release-signing-key.pub \
   --require-provenance
 ```

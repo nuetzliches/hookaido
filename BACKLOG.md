@@ -1,15 +1,16 @@
 # Backlog
 
-Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier and roughly ordered within each tier.
+Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and roughly ordered within each tier.
 
-## P0 — Must Have for v1.0
+## P0 - High Priority (v1.x)
 
-- [x] **~~Remaining DSL directives~~** — All directives from DESIGN.md now implemented (moved to Completed).- [x] **~~Runtime reload completeness~~** — Silent-bug reload guards fixed and full reload behavior documented (moved to Completed).
+- [x] **~~Remaining DSL directives~~** — All directives from DESIGN.md now implemented (moved to Completed).
+- [x] **~~Runtime reload completeness~~** — Silent-bug reload guards fixed and full reload behavior documented (moved to Completed).
 - [x] **~~Queue publish hardening~~** — Moved to Completed.
 - [x] **~~E2E test suite~~** — Moved to Completed.
 - [x] **~~SQLite WAL recovery tests~~** — Moved to Completed.
 
-## P1 — Should Have for v1.0
+## P1 - Medium Priority (v1.x)
 
 - [x] **~~Management model runtime wiring~~** — All Admin API management fields wired in `run.go` (moved to Completed).
 - [x] **~~Config `validate --format json`~~** — Parse/file errors now respect `--format` flag; 7 CLI tests added (moved to Completed).
@@ -18,7 +19,7 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 - [x] **~~MCP Admin-proxy mode tests~~** — Added resume_by_filter via admin proxy: scoped path, structured error, not-found fallback. ~198 MCP tests total (moved to Completed).
 - [x] **~~Attestation bundle validation~~** — `verify-release` now validates Sigstore DSSE/in-toto provenance and SBOM attestation bundles with `--require-provenance` flag, subject-digest cross-check, auto-detection; 7 new tests (moved to Completed).
 
-## P2 — Nice to Have / Post-v1.0
+## P2 - Nice to Have (v1.x / Phase 2)
 
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.
@@ -72,3 +73,4 @@ Prioritized work items for Hookaido pre-v1.0. Items are grouped by priority tier
 - [x] **VS Code Extension** — TextMate grammar for full DSL syntax highlighting (top-level blocks, route paths, directives, auth keywords, channel types, placeholders, durations, built-in constants). 18 snippets for common blocks. File association for `Hookaidofile`, `*.hookaido`, `*.hkd`. Located in `editors/vscode/`.
 - [x] **Score hardening pass (round 2)** — Ingress body-too-large 413 + body-read-error 400 tests, egress DNS resolver error test, memory store Extend edge cases (unknown lease, expired lease, zero-duration noop), pull API dequeue-store-error 503 + unknown-operation 404 tests.
 - [x] **Score hardening pass (round 3)** — Pull API Ack/Nack/MarkDead store-error + lease-expired paths (6 tests), config secrets validation edge cases (5 subtests), HTTP deliverer signing-header-missing error (4 subtests), SQLite Extend zero/negative noop test.
+

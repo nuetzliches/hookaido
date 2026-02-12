@@ -71,8 +71,8 @@ func runVerifyReleaseCmd(args []string, stdout, stderr io.Writer) int {
 	sbomPath := fs.String("sbom", "", "path to SPDX SBOM file (default: auto-detect *_sbom.spdx.json entry from checksums)")
 	requireSBOM := fs.Bool("require-sbom", false, "require SPDX SBOM presence and quality validation")
 	requireProvenance := fs.Bool("require-provenance", false, "require provenance attestation bundle validation")
-	provenancePath := fs.String("provenance", "", "path to provenance attestation bundle (default: auto-detect *_provenance.attestation.json)")
-	sbomAttestPath := fs.String("sbom-attestation", "", "path to SBOM attestation bundle (default: auto-detect *_sbom.attestation.json)")
+	provenancePath := fs.String("provenance", "", "path to provenance attestation bundle (default: auto-detect *_provenance.intoto.jsonl, fallback *_provenance.attestation.json)")
+	sbomAttestPath := fs.String("sbom-attestation", "", "path to SBOM attestation bundle (default: auto-detect *_sbom.intoto.jsonl, fallback *_sbom.attestation.json)")
 	jsonOutput := fs.Bool("json", false, "print JSON output")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "verify-release: %v\n", err)
@@ -227,7 +227,7 @@ func verifyReleaseArtifacts(opts verifyReleaseOptions) (verifyReleaseResult, err
 		checksumDigests[strings.ToLower(e.SHA256)] = e.File
 	}
 
-	provenancePath, err := resolveAttestationBundlePath(baseDir, entries, opts.ProvenancePath, "_provenance.attestation.json", opts.RequireProvenance, "provenance attestation")
+	provenancePath, err := resolveAttestationBundlePath(baseDir, entries, opts.ProvenancePath, provenanceBundleSuffixes, opts.RequireProvenance, "provenance attestation")
 	if err != nil {
 		return verifyReleaseResult{}, err
 	}
@@ -239,7 +239,7 @@ func verifyReleaseArtifacts(opts verifyReleaseOptions) (verifyReleaseResult, err
 		res.ProvenanceFile = filepath.ToSlash(provenancePath)
 	}
 
-	sbomAttestPath, err := resolveAttestationBundlePath(baseDir, entries, opts.SBOMAttestPath, "_sbom.attestation.json", opts.SBOMAttestPath != "", "sbom attestation")
+	sbomAttestPath, err := resolveAttestationBundlePath(baseDir, entries, opts.SBOMAttestPath, sbomBundleSuffixes, opts.SBOMAttestPath != "", "sbom attestation")
 	if err != nil {
 		return verifyReleaseResult{}, err
 	}
@@ -499,6 +499,11 @@ const (
 	sbomAttestPredicateType = "https://spdx.dev/Document/v2.3"
 )
 
+var (
+	provenanceBundleSuffixes = []string{"_provenance.intoto.jsonl", "_provenance.attestation.json"}
+	sbomBundleSuffixes       = []string{"_sbom.intoto.jsonl", "_sbom.attestation.json"}
+)
+
 // dsseEnvelope models a DSSE (Dead Simple Signing Envelope).
 type dsseEnvelope struct {
 	PayloadType string `json:"payloadType"`
@@ -523,7 +528,7 @@ type sigstoreBundle struct {
 	DSSEEnvelope *dsseEnvelope `json:"dsseEnvelope"`
 }
 
-func resolveAttestationBundlePath(baseDir string, entries []checksumEntry, explicit, suffix string, required bool, label string) (string, error) {
+func resolveAttestationBundlePath(baseDir string, entries []checksumEntry, explicit string, suffixes []string, required bool, label string) (string, error) {
 	explicit = strings.TrimSpace(explicit)
 	if explicit != "" {
 		if !filepath.IsAbs(explicit) {
@@ -532,42 +537,49 @@ func resolveAttestationBundlePath(baseDir string, entries []checksumEntry, expli
 		return filepath.Clean(explicit), nil
 	}
 
-	// Auto-detect: look in baseDir for files matching suffix.
-	candidates := make([]string, 0, 1)
-	dirEntries, _ := os.ReadDir(baseDir)
-	for _, de := range dirEntries {
-		if !de.IsDir() && strings.HasSuffix(de.Name(), suffix) {
-			candidates = append(candidates, filepath.Join(baseDir, de.Name()))
-		}
-	}
-	// Also check checksums entries for attestation bundles shipped alongside artifacts.
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.File, suffix) {
-			p := filepath.Clean(resolveArtifactPath(baseDir, entry.File))
-			found := false
-			for _, c := range candidates {
-				if c == p {
-					found = true
-					break
-				}
-			}
-			if !found {
-				candidates = append(candidates, p)
-			}
+	// Auto-detect: try suffixes in priority order.
+	for _, suffix := range suffixes {
+		candidates := collectAttestationBundleCandidates(baseDir, entries, suffix)
+		switch len(candidates) {
+		case 0:
+			continue
+		case 1:
+			return candidates[0], nil
+		default:
+			return "", fmt.Errorf("multiple %s bundle candidates found for suffix %q; specify path explicitly", label, suffix)
 		}
 	}
 
-	switch len(candidates) {
-	case 0:
-		if required {
-			return "", fmt.Errorf("%s required but no *%s file was found", label, suffix)
-		}
-		return "", nil
-	case 1:
-		return candidates[0], nil
-	default:
-		return "", fmt.Errorf("multiple %s bundle candidates found; specify path explicitly", label)
+	if required {
+		return "", fmt.Errorf("%s required but no bundle file was found (tried suffixes: %s)", label, strings.Join(suffixes, ", "))
 	}
+	return "", nil
+}
+
+func collectAttestationBundleCandidates(baseDir string, entries []checksumEntry, suffix string) []string {
+	candidateSet := make(map[string]struct{})
+
+	dirEntries, _ := os.ReadDir(baseDir)
+	for _, de := range dirEntries {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), suffix) {
+			continue
+		}
+		p := filepath.Clean(filepath.Join(baseDir, de.Name()))
+		candidateSet[p] = struct{}{}
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.File, suffix) {
+			continue
+		}
+		p := filepath.Clean(resolveArtifactPath(baseDir, entry.File))
+		candidateSet[p] = struct{}{}
+	}
+
+	candidates := make([]string, 0, len(candidateSet))
+	for p := range candidateSet {
+		candidates = append(candidates, p)
+	}
+	return candidates
 }
 
 func validateAttestationBundle(path string, checksumDigests map[string]string, expectedPredicate string) error {

@@ -150,6 +150,20 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_pull_lease_active`          | gauge   | Active Pull leases currently tracked by `route`                              |
 | `hookaido_pull_lease_expired_total`   | counter | Lease expirations observed during Pull `ack`/`nack`/`extend` by `route`      |
 
+**Store/SQLite metrics:**
+
+| Metric                                           | Type      | Description                                                                |
+| ------------------------------------------------ | --------- | -------------------------------------------------------------------------- |
+| `hookaido_store_sqlite_write_seconds`            | histogram | SQLite write transaction duration (queue mutation paths)                   |
+| `hookaido_store_sqlite_dequeue_seconds`          | histogram | SQLite dequeue transaction duration                                        |
+| `hookaido_store_sqlite_checkpoint_seconds`       | histogram | SQLite WAL checkpoint duration (periodic passive checkpoints)              |
+| `hookaido_store_sqlite_busy_total`               | counter   | SQLite busy/locked errors observed in instrumented paths                   |
+| `hookaido_store_sqlite_retry_total`              | counter   | SQLite begin-transaction retry attempts after busy/locked errors           |
+| `hookaido_store_sqlite_tx_commit_total`          | counter   | Committed SQLite transactions in instrumented queue paths                  |
+| `hookaido_store_sqlite_tx_rollback_total`        | counter   | Rolled-back SQLite transactions in instrumented queue paths                |
+| `hookaido_store_sqlite_checkpoint_total`         | counter   | Successful periodic SQLite WAL checkpoints                                 |
+| `hookaido_store_sqlite_checkpoint_errors_total`  | counter   | Failed periodic SQLite WAL checkpoints                                     |
+
 **Publish metrics:**
 
 | Metric                                       | Type    | Description                       |

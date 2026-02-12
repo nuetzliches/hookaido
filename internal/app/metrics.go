@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -746,6 +747,66 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 				_, _ = fmt.Fprintf(w, "hookaido_queue_depth{state=\"leased\"} %d\n", leased)
 				_, _ = fmt.Fprintf(w, "hookaido_queue_depth{state=\"dead\"} %d\n", dead)
 			}
+
+			if provider, ok := queueStore.(queue.RuntimeMetricsProvider); ok {
+				if runtime := provider.RuntimeMetrics(); runtime.SQLite != nil {
+					sqliteMetrics := runtime.SQLite
+					writePrometheusHistogram(
+						w,
+						"hookaido_store_sqlite_write_seconds",
+						"SQLite write transaction duration in seconds.",
+						sqliteMetrics.WriteDurationSeconds,
+					)
+					writePrometheusHistogram(
+						w,
+						"hookaido_store_sqlite_dequeue_seconds",
+						"SQLite dequeue transaction duration in seconds.",
+						sqliteMetrics.DequeueDurationSeconds,
+					)
+					writePrometheusHistogram(
+						w,
+						"hookaido_store_sqlite_checkpoint_seconds",
+						"SQLite WAL checkpoint duration in seconds.",
+						sqliteMetrics.CheckpointDurationSeconds,
+					)
+
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_busy_total Total number of SQLite busy/locked errors.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_busy_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_busy_total %d\n", sqliteMetrics.BusyTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_retry_total Total number of SQLite retry attempts after busy/locked errors.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_retry_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_retry_total %d\n", sqliteMetrics.RetryTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_tx_commit_total Total number of committed SQLite transactions in instrumented queue paths.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_tx_commit_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_tx_commit_total %d\n", sqliteMetrics.TxCommitTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_tx_rollback_total Total number of rolled-back SQLite transactions in instrumented queue paths.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_tx_rollback_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_tx_rollback_total %d\n", sqliteMetrics.TxRollbackTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_checkpoint_total Total number of periodic SQLite WAL checkpoints.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_checkpoint_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_checkpoint_total %d\n", sqliteMetrics.CheckpointTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_sqlite_checkpoint_errors_total Total number of periodic SQLite WAL checkpoint errors.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_sqlite_checkpoint_errors_total counter\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_sqlite_checkpoint_errors_total %d\n", sqliteMetrics.CheckpointErrorTotal)
+				}
+			}
 		}
 	})
+}
+
+func writePrometheusHistogram(w http.ResponseWriter, name string, help string, snapshot queue.HistogramSnapshot) {
+	_, _ = fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	_, _ = fmt.Fprintf(w, "# TYPE %s histogram\n", name)
+	for _, bucket := range snapshot.Buckets {
+		_, _ = fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", name, prometheusLe(bucket.Le), bucket.Count)
+	}
+	_, _ = fmt.Fprintf(w, "%s_sum %.9f\n", name, snapshot.Sum)
+	_, _ = fmt.Fprintf(w, "%s_count %d\n", name, snapshot.Count)
+}
+
+func prometheusLe(v float64) string {
+	if math.IsInf(v, 1) {
+		return "+Inf"
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }

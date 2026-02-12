@@ -3,6 +3,7 @@ package queue
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1248,6 +1249,69 @@ func TestSQLiteStore_QueueLimitsDropOldest(t *testing.T) {
 	}
 	if len(resp.Items) != 1 || resp.Items[0].ID != "evt_2" {
 		t.Fatalf("expected evt_2, got %#v", resp.Items)
+	}
+}
+
+func TestSQLiteStore_RuntimeMetrics(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
+	s, err := NewSQLiteStore(
+		dbPath,
+		WithSQLiteNowFunc(func() time.Time { return nowVar }),
+		WithSQLiteQueueLimits(10000, "reject"),
+		WithSQLiteCheckpointInterval(0),
+	)
+	if err != nil {
+		t.Fatalf("new sqlite store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected 1 dequeued item, got %d", len(resp.Items))
+	}
+	if err := s.Ack(resp.Items[0].LeaseID); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if err := s.checkpointPassive(); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+
+	rm := s.RuntimeMetrics()
+	if rm.Backend != "sqlite" {
+		t.Fatalf("backend: got %q, want sqlite", rm.Backend)
+	}
+	if rm.SQLite == nil {
+		t.Fatalf("expected sqlite runtime metrics")
+	}
+	if rm.SQLite.WriteDurationSeconds.Count == 0 {
+		t.Fatalf("expected write histogram count > 0")
+	}
+	if rm.SQLite.DequeueDurationSeconds.Count == 0 {
+		t.Fatalf("expected dequeue histogram count > 0")
+	}
+	if rm.SQLite.CheckpointDurationSeconds.Count == 0 {
+		t.Fatalf("expected checkpoint histogram count > 0")
+	}
+	if rm.SQLite.TxCommitTotal == 0 {
+		t.Fatalf("expected tx commit counter > 0")
+	}
+	if rm.SQLite.CheckpointTotal != 1 {
+		t.Fatalf("expected checkpoint_total=1, got %d", rm.SQLite.CheckpointTotal)
+	}
+	if len(rm.SQLite.WriteDurationSeconds.Buckets) == 0 {
+		t.Fatalf("expected write histogram buckets")
+	}
+	last := rm.SQLite.WriteDurationSeconds.Buckets[len(rm.SQLite.WriteDurationSeconds.Buckets)-1]
+	if !math.IsInf(last.Le, 1) {
+		t.Fatalf("expected +Inf as last bucket upper bound, got %v", last.Le)
 	}
 }
 

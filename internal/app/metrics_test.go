@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,62 @@ func TestMetricsHandler_QueueDepthNilStore(t *testing.T) {
 	body := rr.Body.String()
 	if strings.Contains(body, "hookaido_queue_depth") {
 		t.Fatalf("queue_depth should not appear when store is nil:\n%s", body)
+	}
+}
+
+func TestMetricsHandler_SQLiteStoreRuntimeMetrics(t *testing.T) {
+	now := time.Unix(500, 0).UTC()
+	nowVar := now
+	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
+	store, err := queue.NewSQLiteStore(
+		dbPath,
+		queue.WithSQLiteNowFunc(func() time.Time { return nowVar }),
+		queue.WithSQLiteQueueLimits(10000, "reject"),
+		queue.WithSQLiteCheckpointInterval(0),
+	)
+	if err != nil {
+		t.Fatalf("new sqlite store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected 1 dequeued item, got %d", len(resp.Items))
+	}
+	if err := store.Ack(resp.Items[0].LeaseID); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	h := newMetricsHandler("dev", now, m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_store_sqlite_write_seconds_bucket{le="+Inf"}`,
+		`hookaido_store_sqlite_write_seconds_count `,
+		`hookaido_store_sqlite_dequeue_seconds_bucket{le="+Inf"}`,
+		`hookaido_store_sqlite_dequeue_seconds_count `,
+		`hookaido_store_sqlite_checkpoint_seconds_bucket{le="+Inf"}`,
+		`hookaido_store_sqlite_busy_total `,
+		`hookaido_store_sqlite_retry_total `,
+		`hookaido_store_sqlite_tx_commit_total `,
+		`hookaido_store_sqlite_tx_rollback_total `,
+		`hookaido_store_sqlite_checkpoint_total `,
+		`hookaido_store_sqlite_checkpoint_errors_total `,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
 	}
 }
 

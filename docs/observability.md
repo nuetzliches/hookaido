@@ -280,6 +280,19 @@ Operational guidance for control-plane responsiveness:
 - Keep SLO probes on `GET /healthz` (without details) for the fastest liveness path.
 - Use `GET /healthz?details=1` and `GET /metrics` for diagnostics/monitoring; under queue saturation these endpoints prioritize bounded latency over strictly real-time queue snapshots.
 
+## Saturation Notes
+
+Queue saturation analysis showed one hot path in the ingest/admission write flow: with `queue_limits.max_depth` enabled, each enqueue previously executed `COUNT(*)` over active queue states (`queued` + `leased`) inside a write transaction.
+
+At high occupancy, that repeated count increased write transaction time and lock contention (`hookaido_store_sqlite_write_seconds`, `hookaido_store_sqlite_busy_total`, `hookaido_store_sqlite_retry_total`).
+
+Hookaido now maintains O(1) active-depth counters (`queue_counters`) via SQLite triggers and uses them for `max_depth` admission checks.
+
+To validate improvements in your environment, compare before/after load runs using:
+- p95/p99 ingress latency and 503 rate
+- `hookaido_store_sqlite_write_seconds` histogram shape
+- `hookaido_store_sqlite_busy_total` and `hookaido_store_sqlite_retry_total` growth rate
+
 See [Admin API](admin-api.md) for details.
 
 ## Audit Logging

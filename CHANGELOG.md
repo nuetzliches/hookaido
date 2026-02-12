@@ -22,6 +22,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - CI now runs on pull requests and pushes to `main` only, and cancels superseded in-progress runs per ref to reduce duplicate workflow executions.
 - Release workflow now exports Sigstore attestation bundles as `*.intoto.jsonl` assets (plus compatibility `*.attestation.json` copies), and `hookaido verify-release` now auto-detects either naming scheme with `.intoto.jsonl` preference.
 - Control-plane hardening under saturation: `/metrics` queue depth and `/healthz?details=1` queue diagnostics now use short-TTL stale-while-refresh snapshots, reducing contention-coupled latency spikes during high queue pressure.
+- SQLite `max_depth` admission checks now use trigger-maintained active-depth counters (`queue_counters`) instead of per-enqueue `COUNT(*)` scans, reducing write-path contention near saturation.
 
 ### Fixed
 

@@ -1252,6 +1252,71 @@ func TestSQLiteStore_QueueLimitsDropOldest(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_QueueCountersTrackActiveDepth(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+
+	mustCounters := func(wantQueued, wantLeased int) {
+		t.Helper()
+		var queued int
+		var leased int
+		if err := s.db.QueryRow(`SELECT queued, leased FROM queue_counters WHERE id = 1;`).Scan(&queued, &leased); err != nil {
+			t.Fatalf("queue_counters query: %v", err)
+		}
+		if queued != wantQueued || leased != wantLeased {
+			t.Fatalf("queue_counters: got queued=%d leased=%d, want queued=%d leased=%d", queued, leased, wantQueued, wantLeased)
+		}
+	}
+
+	mustCounters(0, 0)
+
+	if err := s.Enqueue(Envelope{ID: "q1", Route: "/r", Target: "pull", State: StateQueued}); err != nil {
+		t.Fatalf("enqueue q1: %v", err)
+	}
+	if err := s.Enqueue(Envelope{ID: "d1", Route: "/r", Target: "pull", State: StateDead}); err != nil {
+		t.Fatalf("enqueue d1: %v", err)
+	}
+	if err := s.Enqueue(Envelope{ID: "q2", Route: "/r", Target: "pull", State: StateQueued}); err != nil {
+		t.Fatalf("enqueue q2: %v", err)
+	}
+	mustCounters(2, 0)
+
+	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected 1 dequeued item, got %d", len(resp.Items))
+	}
+	leaseID := resp.Items[0].LeaseID
+	mustCounters(1, 1)
+
+	if err := s.Nack(leaseID, 0); err != nil {
+		t.Fatalf("nack: %v", err)
+	}
+	mustCounters(2, 0)
+
+	resp2, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 2, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue2: %v", err)
+	}
+	if len(resp2.Items) != 2 {
+		t.Fatalf("expected 2 dequeued items, got %d", len(resp2.Items))
+	}
+	mustCounters(0, 2)
+
+	if err := s.Ack(resp2.Items[0].LeaseID); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	mustCounters(0, 1)
+
+	if err := s.MarkDead(resp2.Items[1].LeaseID, "no_retry"); err != nil {
+		t.Fatalf("mark dead: %v", err)
+	}
+	mustCounters(0, 0)
+}
+
 func TestSQLiteStore_RuntimeMetrics(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now

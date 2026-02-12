@@ -5140,6 +5140,168 @@ pull_api { auth token "raw:t" }
 	}
 }
 
+func TestCompile_AdaptiveBackpressureDefaults(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" { pull { path "/e" } }
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+
+	ab := compiled.Defaults.AdaptiveBackpressure
+	if ab.Enabled != defaultAdaptiveBackpressureEnabled {
+		t.Fatalf("enabled: got %v", ab.Enabled)
+	}
+	if ab.MinTotal != defaultAdaptiveBackpressureMinTotal {
+		t.Fatalf("min_total: got %d", ab.MinTotal)
+	}
+	if ab.QueuedPercent != defaultAdaptiveBackpressureQueuedPct {
+		t.Fatalf("queued_percent: got %d", ab.QueuedPercent)
+	}
+	if ab.ReadyLag != defaultAdaptiveBackpressureReadyLag {
+		t.Fatalf("ready_lag: got %s", ab.ReadyLag)
+	}
+	if ab.OldestQueuedAge != defaultAdaptiveBackpressureOldestAge {
+		t.Fatalf("oldest_queued_age: got %s", ab.OldestQueuedAge)
+	}
+	if ab.SustainedGrowth != defaultAdaptiveBackpressureSustained {
+		t.Fatalf("sustained_growth: got %v", ab.SustainedGrowth)
+	}
+}
+
+func TestCompile_AdaptiveBackpressureOverrides(t *testing.T) {
+	in := []byte(`
+defaults {
+  adaptive_backpressure {
+    enabled on
+    min_total 500
+    queued_percent 70
+    ready_lag 45s
+    oldest_queued_age 90s
+    sustained_growth off
+  }
+}
+
+pull_api { auth token "raw:t" }
+
+"/x" { pull { path "/e" } }
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+
+	ab := compiled.Defaults.AdaptiveBackpressure
+	if !ab.Enabled ||
+		ab.MinTotal != 500 ||
+		ab.QueuedPercent != 70 ||
+		ab.ReadyLag != 45*time.Second ||
+		ab.OldestQueuedAge != 90*time.Second ||
+		ab.SustainedGrowth {
+		t.Fatalf("unexpected adaptive_backpressure config: %#v", ab)
+	}
+}
+
+func TestCompile_AdaptiveBackpressureValidation(t *testing.T) {
+	in := []byte(`
+defaults {
+  adaptive_backpressure {
+    enabled maybe
+    min_total 0
+    queued_percent 101
+    ready_lag off
+    oldest_queued_age -1s
+    sustained_growth maybe
+  }
+}
+
+pull_api { auth token "raw:t" }
+
+"/x" { pull { path "/e" } }
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+
+	var (
+		foundEnabled  bool
+		foundMinTotal bool
+		foundPercent  bool
+		foundReadyLag bool
+		foundOldest   bool
+		foundGrowth   bool
+	)
+	for _, e := range res.Errors {
+		if strings.Contains(e, "defaults.adaptive_backpressure.enabled") {
+			foundEnabled = true
+		}
+		if strings.Contains(e, "defaults.adaptive_backpressure.min_total") {
+			foundMinTotal = true
+		}
+		if strings.Contains(e, "defaults.adaptive_backpressure.queued_percent") {
+			foundPercent = true
+		}
+		if strings.Contains(e, "defaults.adaptive_backpressure.ready_lag") {
+			foundReadyLag = true
+		}
+		if strings.Contains(e, "defaults.adaptive_backpressure.oldest_queued_age") {
+			foundOldest = true
+		}
+		if strings.Contains(e, "defaults.adaptive_backpressure.sustained_growth") {
+			foundGrowth = true
+		}
+	}
+	if !foundEnabled || !foundMinTotal || !foundPercent || !foundReadyLag || !foundOldest || !foundGrowth {
+		t.Fatalf("expected adaptive_backpressure validation errors, got %#v", res.Errors)
+	}
+}
+
+func TestParseFormat_DefaultsAdaptiveBackpressure(t *testing.T) {
+	in := []byte(`
+defaults {
+  adaptive_backpressure {
+    enabled "on"
+    min_total "250"
+    oldest_queued_age "75s"
+  }
+}
+pull_api { auth token "raw:t" }
+
+"/x" { pull { path "/e" } }
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "adaptive_backpressure {") ||
+		!strings.Contains(got, `enabled "on"`) ||
+		!strings.Contains(got, `min_total "250"`) ||
+		!strings.Contains(got, `oldest_queued_age "75s"`) {
+		t.Fatalf("expected formatted adaptive_backpressure block, got:\n%s", got)
+	}
+}
+
 func TestCompile_EgressPolicyDefaults(t *testing.T) {
 	in := []byte(`
 pull_api { auth token "raw:t" }

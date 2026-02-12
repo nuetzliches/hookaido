@@ -194,6 +194,9 @@ func writeDefaultsBlock(b *bytes.Buffer, def *DefaultsBlock) {
 	if def.TrendSignals != nil {
 		writeTrendSignalsBlock(b, def.TrendSignals)
 	}
+	if def.AdaptiveBackpressure != nil {
+		writeAdaptiveBackpressureBlock(b, def.AdaptiveBackpressure)
+	}
 	b.WriteString("}\n")
 }
 
@@ -286,6 +289,29 @@ func writeTrendSignalsBlock(b *bytes.Buffer, block *TrendSignalsBlock) {
 	}
 	if block.QueuedPressureLeasedMultiplierSet {
 		fmt.Fprintf(b, "    queued_pressure_leased_multiplier %s\n", formatValue(block.QueuedPressureLeasedMultiplier, block.QueuedPressureLeasedMultiplierQuoted))
+	}
+	b.WriteString("  }\n")
+}
+
+func writeAdaptiveBackpressureBlock(b *bytes.Buffer, block *AdaptiveBackpressureBlock) {
+	b.WriteString("  adaptive_backpressure {\n")
+	if block.EnabledSet {
+		fmt.Fprintf(b, "    enabled %s\n", formatValue(block.Enabled, block.EnabledQuoted))
+	}
+	if block.MinTotalSet {
+		fmt.Fprintf(b, "    min_total %s\n", formatValue(block.MinTotal, block.MinTotalQuoted))
+	}
+	if block.QueuedPercentSet {
+		fmt.Fprintf(b, "    queued_percent %s\n", formatValue(block.QueuedPercent, block.QueuedPercentQuoted))
+	}
+	if block.ReadyLagSet {
+		fmt.Fprintf(b, "    ready_lag %s\n", formatValue(block.ReadyLag, block.ReadyLagQuoted))
+	}
+	if block.OldestQueuedAgeSet {
+		fmt.Fprintf(b, "    oldest_queued_age %s\n", formatValue(block.OldestQueuedAge, block.OldestQueuedAgeQuoted))
+	}
+	if block.SustainedGrowthSet {
+		fmt.Fprintf(b, "    sustained_growth %s\n", formatValue(block.SustainedGrowth, block.SustainedGrowthQuoted))
 	}
 	b.WriteString("  }\n")
 }

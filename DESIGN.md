@@ -61,7 +61,7 @@ Global:
 - `delivered_retention { max_age }`
 - `dlq_retention { max_age, max_depth }`
 - `secrets { secret "ID" { value, valid_from, valid_until? } }`
-- `defaults { max_body, max_headers, egress?, publish_policy?, deliver?, trend_signals? }`
+- `defaults { max_body, max_headers, egress?, publish_policy?, deliver?, trend_signals?, adaptive_backpressure? }`
 - `observability { access_log, runtime_log?, metrics?, tracing? }`:
   - `access_log`: `on|off` or block `access_log { enabled?, output?, path?, format? }`
   - `runtime_log`: `debug|info|warn|error|off` or block `runtime_log { level?, output?, path?, format? }`
@@ -241,7 +241,7 @@ Error body (non-2xx):
 
 Endpoints (MVP):
 - `GET /healthz`
-- `GET /healthz?details=1` (JSON health diagnostics; includes queue rollups, queued age/lag indicators, top route/target backlog buckets, persisted-trend `trend_signals` evaluated with `defaults.trend_signals` policy, explicit `operator_actions` playbooks, and tracing counters when runtime metrics are available)
+- `GET /healthz?details=1` (JSON health diagnostics; includes queue rollups, queued age/lag indicators, top route/target backlog buckets, persisted-trend `trend_signals` evaluated with `defaults.trend_signals` policy, explicit `operator_actions` playbooks, ingress counters including adaptive-backpressure diagnostics, and tracing counters when runtime metrics are available)
 - `GET /backlog/top_queued` (operator backlog drill-down from queue stats `top_queued`; query params: `route`, `target`, `limit` (default 100, max 1000); when provided, `route` must be an absolute Hookaido route path starting with `/`; response includes bounded-source/truncation indicators)
 - `GET /backlog/oldest_queued` (operator backlog drill-down for oldest queued items; query params: `route`, `target`, `limit` (default 100, max 1000); when provided, `route` must be an absolute Hookaido route path starting with `/`; response ordered by `received_at` ascending with per-item age/ready-lag indicators)
 - `GET /backlog/aging_summary` (operator backlog drill-down summary by `route+target`; query params: `route`, `target`, `states` (`queued|leased|dead`; default all three), `limit` (default 100, max 1000); when provided, `route` must be an absolute Hookaido route path starting with `/`; response aggregates oldest-first scan windows per selected state with aging/overdue indicators, age-window distribution, age percentiles (`p50/p90/p99`), and source truncation metadata)
@@ -315,6 +315,7 @@ Endpoints (MVP):
 - `egress`: `https_only=true`, `redirects=false`, `dns_rebind_protection=true`
 - `publish_policy`: `direct=true`, `managed=true`, `allow_pull_routes=true`, `allow_deliver_routes=true`, `require_actor=false`, `require_request_id=false`, `fail_closed=false`, `actor_allow=[]`, `actor_prefix=[]`
 - `trend_signals`: `window 15m`, `expected_capture_interval 1m`, `stale_grace_factor 3`, `sustained_growth_consecutive 3`, `sustained_growth_min_samples 5`, `sustained_growth_min_delta 10`, `recent_surge_min_total 20`, `recent_surge_min_delta 10`, `recent_surge_percent 50`, `dead_share_high_min_total 10`, `dead_share_high_percent 20`, `queued_pressure_min_total 20`, `queued_pressure_percent 75`, `queued_pressure_leased_multiplier 2`
+- `adaptive_backpressure`: `enabled=false`, `min_total=200`, `queued_percent=80`, `ready_lag=30s`, `oldest_queued_age=60s`, `sustained_growth=true`
 
 Egress policy notes:
 - `egress.allow` / `egress.deny` accept hosts, IPs, or CIDRs (wildcards `*` for any host and `*.example.com` for subdomains).
@@ -360,7 +361,7 @@ Secret rotation semantics:
 - Tracing headers must be valid HTTP header name/value pairs; invalid entries fail config validation.
 - Metrics include tracing diagnostics counters: `hookaido_tracing_enabled`, `hookaido_tracing_init_failures_total`, `hookaido_tracing_export_errors_total`.
 - Metrics include publish mutation counters: `hookaido_publish_accepted_total`, `hookaido_publish_rejected_total`, rejection-class counters (`hookaido_publish_rejected_validation_total`, `hookaido_publish_rejected_policy_total`, `hookaido_publish_rejected_conflict_total`, `hookaido_publish_rejected_queue_full_total`, `hookaido_publish_rejected_store_total`), managed-ownership policy counters (`hookaido_publish_rejected_managed_target_mismatch_total`, `hookaido_publish_rejected_managed_resolver_missing_total`), and scoped counters (`hookaido_publish_scoped_accepted_total`, `hookaido_publish_scoped_rejected_total`).
-- Metrics include ingress counters: `hookaido_ingress_accepted_total`, `hookaido_ingress_rejected_total`, `hookaido_ingress_enqueued_total`.
+- Metrics include ingress counters: `hookaido_ingress_accepted_total`, `hookaido_ingress_rejected_total`, `hookaido_ingress_enqueued_total`, adaptive-backpressure counters `hookaido_ingress_adaptive_backpressure_total{reason}`, and `hookaido_ingress_adaptive_backpressure_applied_total`.
 - Metrics include delivery counters: `hookaido_delivery_attempts_total`, `hookaido_delivery_acked_total`, `hookaido_delivery_retry_total`, `hookaido_delivery_dead_total`.
 - Metrics include on-scrape queue depth gauge: `hookaido_queue_depth{state}` (queued, leased, dead).
 

@@ -1302,6 +1302,15 @@ func TestToolAdminHealthIncludesAdminDiagnostics(t *testing.T) {
 							"rejected_managed_target_mismatch_total":  2,
 							"rejected_managed_resolver_missing_total": 1,
 						},
+						"ingress": map[string]any{
+							"accepted_total":                      7,
+							"rejected_total":                      11,
+							"adaptive_backpressure_applied_total": 4,
+							"adaptive_backpressure_by_reason": map[string]any{
+								"queued_pressure": 3,
+								"ready_lag":       1,
+							},
+						},
 					},
 				})
 				return
@@ -1412,6 +1421,20 @@ func TestToolAdminHealthIncludesAdminDiagnostics(t *testing.T) {
 	}
 	if got := intFromAny(publishDiag["rejected_managed_resolver_missing_total"]); got != 1 {
 		t.Fatalf("expected rejected_managed_resolver_missing_total=1, got %#v", publishDiag["rejected_managed_resolver_missing_total"])
+	}
+	ingressDiag, ok := diagnostics["ingress"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected ingress diagnostics in admin health details, got %T", diagnostics["ingress"])
+	}
+	if got := intFromAny(ingressDiag["adaptive_backpressure_applied_total"]); got != 4 {
+		t.Fatalf("expected adaptive_backpressure_applied_total=4, got %#v", ingressDiag["adaptive_backpressure_applied_total"])
+	}
+	reasonDiag, ok := ingressDiag["adaptive_backpressure_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected adaptive_backpressure_by_reason diagnostics map, got %T", ingressDiag["adaptive_backpressure_by_reason"])
+	}
+	if got := intFromAny(reasonDiag["queued_pressure"]); got != 3 {
+		t.Fatalf("expected adaptive_backpressure_by_reason.queued_pressure=3, got %#v", reasonDiag["queued_pressure"])
 	}
 }
 

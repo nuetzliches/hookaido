@@ -134,6 +134,7 @@ Notes:
 - Also probes configured Admin API health endpoint (`/healthz?details=1`) when config compiles successfully.
 - Includes `admin_api` probe result (`checked`, `ok`, `status_code`, `error`) and optional diagnostics details payload.
 - Passes through Admin diagnostics payloads (for example `diagnostics.publish` counters), including publish rejection diagnostics such as `rejected_managed_target_mismatch_total` and `rejected_managed_resolver_missing_total` when provided by Admin runtime metrics.
+- Passes through ingress adaptive backpressure diagnostics when available (`diagnostics.ingress.adaptive_backpressure_applied_total` and `diagnostics.ingress.adaptive_backpressure_by_reason`).
 - Includes MCP-local Admin-proxy publish rollback counters under `mcp.admin_proxy_publish` (`rollback_attempts_total`, `rollback_succeeded_total`, `rollback_failed_total`, `rollback_ids_total`).
 - `trend_signals` evaluation uses compiled `defaults.trend_signals` policy when available; otherwise built-in defaults.
 - `trend_signals` include `operator_actions` playbooks with stable action IDs, severity, alert-routing keys, and suggested Admin/MCP operations.

@@ -31,20 +31,33 @@ Returns detailed JSON diagnostics:
 
 ```json
 {
-  "status": "ok",
-  "queue": {
-    "total": 1523,
-    "by_state": { "queued": 1200, "leased": 300, "dead": 23 },
-    "oldest_queued_received_at": "2026-02-09T08:00:00Z",
-    "oldest_queued_age_seconds": 7200,
-    "ready_lag_seconds": 0,
-    "top_queued": [...],
-    "trend_signals": {
-      "signals": [...],
-      "operator_actions": [...]
+  "ok": true,
+  "time": "2026-02-12T20:15:00Z",
+  "diagnostics": {
+    "queue": {
+      "total": 1523,
+      "by_state": { "queued": 1200, "leased": 300, "dead": 23 },
+      "oldest_queued_received_at": "2026-02-09T08:00:00Z",
+      "oldest_queued_age_seconds": 7200,
+      "ready_lag_seconds": 0,
+      "top_queued": [...],
+      "trend_signals": {
+        "signals": [...],
+        "operator_actions": [...]
+      }
+    },
+    "ingress": {
+      "accepted_total": 100000,
+      "rejected_total": 4123,
+      "adaptive_backpressure_applied_total": 345,
+      "adaptive_backpressure_by_reason": {
+        "queued_pressure": 221,
+        "ready_lag": 79,
+        "oldest_queued_age": 31,
+        "sustained_growth": 14
+      }
     }
-  },
-  "tracing": { ... }
+  }
 }
 ```
 
@@ -53,6 +66,7 @@ The health endpoint includes:
 - Queue state rollups with age/lag indicators
 - Top route/target backlog buckets
 - Persisted trend signals with operator action playbooks
+- Ingress counters and adaptive-backpressure diagnostics (when runtime metrics are enabled)
 - Tracing counters (when metrics are enabled)
 
 ## Queue Reads

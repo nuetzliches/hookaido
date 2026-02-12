@@ -56,6 +56,12 @@ const (
 	defaultTrendPressureMinTotal          = 20
 	defaultTrendPressurePercent           = 75
 	defaultTrendPressureLeasedFactor      = 2
+	defaultAdaptiveBackpressureEnabled    = false
+	defaultAdaptiveBackpressureMinTotal   = 200
+	defaultAdaptiveBackpressureQueuedPct  = 80
+	defaultAdaptiveBackpressureReadyLag   = 30 * time.Second
+	defaultAdaptiveBackpressureOldestAge  = 60 * time.Second
+	defaultAdaptiveBackpressureSustained  = true
 	defaultQueueMaxDepth                  = 10000
 	defaultQueueDropPolicy                = "reject"
 	defaultQueueRetentionMaxAge           = 7 * 24 * time.Hour
@@ -127,10 +133,11 @@ type DefaultsConfig struct {
 	MaxBodyBytes   int64
 	MaxHeaderBytes int
 
-	DeliverRetry       RetryConfig
-	DeliverTimeout     time.Duration
-	DeliverConcurrency int
-	TrendSignals       TrendSignalsConfig
+	DeliverRetry         RetryConfig
+	DeliverTimeout       time.Duration
+	DeliverConcurrency   int
+	TrendSignals         TrendSignalsConfig
+	AdaptiveBackpressure AdaptiveBackpressureConfig
 
 	EgressPolicy  EgressPolicyConfig
 	PublishPolicy PublishPolicyConfig
@@ -155,6 +162,18 @@ type TrendSignalsConfig struct {
 	QueuedPressureMinTotal         int
 	QueuedPressurePercent          int
 	QueuedPressureLeasedMultiplier int
+}
+
+type AdaptiveBackpressureConfig struct {
+	Enabled bool
+
+	MinTotal      int
+	QueuedPercent int
+
+	ReadyLag        time.Duration
+	OldestQueuedAge time.Duration
+
+	SustainedGrowth bool
 }
 
 type APIConfig struct {
@@ -1224,6 +1243,14 @@ func compileDefaults(in *DefaultsBlock) (DefaultsConfig, ValidationResult) {
 			QueuedPressurePercent:          defaultTrendPressurePercent,
 			QueuedPressureLeasedMultiplier: defaultTrendPressureLeasedFactor,
 		},
+		AdaptiveBackpressure: AdaptiveBackpressureConfig{
+			Enabled:         defaultAdaptiveBackpressureEnabled,
+			MinTotal:        defaultAdaptiveBackpressureMinTotal,
+			QueuedPercent:   defaultAdaptiveBackpressureQueuedPct,
+			ReadyLag:        defaultAdaptiveBackpressureReadyLag,
+			OldestQueuedAge: defaultAdaptiveBackpressureOldestAge,
+			SustainedGrowth: defaultAdaptiveBackpressureSustained,
+		},
 		EgressPolicy: EgressPolicyConfig{
 			HTTPSOnly:           defaultEgressHTTPSOnly,
 			Redirects:           defaultEgressRedirects,
@@ -1387,6 +1414,58 @@ func compileDefaults(in *DefaultsBlock) (DefaultsConfig, ValidationResult) {
 			raw := strings.TrimSpace(resolveValue(block.QueuedPressureLeasedMultiplier, "defaults.trend_signals.queued_pressure_leased_multiplier", &res))
 			if v, ok := parsePositiveIntInRange(raw, "defaults.trend_signals.queued_pressure_leased_multiplier", 1, 1000000, &res); ok {
 				out.TrendSignals.QueuedPressureLeasedMultiplier = v
+			}
+		}
+	}
+
+	if in.AdaptiveBackpressure != nil {
+		block := in.AdaptiveBackpressure
+		if block.EnabledSet {
+			raw := strings.TrimSpace(resolveValue(block.Enabled, "defaults.adaptive_backpressure.enabled", &res))
+			val, ok := parseBoolValue(raw)
+			if !ok {
+				res.Errors = append(res.Errors, "defaults.adaptive_backpressure.enabled must be on|off|true|false|1|0")
+			} else {
+				out.AdaptiveBackpressure.Enabled = val
+			}
+		}
+		if block.MinTotalSet {
+			raw := strings.TrimSpace(resolveValue(block.MinTotal, "defaults.adaptive_backpressure.min_total", &res))
+			if v, ok := parsePositiveIntInRange(raw, "defaults.adaptive_backpressure.min_total", 1, 1000000000, &res); ok {
+				out.AdaptiveBackpressure.MinTotal = v
+			}
+		}
+		if block.QueuedPercentSet {
+			raw := strings.TrimSpace(resolveValue(block.QueuedPercent, "defaults.adaptive_backpressure.queued_percent", &res))
+			if v, ok := parsePositiveIntInRange(raw, "defaults.adaptive_backpressure.queued_percent", 1, 100, &res); ok {
+				out.AdaptiveBackpressure.QueuedPercent = v
+			}
+		}
+		if block.ReadyLagSet {
+			raw := strings.TrimSpace(resolveValue(block.ReadyLag, "defaults.adaptive_backpressure.ready_lag", &res))
+			d, err := parsePositiveDuration(raw)
+			if err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("defaults.adaptive_backpressure.ready_lag %s", err.Error()))
+			} else {
+				out.AdaptiveBackpressure.ReadyLag = d
+			}
+		}
+		if block.OldestQueuedAgeSet {
+			raw := strings.TrimSpace(resolveValue(block.OldestQueuedAge, "defaults.adaptive_backpressure.oldest_queued_age", &res))
+			d, err := parsePositiveDuration(raw)
+			if err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("defaults.adaptive_backpressure.oldest_queued_age %s", err.Error()))
+			} else {
+				out.AdaptiveBackpressure.OldestQueuedAge = d
+			}
+		}
+		if block.SustainedGrowthSet {
+			raw := strings.TrimSpace(resolveValue(block.SustainedGrowth, "defaults.adaptive_backpressure.sustained_growth", &res))
+			val, ok := parseBoolValue(raw)
+			if !ok {
+				res.Errors = append(res.Errors, "defaults.adaptive_backpressure.sustained_growth must be on|off|true|false|1|0")
+			} else {
+				out.AdaptiveBackpressure.SustainedGrowth = val
 			}
 		}
 	}

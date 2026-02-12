@@ -396,6 +396,15 @@ func (p *parser) parseDefaultsBlock() (*DefaultsBlock, error) {
 				return nil, err
 			}
 			out.TrendSignals = ts
+		case "adaptive_backpressure":
+			if out.AdaptiveBackpressure != nil {
+				return nil, p.errAt(dirTok.pos, "duplicate adaptive_backpressure block")
+			}
+			ab, err := p.parseAdaptiveBackpressureBlock()
+			if err != nil {
+				return nil, err
+			}
+			out.AdaptiveBackpressure = ab
 		default:
 			return nil, p.errAt(dirTok.pos, "unknown defaults directive %q", dirTok.text)
 		}
@@ -411,7 +420,8 @@ func isDefaultsDirective(name string) bool {
 		"egress",
 		"publish_policy",
 		"deliver",
-		"trend_signals":
+		"trend_signals",
+		"adaptive_backpressure":
 		return true
 	default:
 		return false
@@ -661,6 +671,90 @@ func (p *parser) parseTrendSignalsBlock() (*TrendSignalsBlock, error) {
 			out.QueuedPressureLeasedMultiplierSet = true
 		default:
 			return nil, p.errAt(dirTok.pos, "unknown trend_signals directive %q", dirTok.text)
+		}
+	}
+
+	return out, nil
+}
+
+func (p *parser) parseAdaptiveBackpressureBlock() (*AdaptiveBackpressureBlock, error) {
+	if _, err := p.expect(tokLBrace, "expected '{' after adaptive_backpressure"); err != nil {
+		return nil, err
+	}
+	out := &AdaptiveBackpressureBlock{}
+
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if tok.kind == tokEOF {
+			return nil, p.errAt(tok.pos, "unexpected EOF (missing '}')")
+		}
+		if tok.kind == tokRBrace {
+			_, _ = p.next()
+			break
+		}
+		if tok.kind == tokComment {
+			_, _ = p.next()
+			continue
+		}
+
+		dirTok, _ := p.next()
+		if dirTok.kind != tokIdent {
+			return nil, p.errAt(dirTok.pos, "expected directive name")
+		}
+
+		v, quoted, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+
+		switch dirTok.text {
+		case "enabled":
+			if out.EnabledSet {
+				return nil, p.errAt(dirTok.pos, "duplicate adaptive_backpressure enabled")
+			}
+			out.Enabled = v
+			out.EnabledQuoted = quoted
+			out.EnabledSet = true
+		case "min_total":
+			if out.MinTotalSet {
+				return nil, p.errAt(dirTok.pos, "duplicate adaptive_backpressure min_total")
+			}
+			out.MinTotal = v
+			out.MinTotalQuoted = quoted
+			out.MinTotalSet = true
+		case "queued_percent":
+			if out.QueuedPercentSet {
+				return nil, p.errAt(dirTok.pos, "duplicate adaptive_backpressure queued_percent")
+			}
+			out.QueuedPercent = v
+			out.QueuedPercentQuoted = quoted
+			out.QueuedPercentSet = true
+		case "ready_lag":
+			if out.ReadyLagSet {
+				return nil, p.errAt(dirTok.pos, "duplicate adaptive_backpressure ready_lag")
+			}
+			out.ReadyLag = v
+			out.ReadyLagQuoted = quoted
+			out.ReadyLagSet = true
+		case "oldest_queued_age":
+			if out.OldestQueuedAgeSet {
+				return nil, p.errAt(dirTok.pos, "duplicate adaptive_backpressure oldest_queued_age")
+			}
+			out.OldestQueuedAge = v
+			out.OldestQueuedAgeQuoted = quoted
+			out.OldestQueuedAgeSet = true
+		case "sustained_growth":
+			if out.SustainedGrowthSet {
+				return nil, p.errAt(dirTok.pos, "duplicate adaptive_backpressure sustained_growth")
+			}
+			out.SustainedGrowth = v
+			out.SustainedGrowthQuoted = quoted
+			out.SustainedGrowthSet = true
+		default:
+			return nil, p.errAt(dirTok.pos, "unknown adaptive_backpressure directive %q", dirTok.text)
 		}
 	}
 

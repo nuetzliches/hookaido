@@ -128,6 +128,8 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_ingress_accepted_total` | counter | Ingress requests accepted and enqueued            |
 | `hookaido_ingress_rejected_total` | counter | Ingress requests rejected (auth, rate-limit, etc) |
 | `hookaido_ingress_enqueued_total` | counter | Items enqueued via ingress (>accepted if fanout)  |
+| `hookaido_ingress_adaptive_backpressure_total{reason}` | counter | Ingress requests rejected by adaptive backpressure (by trigger reason) |
+| `hookaido_ingress_adaptive_backpressure_applied_total` | counter | Total ingress requests rejected by adaptive backpressure |
 
 **Delivery metrics:**
 
@@ -269,6 +271,7 @@ The Admin API health endpoint (`GET /healthz?details=1`) aggregates observabilit
 - Queue state rollups with age/lag indicators
 - Backlog trend signals with operator action playbooks
 - Tracing counters (init failures, export errors)
+- Ingress adaptive-backpressure diagnostics (`adaptive_backpressure_applied_total`, `adaptive_backpressure_by_reason`)
 - Top route/target backlog buckets
 - Queue diagnostics are cached (short TTL) and served stale-while-refresh under heavy load to keep control-plane endpoints responsive.
 

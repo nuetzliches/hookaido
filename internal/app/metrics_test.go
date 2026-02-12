@@ -38,6 +38,8 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 		"hookaido_ingress_accepted_total 0",
 		"hookaido_ingress_rejected_total 0",
 		"hookaido_ingress_enqueued_total 0",
+		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 0`,
+		"hookaido_ingress_adaptive_backpressure_applied_total 0",
 		"hookaido_delivery_attempts_total 0",
 		"hookaido_delivery_acked_total 0",
 		"hookaido_delivery_retry_total 0",
@@ -133,6 +135,9 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 	m.observeIngressResult(true, 1)  // accepted, single target
 	m.observeIngressResult(false, 0) // rejected (auth, rate-limit, etc)
 	m.observeIngressResult(false, 0) // rejected
+	m.observeIngressAdaptiveBackpressure("queued_pressure")
+	m.observeIngressAdaptiveBackpressure("ready_lag")
+	m.observeIngressAdaptiveBackpressure("")
 
 	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
 	rr := httptest.NewRecorder()
@@ -143,6 +148,10 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 		"hookaido_ingress_accepted_total 2",
 		"hookaido_ingress_rejected_total 2",
 		"hookaido_ingress_enqueued_total 3",
+		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 1`,
+		`hookaido_ingress_adaptive_backpressure_total{reason="ready_lag"} 1`,
+		`hookaido_ingress_adaptive_backpressure_total{reason="unspecified"} 1`,
+		"hookaido_ingress_adaptive_backpressure_applied_total 3",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
@@ -321,6 +330,7 @@ func TestMetricsHandler_SQLiteStoreRuntimeMetrics(t *testing.T) {
 func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	m := newRuntimeMetrics()
 	m.observeIngressResult(true, 3)
+	m.observeIngressAdaptiveBackpressure("ready_lag")
 	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
 	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
 
@@ -335,6 +345,16 @@ func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	}
 	if got := intFromAny(ingress["enqueued_total"]); got != 3 {
 		t.Fatalf("ingress enqueued_total=%d, want 3", got)
+	}
+	if got := intFromAny(ingress["adaptive_backpressure_applied_total"]); got != 1 {
+		t.Fatalf("ingress adaptive_backpressure_applied_total=%d, want 1", got)
+	}
+	adaptiveByReason, ok := ingress["adaptive_backpressure_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected adaptive_backpressure_by_reason map, got %T", ingress["adaptive_backpressure_by_reason"])
+	}
+	if got := intFromAny(adaptiveByReason["ready_lag"]); got != 1 {
+		t.Fatalf("ingress adaptive_backpressure_by_reason.ready_lag=%d, want 1", got)
 	}
 
 	delivery, ok := diag["delivery"].(map[string]any)

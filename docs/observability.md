@@ -138,6 +138,18 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_delivery_retry_total`    | counter | Deliveries scheduled for retry |
 | `hookaido_delivery_dead_total`     | counter | Deliveries moved to DLQ        |
 
+**Pull metrics:**
+
+| Metric                                | Type    | Description                                                                  |
+| ------------------------------------- | ------- | ---------------------------------------------------------------------------- |
+| `hookaido_pull_dequeue_total`         | counter | Pull dequeue requests by `route` and status label (`200`, `204`, `4xx`, `5xx`) |
+| `hookaido_pull_acked_total`           | counter | Successful Pull ack operations by `route`                                    |
+| `hookaido_pull_nacked_total`          | counter | Successful Pull nack/mark-dead operations by `route`                         |
+| `hookaido_pull_ack_conflict_total`    | counter | Pull ack lease conflicts (`409`) by `route`                                  |
+| `hookaido_pull_nack_conflict_total`   | counter | Pull nack lease conflicts (`409`) by `route`                                 |
+| `hookaido_pull_lease_active`          | gauge   | Active Pull leases currently tracked by `route`                              |
+| `hookaido_pull_lease_expired_total`   | counter | Lease expirations observed during Pull `ack`/`nack`/`extend` by `route`      |
+
 **Publish metrics:**
 
 | Metric                                       | Type    | Description                       |

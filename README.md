@@ -178,7 +178,7 @@ observability {
 }
 ```
 
-Prometheus counters for ingress accept/reject, delivery attempts/ack/retry/dead, and queue depth gauges. OpenTelemetry traces with full OTLP/HTTP configuration.
+Prometheus counters for ingress, pull (`dequeue`/`ack`/`nack`/conflicts/leases), and push delivery, plus queue depth gauges. OpenTelemetry traces with full OTLP/HTTP configuration.
 
 ## MCP Server (AI Integration)
 

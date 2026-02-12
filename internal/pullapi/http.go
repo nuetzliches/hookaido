@@ -29,6 +29,10 @@ type Server struct {
 	Target          string
 	ResolveRoute    func(endpoint string) (route string, ok bool)
 	Authorize       Authorizer
+	ObserveDequeue  func(route string, statusCode int, items []queue.Envelope)
+	ObserveAck      func(route string, statusCode int, leaseID string, leaseExpired bool)
+	ObserveNack     func(route string, statusCode int, leaseID string, leaseExpired bool)
+	ObserveExtend   func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool)
 	DefaultLeaseTTL time.Duration
 	MaxBatch        int
 	MaxLeaseTTL     time.Duration
@@ -73,11 +77,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "dequeue":
 		s.handleDequeue(w, r, route)
 	case "ack":
-		s.handleAck(w, r)
+		s.handleAck(w, r, route)
 	case "nack":
-		s.handleNack(w, r)
+		s.handleNack(w, r, route)
 	case "extend":
-		s.handleExtend(w, r)
+		s.handleExtend(w, r, route)
 	default:
 		writeError(w, http.StatusNotFound, pullErrOperationNotFound, "pull operation was not found")
 	}
@@ -108,6 +112,7 @@ type dequeueItem struct {
 func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route string) {
 	var req dequeueRequest
 	if r.Body != nil && !decodeJSONBodyStrict(w, r, &req, true) {
+		s.observeDequeue(route, http.StatusBadRequest, nil)
 		return
 	}
 
@@ -122,6 +127,7 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 	maxWait, ok := parseDuration(req.MaxWait)
 	if !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "max_wait must be a valid duration")
+		s.observeDequeue(route, http.StatusBadRequest, nil)
 		return
 	}
 	if req.MaxWait == "" && s.DefaultMaxWait > 0 {
@@ -136,6 +142,7 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 		d, ok := parseDuration(req.LeaseTTL)
 		if !ok {
 			writeError(w, http.StatusBadRequest, pullErrInvalidBody, "lease_ttl must be a valid duration")
+			s.observeDequeue(route, http.StatusBadRequest, nil)
 			return
 		}
 		leaseTTL = d
@@ -153,6 +160,7 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 	})
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, pullErrStoreUnavailable, "dequeue is temporarily unavailable")
+		s.observeDequeue(route, http.StatusServiceUnavailable, nil)
 		return
 	}
 
@@ -174,6 +182,7 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(out)
+	s.observeDequeue(route, http.StatusOK, resp.Items)
 }
 
 type leaseRequest struct {
@@ -184,35 +193,42 @@ type leaseRequest struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAck(w http.ResponseWriter, r *http.Request, route string) {
 	req, ok := readLeaseRequest(w, r)
 	if !ok {
+		s.observeAck(route, http.StatusBadRequest, "", false)
 		return
 	}
 	if req.LeaseID == "" {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "lease_id is required")
+		s.observeAck(route, http.StatusBadRequest, "", false)
 		return
 	}
 
 	if err := s.Store.Ack(req.LeaseID); err != nil {
 		if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
 			writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
+			s.observeAck(route, http.StatusConflict, req.LeaseID, errors.Is(err, queue.ErrLeaseExpired))
 			return
 		}
 		writeError(w, http.StatusInternalServerError, pullErrInternal, "ack failed")
+		s.observeAck(route, http.StatusInternalServerError, req.LeaseID, false)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+	s.observeAck(route, http.StatusNoContent, req.LeaseID, false)
 }
 
-func (s *Server) handleNack(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, route string) {
 	req, ok := readLeaseRequest(w, r)
 	if !ok {
+		s.observeNack(route, http.StatusBadRequest, "", false)
 		return
 	}
 	if req.LeaseID == "" {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "lease_id is required")
+		s.observeNack(route, http.StatusBadRequest, "", false)
 		return
 	}
 
@@ -220,59 +236,72 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request) {
 		if err := s.Store.MarkDead(req.LeaseID, req.Reason); err != nil {
 			if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
 				writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
+				s.observeNack(route, http.StatusConflict, req.LeaseID, errors.Is(err, queue.ErrLeaseExpired))
 				return
 			}
 			writeError(w, http.StatusInternalServerError, pullErrInternal, "mark dead failed")
+			s.observeNack(route, http.StatusInternalServerError, req.LeaseID, false)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+		s.observeNack(route, http.StatusNoContent, req.LeaseID, false)
 		return
 	}
 
 	delay, ok := parseDuration(req.Delay)
 	if !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "delay must be a valid duration")
+		s.observeNack(route, http.StatusBadRequest, req.LeaseID, false)
 		return
 	}
 
 	if err := s.Store.Nack(req.LeaseID, delay); err != nil {
 		if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
 			writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
+			s.observeNack(route, http.StatusConflict, req.LeaseID, errors.Is(err, queue.ErrLeaseExpired))
 			return
 		}
 		writeError(w, http.StatusInternalServerError, pullErrInternal, "nack failed")
+		s.observeNack(route, http.StatusInternalServerError, req.LeaseID, false)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+	s.observeNack(route, http.StatusNoContent, req.LeaseID, false)
 }
 
-func (s *Server) handleExtend(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleExtend(w http.ResponseWriter, r *http.Request, route string) {
 	req, ok := readLeaseRequest(w, r)
 	if !ok {
+		s.observeExtend(route, http.StatusBadRequest, "", 0, false)
 		return
 	}
 	if req.LeaseID == "" || req.ExtendBy == "" {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "lease_id and extend_by are required")
+		s.observeExtend(route, http.StatusBadRequest, req.LeaseID, 0, false)
 		return
 	}
 
 	extendBy, ok := parseDuration(req.ExtendBy)
 	if !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "extend_by must be a valid duration")
+		s.observeExtend(route, http.StatusBadRequest, req.LeaseID, 0, false)
 		return
 	}
 
 	if err := s.Store.Extend(req.LeaseID, extendBy); err != nil {
 		if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
 			writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
+			s.observeExtend(route, http.StatusConflict, req.LeaseID, extendBy, errors.Is(err, queue.ErrLeaseExpired))
 			return
 		}
 		writeError(w, http.StatusInternalServerError, pullErrInternal, "extend failed")
+		s.observeExtend(route, http.StatusInternalServerError, req.LeaseID, extendBy, false)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+	s.observeExtend(route, http.StatusNoContent, req.LeaseID, extendBy, false)
 }
 
 func (s *Server) resolveRoute(endpoint string) (string, bool) {
@@ -280,6 +309,30 @@ func (s *Server) resolveRoute(endpoint string) (string, bool) {
 		return endpoint, true
 	}
 	return s.ResolveRoute(endpoint)
+}
+
+func (s *Server) observeDequeue(route string, statusCode int, items []queue.Envelope) {
+	if s.ObserveDequeue != nil {
+		s.ObserveDequeue(route, statusCode, items)
+	}
+}
+
+func (s *Server) observeAck(route string, statusCode int, leaseID string, leaseExpired bool) {
+	if s.ObserveAck != nil {
+		s.ObserveAck(route, statusCode, leaseID, leaseExpired)
+	}
+}
+
+func (s *Server) observeNack(route string, statusCode int, leaseID string, leaseExpired bool) {
+	if s.ObserveNack != nil {
+		s.ObserveNack(route, statusCode, leaseID, leaseExpired)
+	}
+}
+
+func (s *Server) observeExtend(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
+	if s.ObserveExtend != nil {
+		s.ObserveExtend(route, statusCode, leaseID, extendBy, leaseExpired)
+	}
 }
 
 func readLeaseRequest(w http.ResponseWriter, r *http.Request) (leaseRequest, bool) {

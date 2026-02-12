@@ -270,6 +270,12 @@ The Admin API health endpoint (`GET /healthz?details=1`) aggregates observabilit
 - Backlog trend signals with operator action playbooks
 - Tracing counters (init failures, export errors)
 - Top route/target backlog buckets
+- Queue diagnostics are cached (short TTL) and served stale-while-refresh under heavy load to keep control-plane endpoints responsive.
+
+Operational guidance for control-plane responsiveness:
+
+- Keep SLO probes on `GET /healthz` (without details) for the fastest liveness path.
+- Use `GET /healthz?details=1` and `GET /metrics` for diagnostics/monitoring; under queue saturation these endpoints prioritize bounded latency over strictly real-time queue snapshots.
 
 See [Admin API](admin-api.md) for details.
 

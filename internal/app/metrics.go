@@ -43,6 +43,14 @@ type runtimeMetrics struct {
 
 	// Queue store for on-scrape stats
 	queueStore queue.Store
+	queueStats struct {
+		mu         sync.Mutex
+		ttl        time.Duration
+		cached     queue.Stats
+		cachedAt   time.Time
+		cachedOK   bool
+		refreshing bool
+	}
 
 	pullMu      sync.Mutex
 	pullByRoute map[string]*pullRouteMetrics
@@ -76,11 +84,13 @@ type pullRouteSnapshot struct {
 }
 
 func newRuntimeMetrics() *runtimeMetrics {
-	return &runtimeMetrics{
+	m := &runtimeMetrics{
 		pullByRoute: make(map[string]*pullRouteMetrics),
 		pullLeases:  make(map[string]pullLease),
 		now:         time.Now,
 	}
+	m.queueStats.ttl = time.Second
+	return m
 }
 
 func (m *runtimeMetrics) setTracingEnabled(enabled bool) {
@@ -171,6 +181,92 @@ func (m *runtimeMetrics) observePublishResult(accepted, rejected int, code strin
 			m.publishRejectedManagedResolverMissingTotal.Add(int64(rejected))
 		}
 	}
+}
+
+func (m *runtimeMetrics) queueStatsSnapshot() (queue.Stats, bool) {
+	if m == nil || m.queueStore == nil {
+		return queue.Stats{}, false
+	}
+
+	now := time.Now()
+	m.queueStats.mu.Lock()
+	if m.queueStats.cachedOK && (m.queueStats.ttl <= 0 || now.Sub(m.queueStats.cachedAt) <= m.queueStats.ttl) {
+		stats := m.queueStats.cached
+		m.queueStats.mu.Unlock()
+		return stats, true
+	}
+
+	// Cold-start: no cache yet. Perform one blocking read to seed cache.
+	if !m.queueStats.cachedOK {
+		if m.queueStats.refreshing {
+			m.queueStats.mu.Unlock()
+			return queue.Stats{}, false
+		}
+		m.queueStats.refreshing = true
+		m.queueStats.mu.Unlock()
+		return m.refreshQueueStatsSync()
+	}
+
+	// Stale cache: return stale snapshot and refresh in background.
+	if !m.queueStats.refreshing {
+		m.queueStats.refreshing = true
+		go m.refreshQueueStatsAsync()
+	}
+	stats := m.queueStats.cached
+	m.queueStats.mu.Unlock()
+	return stats, true
+}
+
+func (m *runtimeMetrics) refreshQueueStatsSync() (queue.Stats, bool) {
+	if m == nil || m.queueStore == nil {
+		if m != nil {
+			m.queueStats.mu.Lock()
+			m.queueStats.refreshing = false
+			m.queueStats.mu.Unlock()
+		}
+		return queue.Stats{}, false
+	}
+
+	stats, err := m.queueStore.Stats()
+	at := time.Now()
+
+	m.queueStats.mu.Lock()
+	defer m.queueStats.mu.Unlock()
+	m.queueStats.refreshing = false
+	if err == nil {
+		m.queueStats.cached = stats
+		m.queueStats.cachedAt = at
+		m.queueStats.cachedOK = true
+		return stats, true
+	}
+	if m.queueStats.cachedOK {
+		return m.queueStats.cached, true
+	}
+	return queue.Stats{}, false
+}
+
+func (m *runtimeMetrics) refreshQueueStatsAsync() {
+	if m == nil || m.queueStore == nil {
+		if m != nil {
+			m.queueStats.mu.Lock()
+			m.queueStats.refreshing = false
+			m.queueStats.mu.Unlock()
+		}
+		return
+	}
+
+	stats, err := m.queueStore.Stats()
+	at := time.Now()
+
+	m.queueStats.mu.Lock()
+	defer m.queueStats.mu.Unlock()
+	m.queueStats.refreshing = false
+	if err != nil {
+		return
+	}
+	m.queueStats.cached = stats
+	m.queueStats.cachedAt = at
+	m.queueStats.cachedOK = true
 }
 
 func (m *runtimeMetrics) observePullDequeue(route string, statusCode int, items []queue.Envelope) {
@@ -737,7 +833,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			queueStore = rm.queueStore
 		}
 		if queueStore != nil {
-			if stats, err := queueStore.Stats(); err == nil {
+			if stats, ok := rm.queueStatsSnapshot(); ok {
 				queued := stats.ByState[queue.StateQueued]
 				leased := stats.ByState[queue.StateLeased]
 				dead := stats.ByState[queue.StateDead]

@@ -369,10 +369,14 @@ func TestVerifyReleaseCmd_ProvenanceAutoDetectBoth(t *testing.T) {
 		})
 	}
 
-	// Write both provenance and SBOM attestation bundles.
+	// Write both legacy and .intoto attestation bundles.
 	writeAttestationBundle(t, dir, "hookaido_v1_provenance.attestation.json",
 		buildAttestationBundle(t, provenancePredicateType, subjects))
+	writeAttestationBundle(t, dir, "hookaido_v1_provenance.intoto.jsonl",
+		buildAttestationBundle(t, provenancePredicateType, subjects))
 	writeAttestationBundle(t, dir, "hookaido_v1_sbom.attestation.json",
+		buildAttestationBundle(t, sbomAttestPredicateType, subjects))
+	writeAttestationBundle(t, dir, "hookaido_v1_sbom.intoto.jsonl",
 		buildAttestationBundle(t, sbomAttestPredicateType, subjects))
 
 	stdout := &bytes.Buffer{}
@@ -392,8 +396,14 @@ func TestVerifyReleaseCmd_ProvenanceAutoDetectBoth(t *testing.T) {
 	if !out.ProvenanceVerified {
 		t.Fatal("expected provenance_verified=true")
 	}
+	if !strings.HasSuffix(out.ProvenanceFile, "_provenance.intoto.jsonl") {
+		t.Fatalf("expected .intoto provenance preference, got %q", out.ProvenanceFile)
+	}
 	if !out.SBOMAttestVerified {
 		t.Fatal("expected sbom_attest_verified=true")
+	}
+	if !strings.HasSuffix(out.SBOMAttestFile, "_sbom.intoto.jsonl") {
+		t.Fatalf("expected .intoto sbom attestation preference, got %q", out.SBOMAttestFile)
 	}
 }
 

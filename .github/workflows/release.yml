@@ -74,7 +74,9 @@ jobs:
       - name: Export Attestation Bundles
         run: |
           cp "${{ steps.attest_provenance.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_provenance.attestation.json"
+          cp "${{ steps.attest_provenance.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_provenance.intoto.jsonl"
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.attestation.json"
+          cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.intoto.jsonl"
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:

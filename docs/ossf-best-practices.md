@@ -102,6 +102,29 @@ Legend:
 - `release_notes_vulns`
   - Confirm release/advisory practice when vulnerabilities occur.
 
+### Portal Text Snippets (Manual Criteria)
+
+Use these snippets directly in the questionnaire comment/evidence fields and adjust wording if the portal asks for strict yes/no.
+
+- `report_responses`
+  - Suggested text:
+    - "The repository has public issue tracking enabled (`has_issues=true`) and explicit support guidance in `SUPPORT.md`, including expected maintainer acknowledgement within a few business days. At the time of submission (2026-02-12), the public issue tracker has no open issues (`open_issues_count=0`), so there are no delayed responses to report."
+- `enhancement_responses`
+  - Suggested text:
+    - "Feature requests are supported through issue templates (`.github/ISSUE_TEMPLATE/feature_request.yml`) and reviewed through the normal PR/issue process (`CONTRIBUTING.md`, `GOVERNANCE.md`). At submission time, no enhancement issues are currently open in the public tracker."
+- `vulnerability_report_response`
+  - Suggested text:
+    - "Private vulnerability reporting is documented in `SECURITY.md` via GitHub private advisories, with explicit response targets (acknowledgement within 3 business days, triage within 7 business days)."
+- `vulnerabilities_critical_fixed`
+  - Suggested text:
+    - "As of 2026-02-12, the repository shows no published GitHub security advisories (`security_advisories_count=0`). The project policy in `SECURITY.md` commits to coordinated disclosure and remediation when vulnerabilities are reported."
+- `vulnerabilities_fixed_60_days`
+  - Suggested text:
+    - "As of 2026-02-12, there are no published security advisories for this repository, so there are no known unfixed vulnerabilities older than 60 days."
+- `release_notes_vulns`
+  - Suggested text:
+    - "Release notes are published through GitHub Releases and `CHANGELOG.md`; `SECURITY.md` states that once a fix is available, maintainers publish release notes and a security advisory when applicable."
+
 ### Review Carefully (wording-sensitive)
 
 - `dynamic_analysis`, `dynamic_analysis_fixed`, `dynamic_analysis_unsafe`

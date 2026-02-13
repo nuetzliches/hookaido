@@ -11,6 +11,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 - Prometheus queue saturation gauges: `hookaido_queue_oldest_queued_age_seconds`, `hookaido_queue_ready_lag_seconds`, and `hookaido_queue_total` on `/metrics` (alongside `hookaido_queue_depth{state}`) for direct lag/age alerting without Admin health JSON scraping.
 
+- Ingress rejection breakdown metric `hookaido_ingress_rejected_by_reason_total{reason,status}` for bounded-cardinality attribution across queue pressure, adaptive backpressure, auth, routing, policy, and fallback reject paths.
+
 ### Fixed
 
 - Memory backend retention safety: with `delivered_retention` enabled, `queue_limits.max_depth` now also caps `queued + leased + delivered` items so sustained pull/ack traffic cannot grow delivered retention unbounded in RAM.

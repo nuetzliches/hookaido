@@ -31,12 +31,14 @@ type runtimeMetrics struct {
 	publishScopedRejectedTotal                 atomic.Int64
 
 	// Ingress counters
-	ingressAcceptedTotal    atomic.Int64
-	ingressRejectedTotal    atomic.Int64
-	ingressEnqueuedTotal    atomic.Int64
-	ingressAdaptiveTotal    atomic.Int64
-	ingressAdaptiveMu       sync.Mutex
-	ingressAdaptiveByReason map[string]int64
+	ingressAcceptedTotal            atomic.Int64
+	ingressRejectedTotal            atomic.Int64
+	ingressEnqueuedTotal            atomic.Int64
+	ingressAdaptiveTotal            atomic.Int64
+	ingressAdaptiveMu               sync.Mutex
+	ingressAdaptiveByReason         map[string]int64
+	ingressRejectMu                 sync.Mutex
+	ingressRejectedByReasonAndState map[string]map[string]int64
 
 	// Delivery counters
 	deliveryAttemptTotal atomic.Int64
@@ -88,10 +90,11 @@ type pullRouteSnapshot struct {
 
 func newRuntimeMetrics() *runtimeMetrics {
 	m := &runtimeMetrics{
-		pullByRoute:             make(map[string]*pullRouteMetrics),
-		pullLeases:              make(map[string]pullLease),
-		now:                     time.Now,
-		ingressAdaptiveByReason: make(map[string]int64),
+		pullByRoute:                     make(map[string]*pullRouteMetrics),
+		pullLeases:                      make(map[string]pullLease),
+		now:                             time.Now,
+		ingressAdaptiveByReason:         make(map[string]int64),
+		ingressRejectedByReasonAndState: make(map[string]map[string]int64),
 	}
 	m.queueStats.ttl = time.Second
 	return m
@@ -128,12 +131,33 @@ func (m *runtimeMetrics) observeIngressResult(accepted bool, enqueued int) {
 	}
 	if accepted {
 		m.ingressAcceptedTotal.Add(1)
-	} else {
-		m.ingressRejectedTotal.Add(1)
 	}
 	if enqueued > 0 {
 		m.ingressEnqueuedTotal.Add(int64(enqueued))
 	}
+}
+
+func (m *runtimeMetrics) observeIngressReject(statusCode int, reason string) {
+	if m == nil {
+		return
+	}
+
+	normalizedReason := normalizeIngressRejectReason(reason)
+	normalizedStatus := normalizeIngressRejectStatus(statusCode)
+
+	m.ingressRejectedTotal.Add(1)
+
+	m.ingressRejectMu.Lock()
+	if m.ingressRejectedByReasonAndState == nil {
+		m.ingressRejectedByReasonAndState = make(map[string]map[string]int64)
+	}
+	byStatus := m.ingressRejectedByReasonAndState[normalizedReason]
+	if byStatus == nil {
+		byStatus = make(map[string]int64)
+		m.ingressRejectedByReasonAndState[normalizedReason] = byStatus
+	}
+	byStatus[normalizedStatus]++
+	m.ingressRejectMu.Unlock()
 }
 
 func (m *runtimeMetrics) observeIngressAdaptiveBackpressure(reason string) {
@@ -537,6 +561,28 @@ var adaptiveBackpressureReasonOrder = []string{
 	"other",
 }
 
+var ingressRejectReasonOrder = []string{
+	"queue_full",
+	"adaptive_backpressure",
+	"rate_limit",
+	"auth",
+	"not_found",
+	"policy",
+	"other",
+}
+
+var ingressRejectStatusOrder = []string{
+	"400",
+	"401",
+	"403",
+	"404",
+	"405",
+	"413",
+	"429",
+	"503",
+	"other",
+}
+
 func orderedPullStatuses(byStatus map[string]int64) []string {
 	seen := make(map[string]struct{}, len(byStatus))
 	out := make([]string, 0, len(byStatus)+len(pullStatusPreferredOrder))
@@ -582,6 +628,48 @@ func normalizeAdaptiveBackpressureReason(reason string) string {
 	}
 }
 
+func normalizeIngressRejectReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "queue_full":
+		return "queue_full"
+	case "adaptive_backpressure":
+		return "adaptive_backpressure"
+	case "rate_limit":
+		return "rate_limit"
+	case "auth":
+		return "auth"
+	case "not_found":
+		return "not_found"
+	case "policy":
+		return "policy"
+	default:
+		return "other"
+	}
+}
+
+func normalizeIngressRejectStatus(statusCode int) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return "400"
+	case http.StatusUnauthorized:
+		return "401"
+	case http.StatusForbidden:
+		return "403"
+	case http.StatusNotFound:
+		return "404"
+	case http.StatusMethodNotAllowed:
+		return "405"
+	case http.StatusRequestEntityTooLarge:
+		return "413"
+	case http.StatusTooManyRequests:
+		return "429"
+	case http.StatusServiceUnavailable:
+		return "503"
+	default:
+		return "other"
+	}
+}
+
 func (m *runtimeMetrics) ingressAdaptiveSnapshot() map[string]int64 {
 	out := make(map[string]int64, len(adaptiveBackpressureReasonOrder))
 	for _, reason := range adaptiveBackpressureReasonOrder {
@@ -594,6 +682,40 @@ func (m *runtimeMetrics) ingressAdaptiveSnapshot() map[string]int64 {
 	defer m.ingressAdaptiveMu.Unlock()
 	for reason, count := range m.ingressAdaptiveByReason {
 		out[reason] = count
+	}
+	return out
+}
+
+func newIngressRejectBreakdownSnapshot() map[string]map[string]int64 {
+	out := make(map[string]map[string]int64, len(ingressRejectReasonOrder))
+	for _, reason := range ingressRejectReasonOrder {
+		byStatus := make(map[string]int64, len(ingressRejectStatusOrder))
+		for _, status := range ingressRejectStatusOrder {
+			byStatus[status] = 0
+		}
+		out[reason] = byStatus
+	}
+	return out
+}
+
+func (m *runtimeMetrics) ingressRejectBreakdownSnapshot() map[string]map[string]int64 {
+	out := newIngressRejectBreakdownSnapshot()
+	if m == nil {
+		return out
+	}
+	m.ingressRejectMu.Lock()
+	defer m.ingressRejectMu.Unlock()
+	for reason, byStatus := range m.ingressRejectedByReasonAndState {
+		targetByStatus, ok := out[reason]
+		if !ok {
+			continue
+		}
+		for status, count := range byStatus {
+			if _, exists := targetByStatus[status]; !exists {
+				continue
+			}
+			targetByStatus[status] = count
+		}
 	}
 	return out
 }
@@ -750,6 +872,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		for _, reason := range adaptiveBackpressureReasonOrder {
 			ingressAdaptiveByReason[reason] = 0
 		}
+		ingressRejectBreakdown := newIngressRejectBreakdownSnapshot()
 		var pullSnapshot map[string]pullRouteSnapshot
 		if rm != nil {
 			tracingEnabled = rm.tracingEnabled.Load()
@@ -768,6 +891,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			publishScopedRejectedTotal = rm.publishScopedRejectedTotal.Load()
 			ingressAdaptiveTotal = rm.ingressAdaptiveTotal.Load()
 			ingressAdaptiveByReason = rm.ingressAdaptiveSnapshot()
+			ingressRejectBreakdown = rm.ingressRejectBreakdownSnapshot()
 			pullSnapshot = rm.pullSnapshot()
 		}
 
@@ -839,6 +963,20 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_rejected_total Total number of ingress requests rejected (auth, rate-limit, not-found, etc).\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_rejected_total counter\n")
 		_, _ = fmt.Fprintf(w, "hookaido_ingress_rejected_total %d\n", ingressRejected)
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_rejected_by_reason_total Total number of ingress requests rejected by normalized reason and status.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_rejected_by_reason_total counter\n")
+		for _, reason := range ingressRejectReasonOrder {
+			byStatus := ingressRejectBreakdown[reason]
+			for _, status := range ingressRejectStatusOrder {
+				_, _ = fmt.Fprintf(
+					w,
+					"hookaido_ingress_rejected_by_reason_total{reason=%q,status=%q} %d\n",
+					reason,
+					status,
+					byStatus[status],
+				)
+			}
+		}
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_enqueued_total Total number of items enqueued via ingress (may exceed accepted if fanout targets > 1).\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_enqueued_total counter\n")
 		_, _ = fmt.Fprintf(w, "hookaido_ingress_enqueued_total %d\n", ingressEnqueued)

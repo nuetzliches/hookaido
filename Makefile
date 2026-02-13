@@ -1,7 +1,12 @@
+GOEXE := $(shell go env GOEXE)
+BINARY := hookaido$(GOEXE)
+BINDIR := bin
+
 .PHONY: build test fmt lint check release-check dist dist-signed dist-verify
 
 build:
-	go build ./cmd/hookaido
+	@mkdir -p "$(BINDIR)"
+	go build -o "$(BINDIR)/$(BINARY)" ./cmd/hookaido
 
 test:
 	go test ./...

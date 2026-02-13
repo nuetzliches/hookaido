@@ -201,6 +201,43 @@ func TestMetricsHandler_QueueDepth(t *testing.T) {
 		`hookaido_queue_depth{state="queued"} 2`,
 		`hookaido_queue_depth{state="leased"} 0`,
 		`hookaido_queue_depth{state="dead"} 0`,
+		`hookaido_queue_total 2`,
+		`hookaido_queue_oldest_queued_age_seconds `,
+		`hookaido_queue_ready_lag_seconds `,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_QueueLagAge(t *testing.T) {
+	now := time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+	if err := store.Enqueue(queue.Envelope{
+		ID:         "e1",
+		Route:      "/test",
+		Target:     "pull",
+		State:      queue.StateQueued,
+		ReceivedAt: nowVar.Add(-10 * time.Second),
+		NextRunAt:  nowVar.Add(-5 * time.Second),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	h := newMetricsHandler("dev", nowVar, m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_queue_total 1`,
+		`hookaido_queue_oldest_queued_age_seconds 10.000000`,
+		`hookaido_queue_ready_lag_seconds 5.000000`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
@@ -219,6 +256,15 @@ func TestMetricsHandler_QueueDepthNilStore(t *testing.T) {
 	body := rr.Body.String()
 	if strings.Contains(body, "hookaido_queue_depth") {
 		t.Fatalf("queue_depth should not appear when store is nil:\n%s", body)
+	}
+	if strings.Contains(body, "hookaido_queue_total") {
+		t.Fatalf("queue_total should not appear when store is nil:\n%s", body)
+	}
+	if strings.Contains(body, "hookaido_queue_oldest_queued_age_seconds") {
+		t.Fatalf("queue_oldest_queued_age_seconds should not appear when store is nil:\n%s", body)
+	}
+	if strings.Contains(body, "hookaido_queue_ready_lag_seconds") {
+		t.Fatalf("queue_ready_lag_seconds should not appear when store is nil:\n%s", body)
 	}
 }
 

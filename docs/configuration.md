@@ -219,6 +219,11 @@ delivered_retention {
 
 Pruning uses the same `queue_retention.prune_interval` cadence. Set `max_age off` to disable.
 
+When `queue { backend memory }` is used and delivered retention is enabled, `queue_limits.max_depth`
+also guards `queued + leased + delivered` items. This prevents unbounded delivered-retention growth
+under sustained pull/ack workloads. If the guard is reached, new enqueues are rejected until retention
+pruning frees capacity.
+
 ### `dlq_retention`
 
 ```hcl

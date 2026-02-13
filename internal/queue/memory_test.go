@@ -1197,9 +1197,8 @@ func TestMemoryStore_QueueLimitsDropOldest(t *testing.T) {
 	}
 }
 
-// TestMemoryStore_MaxDepthCountsOnlyActive verifies that max_depth counts only
-// queued+leased items, matching SQLite semantics. Dead/delivered/canceled items
-// must not consume depth budget.
+// TestMemoryStore_MaxDepthCountsOnlyActive verifies that max_depth counts queued+leased
+// for active queue pressure. Dead items must not consume active depth budget.
 func TestMemoryStore_MaxDepthCountsOnlyActive(t *testing.T) {
 	s := NewMemoryStore(WithQueueLimits(2, "reject"))
 
@@ -1237,6 +1236,100 @@ func TestMemoryStore_MaxDepthCountsOnlyActive(t *testing.T) {
 	}
 	if stats.ByState[StateDead] != 1 {
 		t.Fatalf("expected 1 dead, got %d", stats.ByState[StateDead])
+	}
+}
+
+func TestMemoryStore_DeliveredRetentionRespectsMaxDepth(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := NewMemoryStore(
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithQueueLimits(2, "reject"),
+		WithQueueRetention(0, 1*time.Second),
+		WithDeliveredRetention(time.Hour),
+	)
+
+	if err := s.Enqueue(Envelope{ID: "a", Route: "/r", Target: "t"}); err != nil {
+		t.Fatalf("enqueue a: %v", err)
+	}
+	if err := s.Enqueue(Envelope{ID: "b", Route: "/r", Target: "t"}); err != nil {
+		t.Fatalf("enqueue b: %v", err)
+	}
+
+	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "t", Batch: 2, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("expected 2 dequeued items, got %d", len(resp.Items))
+	}
+	for _, item := range resp.Items {
+		if err := s.Ack(item.LeaseID); err != nil {
+			t.Fatalf("ack %s: %v", item.ID, err)
+		}
+	}
+
+	if err := s.Enqueue(Envelope{ID: "c", Route: "/r", Target: "t"}); err != ErrQueueFull {
+		t.Fatalf("expected ErrQueueFull while delivered retention is at max_depth, got %v", err)
+	}
+
+	stats, err := s.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.ByState[StateDelivered] != 2 {
+		t.Fatalf("expected 2 delivered, got %d", stats.ByState[StateDelivered])
+	}
+	if stats.ByState[StateQueued] != 0 {
+		t.Fatalf("expected 0 queued, got %d", stats.ByState[StateQueued])
+	}
+
+	nowVar = nowVar.Add(2 * time.Hour)
+	_, _ = s.Dequeue(DequeueRequest{Route: "/r", Target: "t"})
+
+	if err := s.Enqueue(Envelope{ID: "c", Route: "/r", Target: "t"}); err != nil {
+		t.Fatalf("enqueue c after retention prune: %v", err)
+	}
+}
+
+func TestMemoryStore_EnqueueBatch_DeliveredRetentionRespectsMaxDepth(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := NewMemoryStore(
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithQueueLimits(3, "reject"),
+		WithQueueRetention(0, 1*time.Second),
+		WithDeliveredRetention(time.Hour),
+	)
+
+	for _, id := range []string{"a", "b", "c"} {
+		if err := s.Enqueue(Envelope{ID: id, Route: "/r", Target: "t"}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+
+	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "t", Batch: 3, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(resp.Items) != 3 {
+		t.Fatalf("expected 3 dequeued items, got %d", len(resp.Items))
+	}
+	for _, item := range resp.Items {
+		if err := s.Ack(item.LeaseID); err != nil {
+			t.Fatalf("ack %s: %v", item.ID, err)
+		}
+	}
+
+	n, err := s.EnqueueBatch([]Envelope{
+		{ID: "d", Route: "/r", Target: "t"},
+		{ID: "e", Route: "/r", Target: "t"},
+	})
+	if err != ErrQueueFull {
+		t.Fatalf("expected ErrQueueFull, got n=%d err=%v", n, err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 committed, got %d", n)
 	}
 }
 

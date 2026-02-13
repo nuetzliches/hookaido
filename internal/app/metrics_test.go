@@ -37,6 +37,7 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 		"hookaido_publish_scoped_rejected_total 0",
 		"hookaido_ingress_accepted_total 0",
 		"hookaido_ingress_rejected_total 0",
+		`hookaido_ingress_rejected_by_reason_total{reason="queue_full",status="503"} 0`,
 		"hookaido_ingress_enqueued_total 0",
 		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 0`,
 		"hookaido_ingress_adaptive_backpressure_applied_total 0",
@@ -131,10 +132,10 @@ func intFromAny(v any) int {
 
 func TestMetricsHandler_IngressCounters(t *testing.T) {
 	m := newRuntimeMetrics()
-	m.observeIngressResult(true, 2)  // accepted, fanout to 2 targets
-	m.observeIngressResult(true, 1)  // accepted, single target
-	m.observeIngressResult(false, 0) // rejected (auth, rate-limit, etc)
-	m.observeIngressResult(false, 0) // rejected
+	m.observeIngressResult(true, 2) // accepted, fanout to 2 targets
+	m.observeIngressResult(true, 1) // accepted, single target
+	m.observeIngressReject(http.StatusTooManyRequests, "rate_limit")
+	m.observeIngressReject(http.StatusUnauthorized, "auth")
 	m.observeIngressAdaptiveBackpressure("queued_pressure")
 	m.observeIngressAdaptiveBackpressure("ready_lag")
 	m.observeIngressAdaptiveBackpressure("")
@@ -147,11 +148,33 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 	for _, want := range []string{
 		"hookaido_ingress_accepted_total 2",
 		"hookaido_ingress_rejected_total 2",
+		`hookaido_ingress_rejected_by_reason_total{reason="rate_limit",status="429"} 1`,
+		`hookaido_ingress_rejected_by_reason_total{reason="auth",status="401"} 1`,
 		"hookaido_ingress_enqueued_total 3",
 		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 1`,
 		`hookaido_ingress_adaptive_backpressure_total{reason="ready_lag"} 1`,
 		`hookaido_ingress_adaptive_backpressure_total{reason="unspecified"} 1`,
 		"hookaido_ingress_adaptive_backpressure_applied_total 3",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_IngressRejectBreakdownNormalization(t *testing.T) {
+	m := newRuntimeMetrics()
+	m.observeIngressReject(http.StatusServiceUnavailable, "queue_full")
+	m.observeIngressReject(http.StatusTeapot, "unexpected_reason")
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_ingress_rejected_by_reason_total{reason="queue_full",status="503"} 1`,
+		`hookaido_ingress_rejected_by_reason_total{reason="other",status="other"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)

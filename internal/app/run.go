@@ -1738,6 +1738,11 @@ func startServers(
 			appMetrics.observeIngressAdaptiveBackpressure(reason)
 		}
 	}
+	ing.ObserveReject = func(_ string, statusCode int, reason string) {
+		if appMetrics != nil {
+			appMetrics.observeIngressReject(statusCode, reason)
+		}
+	}
 
 	pullHandler := pullapi.NewServer(store)
 	pullHandler.ResolveRoute = state.resolvePull

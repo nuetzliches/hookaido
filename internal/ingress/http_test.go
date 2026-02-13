@@ -150,12 +150,24 @@ func TestIngress_RateLimited(t *testing.T) {
 	srv.AllowRequestFor = func(route string) bool {
 		return false
 	}
+	observedStatus := 0
+	observedReason := ""
+	srv.ObserveReject = func(_ string, statusCode int, reason string) {
+		observedStatus = statusCode
+		observedReason = reason
+	}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/webhooks/github", strings.NewReader(`{"x":1}`))
 	srv.ServeHTTP(rr, req)
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429, got %d", rr.Code)
+	}
+	if observedStatus != http.StatusTooManyRequests {
+		t.Fatalf("expected observed status 429, got %d", observedStatus)
+	}
+	if observedReason != "rate_limit" {
+		t.Fatalf("expected observed reason rate_limit, got %q", observedReason)
 	}
 }
 
@@ -179,6 +191,8 @@ func TestIngress_AdaptiveBackpressureRejected(t *testing.T) {
 		observedAccepted bool
 		observedEnqueued int
 		observedReason   string
+		observedStatus   int
+		observedClass    string
 	)
 	srv.ObserveResult = func(accepted bool, enqueued int) {
 		observedAccepted = accepted
@@ -186,6 +200,10 @@ func TestIngress_AdaptiveBackpressureRejected(t *testing.T) {
 	}
 	srv.ObserveAdaptiveReject = func(_ string, reason string) {
 		observedReason = reason
+	}
+	srv.ObserveReject = func(_ string, statusCode int, reason string) {
+		observedStatus = statusCode
+		observedClass = reason
 	}
 
 	rr := httptest.NewRecorder()
@@ -202,6 +220,12 @@ func TestIngress_AdaptiveBackpressureRejected(t *testing.T) {
 	}
 	if observedReason != "ready_lag" {
 		t.Fatalf("expected reason ready_lag, got %q", observedReason)
+	}
+	if observedStatus != http.StatusServiceUnavailable {
+		t.Fatalf("expected observed status 503, got %d", observedStatus)
+	}
+	if observedClass != "adaptive_backpressure" {
+		t.Fatalf("expected observed reject class adaptive_backpressure, got %q", observedClass)
 	}
 }
 
@@ -464,9 +488,15 @@ func TestIngress_EnqueueFailureReturns503(t *testing.T) {
 
 	var observedAccepted bool
 	var observedEnqueued int
+	var observedStatus int
+	var observedReason string
 	srv.ObserveResult = func(accepted bool, enqueued int) {
 		observedAccepted = accepted
 		observedEnqueued = enqueued
+	}
+	srv.ObserveReject = func(_ string, statusCode int, reason string) {
+		observedStatus = statusCode
+		observedReason = reason
 	}
 
 	rr := httptest.NewRecorder()
@@ -480,6 +510,48 @@ func TestIngress_EnqueueFailureReturns503(t *testing.T) {
 	}
 	if observedEnqueued != 0 {
 		t.Fatalf("expected enqueued=0, got %d", observedEnqueued)
+	}
+	if observedStatus != http.StatusServiceUnavailable {
+		t.Fatalf("expected observed status 503, got %d", observedStatus)
+	}
+	if observedReason != "other" {
+		t.Fatalf("expected observed reason other, got %q", observedReason)
+	}
+}
+
+func TestIngress_QueueFullObservedAsQueueFull(t *testing.T) {
+	store := queue.NewMemoryStore(queue.WithQueueLimits(1, "reject"))
+	srv := NewServer(store)
+	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
+		return "/hooks/test", true
+	}
+
+	// Fill queue to max depth (leave item queued, no consumer).
+	rr1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "http://example/hooks/test", strings.NewReader(`{"a":1}`))
+	srv.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusAccepted {
+		t.Fatalf("expected first request 202, got %d", rr1.Code)
+	}
+
+	observedStatus := 0
+	observedReason := ""
+	srv.ObserveReject = func(_ string, statusCode int, reason string) {
+		observedStatus = statusCode
+		observedReason = reason
+	}
+
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "http://example/hooks/test", strings.NewReader(`{"a":2}`))
+	srv.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected second request 503, got %d", rr2.Code)
+	}
+	if observedStatus != http.StatusServiceUnavailable {
+		t.Fatalf("expected observed status 503, got %d", observedStatus)
+	}
+	if observedReason != "queue_full" {
+		t.Fatalf("expected observed reason queue_full, got %q", observedReason)
 	}
 }
 

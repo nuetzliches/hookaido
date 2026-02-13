@@ -25,6 +25,7 @@ type Server struct {
 	TargetsFor            func(route string) []string
 	ObserveResult         func(accepted bool, enqueued int)
 	ObserveAdaptiveReject func(route string, reason string)
+	ObserveReject         func(route string, statusCode int, reason string)
 	MaxBodyBytes          int64
 	MaxHeaderBytes        int
 }
@@ -49,17 +50,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Allow", strings.Join(allowed, ", "))
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				s.observe(false, 0)
+				s.observeReject("", http.StatusMethodNotAllowed, "not_found")
 				return
 			}
 		}
 		w.WriteHeader(http.StatusNotFound)
 		s.observe(false, 0)
+		s.observeReject("", http.StatusNotFound, "not_found")
 		return
 	}
 
 	if s.AllowRequestFor != nil && !s.AllowRequestFor(route) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		s.observe(false, 0)
+		s.observeReject(route, http.StatusTooManyRequests, "rate_limit")
 		return
 	}
 	if s.AllowEnqueueFor != nil {
@@ -70,6 +74,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(statusCode)
 			s.observe(false, 0)
+			s.observeReject(route, statusCode, "adaptive_backpressure")
 			if s.ObserveAdaptiveReject != nil {
 				s.ObserveAdaptiveReject(route, strings.TrimSpace(reason))
 			}
@@ -82,6 +87,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !a.Verify(r) {
 				w.WriteHeader(http.StatusUnauthorized)
 				s.observe(false, 0)
+				s.observeReject(route, http.StatusUnauthorized, "auth")
 				return
 			}
 		}
@@ -105,10 +111,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &maxErr) {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			s.observe(false, 0)
+			s.observeReject(route, http.StatusRequestEntityTooLarge, "policy")
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)
 		s.observe(false, 0)
+		s.observeReject(route, http.StatusBadRequest, "policy")
 		return
 	}
 
@@ -119,6 +127,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if status != 0 {
 				w.WriteHeader(status)
 				s.observe(false, 0)
+				s.observeReject(route, status, "auth")
 				return
 			}
 			forwardCopied = copied
@@ -130,6 +139,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := a.Verify(r, requestPath, body); err != nil {
 				w.WriteHeader(http.StatusUnauthorized)
 				s.observe(false, 0)
+				s.observeReject(route, http.StatusUnauthorized, "auth")
 				return
 			}
 		}
@@ -147,6 +157,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		s.observe(false, 0)
+		s.observeReject(route, http.StatusRequestEntityTooLarge, "policy")
 		return
 	}
 	env.Headers = headers
@@ -164,6 +175,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := s.Store.Enqueue(env); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			s.observe(false, enqueued)
+			reason := "other"
+			if errors.Is(err, queue.ErrQueueFull) {
+				reason = "queue_full"
+			}
+			s.observeReject(route, http.StatusServiceUnavailable, reason)
 			return
 		}
 		enqueued++
@@ -178,6 +194,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) observe(accepted bool, enqueued int) {
 	if s.ObserveResult != nil {
 		s.ObserveResult(accepted, enqueued)
+	}
+}
+
+func (s *Server) observeReject(route string, statusCode int, reason string) {
+	if s.ObserveReject != nil {
+		s.ObserveReject(route, statusCode, strings.TrimSpace(reason))
 	}
 }
 

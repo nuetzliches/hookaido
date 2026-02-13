@@ -127,6 +127,7 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | --------------------------------- | ------- | ------------------------------------------------- |
 | `hookaido_ingress_accepted_total` | counter | Ingress requests accepted and enqueued            |
 | `hookaido_ingress_rejected_total` | counter | Ingress requests rejected (auth, rate-limit, etc) |
+| `hookaido_ingress_rejected_by_reason_total{reason,status}` | counter | Ingress rejects by normalized reason + status |
 | `hookaido_ingress_enqueued_total` | counter | Items enqueued via ingress (>accepted if fanout)  |
 | `hookaido_ingress_adaptive_backpressure_total{reason}` | counter | Ingress requests rejected by adaptive backpressure (by trigger reason) |
 | `hookaido_ingress_adaptive_backpressure_applied_total` | counter | Total ingress requests rejected by adaptive backpressure |

@@ -924,6 +924,15 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 				_, _ = fmt.Fprintf(w, "hookaido_queue_depth{state=\"queued\"} %d\n", queued)
 				_, _ = fmt.Fprintf(w, "hookaido_queue_depth{state=\"leased\"} %d\n", leased)
 				_, _ = fmt.Fprintf(w, "hookaido_queue_depth{state=\"dead\"} %d\n", dead)
+				_, _ = fmt.Fprintf(w, "# HELP hookaido_queue_total Current total number of items in the queue.\n")
+				_, _ = fmt.Fprintf(w, "# TYPE hookaido_queue_total gauge\n")
+				_, _ = fmt.Fprintf(w, "hookaido_queue_total %d\n", stats.Total)
+				_, _ = fmt.Fprintf(w, "# HELP hookaido_queue_oldest_queued_age_seconds Age in seconds of the oldest queued item.\n")
+				_, _ = fmt.Fprintf(w, "# TYPE hookaido_queue_oldest_queued_age_seconds gauge\n")
+				_, _ = fmt.Fprintf(w, "hookaido_queue_oldest_queued_age_seconds %.6f\n", stats.OldestQueuedAge.Seconds())
+				_, _ = fmt.Fprintf(w, "# HELP hookaido_queue_ready_lag_seconds Lag in seconds of the earliest ready queued item.\n")
+				_, _ = fmt.Fprintf(w, "# TYPE hookaido_queue_ready_lag_seconds gauge\n")
+				_, _ = fmt.Fprintf(w, "hookaido_queue_ready_lag_seconds %.6f\n", stats.ReadyLag.Seconds())
 			}
 
 			if provider, ok := queueStore.(queue.RuntimeMetricsProvider); ok {

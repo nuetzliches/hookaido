@@ -117,9 +117,9 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | Metric                          | Type    | Description                                   |
 | ------------------------------- | ------- | --------------------------------------------- |
 | `hookaido_queue_depth`          | gauge   | Current items by state (queued, leased, dead) |
-| `hookaido_queue_enqueued_total` | counter | Total enqueued items                          |
-| `hookaido_queue_acked_total`    | counter | Total acknowledged items                      |
-| `hookaido_queue_dead_total`     | counter | Total dead-lettered items                     |
+| `hookaido_queue_total`          | gauge   | Current total items across all queue states   |
+| `hookaido_queue_oldest_queued_age_seconds` | gauge | Age of the oldest queued item in seconds |
+| `hookaido_queue_ready_lag_seconds` | gauge | Ready lag of the earliest runnable queued item in seconds |
 
 **Ingress metrics:**
 

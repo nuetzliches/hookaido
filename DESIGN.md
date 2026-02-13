@@ -363,7 +363,7 @@ Secret rotation semantics:
 - Metrics include publish mutation counters: `hookaido_publish_accepted_total`, `hookaido_publish_rejected_total`, rejection-class counters (`hookaido_publish_rejected_validation_total`, `hookaido_publish_rejected_policy_total`, `hookaido_publish_rejected_conflict_total`, `hookaido_publish_rejected_queue_full_total`, `hookaido_publish_rejected_store_total`), managed-ownership policy counters (`hookaido_publish_rejected_managed_target_mismatch_total`, `hookaido_publish_rejected_managed_resolver_missing_total`), and scoped counters (`hookaido_publish_scoped_accepted_total`, `hookaido_publish_scoped_rejected_total`).
 - Metrics include ingress counters: `hookaido_ingress_accepted_total`, `hookaido_ingress_rejected_total`, `hookaido_ingress_enqueued_total`, adaptive-backpressure counters `hookaido_ingress_adaptive_backpressure_total{reason}`, and `hookaido_ingress_adaptive_backpressure_applied_total`.
 - Metrics include delivery counters: `hookaido_delivery_attempts_total`, `hookaido_delivery_acked_total`, `hookaido_delivery_retry_total`, `hookaido_delivery_dead_total`.
-- Metrics include on-scrape queue depth gauge: `hookaido_queue_depth{state}` (queued, leased, dead).
+- Metrics include on-scrape queue gauges: `hookaido_queue_depth{state}` (queued, leased, dead), `hookaido_queue_total`, `hookaido_queue_oldest_queued_age_seconds`, and `hookaido_queue_ready_lag_seconds`.
 
 ## CLI
 - `hookaido run --config ./Hookaidofile [--db ./hookaido.db] [--pid-file ./hookaido.pid] [--watch] [--log-level info] [--dotenv ./.env]`

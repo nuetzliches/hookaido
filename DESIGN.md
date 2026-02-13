@@ -178,6 +178,8 @@ Persisted, replayable envelope:
 - Controlled by `delivered_retention { max_age }` (opt-in).
 - Pruning removes delivered items older than `max_age`.
 - Pruning cadence uses `queue_retention.prune_interval`.
+- For `queue { backend memory }`, when delivered retention is enabled, `queue_limits.max_depth`
+  also guards `queued + leased + delivered` items to bound in-memory retention growth.
 - Set `max_age off` (or `0`) to disable delivered retention.
 
 ### DLQ Retention & Pruning

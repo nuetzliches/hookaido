@@ -127,13 +127,18 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 	now := s.nowFn()
 	s.maybePruneLocked(now)
 
-	if s.maxDepth > 0 && s.activeCountLocked() >= s.maxDepth {
-		if s.dropPolicy == "drop_oldest" {
+	if s.maxDepth > 0 {
+		activeCount := s.activeCountLocked()
+		activeDeliveredCount := s.activeDeliveredCountLocked()
+		for activeCount >= s.maxDepth || (s.deliveredRetentionMaxAge > 0 && activeDeliveredCount >= s.maxDepth) {
+			if s.dropPolicy != "drop_oldest" {
+				return ErrQueueFull
+			}
 			if !s.dropOldestQueuedLocked() {
 				return ErrQueueFull
 			}
-		} else {
-			return ErrQueueFull
+			activeCount = s.activeCountLocked()
+			activeDeliveredCount = s.activeDeliveredCountLocked()
 		}
 	}
 
@@ -191,10 +196,16 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 
 	// Pre-validate: check depth, duplicates, and prepare copies.
 	activeCount := s.activeCountLocked()
+	activeDeliveredCount := s.activeDeliveredCountLocked()
 	needed := len(items)
 	if s.maxDepth > 0 {
-		if s.dropPolicy != "drop_oldest" && activeCount+needed > s.maxDepth {
-			return 0, ErrQueueFull
+		if s.dropPolicy != "drop_oldest" {
+			if activeCount+needed > s.maxDepth {
+				return 0, ErrQueueFull
+			}
+			if s.deliveredRetentionMaxAge > 0 && activeDeliveredCount+needed > s.maxDepth {
+				return 0, ErrQueueFull
+			}
 		}
 	}
 
@@ -239,11 +250,12 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 
 	// Handle depth overflow with drop_oldest.
 	if s.maxDepth > 0 {
-		for activeCount+len(prepared) > s.maxDepth {
+		for activeCount+len(prepared) > s.maxDepth || (s.deliveredRetentionMaxAge > 0 && activeDeliveredCount+len(prepared) > s.maxDepth) {
 			if !s.dropOldestQueuedLocked() {
 				return 0, ErrQueueFull
 			}
 			activeCount = s.activeCountLocked()
+			activeDeliveredCount = s.activeDeliveredCountLocked()
 		}
 	}
 
@@ -265,6 +277,19 @@ func (s *MemoryStore) activeCountLocked() int {
 	n := 0
 	for _, env := range s.items {
 		if env.State == StateQueued || env.State == StateLeased {
+			n++
+		}
+	}
+	return n
+}
+
+// activeDeliveredCountLocked counts queued, leased, and delivered items.
+// For memory backend this protects against unbounded delivered-retention growth
+// under sustained pull workloads.
+func (s *MemoryStore) activeDeliveredCountLocked() int {
+	n := 0
+	for _, env := range s.items {
+		if env.State == StateQueued || env.State == StateLeased || env.State == StateDelivered {
 			n++
 		}
 	}

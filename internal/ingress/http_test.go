@@ -479,6 +479,14 @@ func (f *failingEnqueueStore) Enqueue(env queue.Envelope) error {
 	return errors.New("synthetic enqueue failure")
 }
 
+type memoryPressureEnqueueStore struct {
+	queue.Store
+}
+
+func (f *memoryPressureEnqueueStore) Enqueue(env queue.Envelope) error {
+	return queue.ErrMemoryPressure
+}
+
 func TestIngress_EnqueueFailureReturns503(t *testing.T) {
 	store := &failingEnqueueStore{Store: queue.NewMemoryStore()}
 	srv := NewServer(store)
@@ -552,6 +560,34 @@ func TestIngress_QueueFullObservedAsQueueFull(t *testing.T) {
 	}
 	if observedReason != "queue_full" {
 		t.Fatalf("expected observed reason queue_full, got %q", observedReason)
+	}
+}
+
+func TestIngress_EnqueueMemoryPressureObserveReason(t *testing.T) {
+	store := &memoryPressureEnqueueStore{Store: queue.NewMemoryStore()}
+	srv := NewServer(store)
+	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
+		return "/hooks/test", true
+	}
+
+	var observedStatus int
+	var observedReason string
+	srv.ObserveReject = func(_ string, statusCode int, reason string) {
+		observedStatus = statusCode
+		observedReason = reason
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/hooks/test", strings.NewReader(`{"a":1}`))
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	if observedStatus != http.StatusServiceUnavailable {
+		t.Fatalf("expected observed status 503, got %d", observedStatus)
+	}
+	if observedReason != "memory_pressure" {
+		t.Fatalf("expected reject reason memory_pressure, got %q", observedReason)
 	}
 }
 

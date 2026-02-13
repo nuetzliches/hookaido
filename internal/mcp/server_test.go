@@ -1303,12 +1303,25 @@ func TestToolAdminHealthIncludesAdminDiagnostics(t *testing.T) {
 							"rejected_managed_resolver_missing_total": 1,
 						},
 						"ingress": map[string]any{
-							"accepted_total":                      7,
-							"rejected_total":                      11,
+							"accepted_total": 7,
+							"rejected_total": 11,
+							"rejected_by_reason": map[string]any{
+								"adaptive_backpressure": 4,
+								"memory_pressure":       2,
+							},
 							"adaptive_backpressure_applied_total": 4,
 							"adaptive_backpressure_by_reason": map[string]any{
 								"queued_pressure": 3,
 								"ready_lag":       1,
+							},
+						},
+						"store": map[string]any{
+							"backend":              "memory",
+							"retained_bytes_total": 1234,
+							"memory_pressure": map[string]any{
+								"active":         true,
+								"reason":         "retained_items",
+								"rejected_total": 2,
 							},
 						},
 					},
@@ -1429,12 +1442,30 @@ func TestToolAdminHealthIncludesAdminDiagnostics(t *testing.T) {
 	if got := intFromAny(ingressDiag["adaptive_backpressure_applied_total"]); got != 4 {
 		t.Fatalf("expected adaptive_backpressure_applied_total=4, got %#v", ingressDiag["adaptive_backpressure_applied_total"])
 	}
+	rejectedByReason, ok := ingressDiag["rejected_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected rejected_by_reason diagnostics map, got %T", ingressDiag["rejected_by_reason"])
+	}
+	if got := intFromAny(rejectedByReason["memory_pressure"]); got != 2 {
+		t.Fatalf("expected rejected_by_reason.memory_pressure=2, got %#v", rejectedByReason["memory_pressure"])
+	}
 	reasonDiag, ok := ingressDiag["adaptive_backpressure_by_reason"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected adaptive_backpressure_by_reason diagnostics map, got %T", ingressDiag["adaptive_backpressure_by_reason"])
 	}
 	if got := intFromAny(reasonDiag["queued_pressure"]); got != 3 {
 		t.Fatalf("expected adaptive_backpressure_by_reason.queued_pressure=3, got %#v", reasonDiag["queued_pressure"])
+	}
+	storeDiag, ok := diagnostics["store"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected store diagnostics in admin health details, got %T", diagnostics["store"])
+	}
+	pressure, ok := storeDiag["memory_pressure"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected store.memory_pressure diagnostics, got %T", storeDiag["memory_pressure"])
+	}
+	if active, _ := pressure["active"].(bool); !active {
+		t.Fatalf("expected memory pressure active=true, got %#v", pressure["active"])
 	}
 }
 

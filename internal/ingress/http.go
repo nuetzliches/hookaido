@@ -176,7 +176,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			s.observe(false, enqueued)
 			reason := "other"
-			if errors.Is(err, queue.ErrQueueFull) {
+			switch {
+			case errors.Is(err, queue.ErrMemoryPressure):
+				reason = "memory_pressure"
+			case errors.Is(err, queue.ErrQueueFull):
 				reason = "queue_full"
 			}
 			s.observeReject(route, http.StatusServiceUnavailable, reason)

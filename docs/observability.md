@@ -127,7 +127,7 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | --------------------------------- | ------- | ------------------------------------------------- |
 | `hookaido_ingress_accepted_total` | counter | Ingress requests accepted and enqueued            |
 | `hookaido_ingress_rejected_total` | counter | Ingress requests rejected (auth, rate-limit, etc) |
-| `hookaido_ingress_rejected_by_reason_total{reason,status}` | counter | Ingress rejects by normalized reason + status |
+| `hookaido_ingress_rejected_by_reason_total{reason,status}` | counter | Ingress rejects by normalized reason + status (includes `memory_pressure` with status `503`) |
 | `hookaido_ingress_enqueued_total` | counter | Items enqueued via ingress (>accepted if fanout)  |
 | `hookaido_ingress_adaptive_backpressure_total{reason}` | counter | Ingress requests rejected by adaptive backpressure (by trigger reason) |
 | `hookaido_ingress_adaptive_backpressure_applied_total` | counter | Total ingress requests rejected by adaptive backpressure |
@@ -166,6 +166,15 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_store_sqlite_tx_rollback_total`        | counter   | Rolled-back SQLite transactions in instrumented queue paths                |
 | `hookaido_store_sqlite_checkpoint_total`         | counter   | Successful periodic SQLite WAL checkpoints                                 |
 | `hookaido_store_sqlite_checkpoint_errors_total`  | counter   | Failed periodic SQLite WAL checkpoints                                     |
+
+**Store/Memory metrics (memory backend):**
+
+| Metric                                           | Type    | Description                                                                  |
+| ------------------------------------------------ | ------- | ---------------------------------------------------------------------------- |
+| `hookaido_store_memory_items{state}`             | gauge   | Current in-memory item count by state (`queued`, `leased`, `delivered`, `dead`) |
+| `hookaido_store_memory_retained_bytes{state}`    | gauge   | Estimated retained bytes by state (`queued`, `leased`, `delivered`, `dead`) |
+| `hookaido_store_memory_retained_bytes_total`     | gauge   | Estimated total retained bytes in memory store                               |
+| `hookaido_store_memory_evictions_total{reason}`  | counter | Memory-store evictions by reason (`drop_oldest`, retention evictions, etc.)  |
 
 **Publish metrics:**
 
@@ -272,7 +281,8 @@ The Admin API health endpoint (`GET /healthz?details=1`) aggregates observabilit
 - Queue state rollups with age/lag indicators
 - Backlog trend signals with operator action playbooks
 - Tracing counters (init failures, export errors)
-- Ingress adaptive-backpressure diagnostics (`adaptive_backpressure_applied_total`, `adaptive_backpressure_by_reason`)
+- Ingress adaptive-backpressure diagnostics (`adaptive_backpressure_applied_total`, `adaptive_backpressure_by_reason`) and rejection reason counters (`rejected_by_reason`, including `memory_pressure`)
+- Memory-store diagnostics (when backend is `memory`): `items_by_state`, retained bytes, eviction counters, and `memory_pressure` status/limits/reject counters
 - Top route/target backlog buckets
 - Queue diagnostics are cached (short TTL) and served stale-while-refresh under heavy load to keep control-plane endpoints responsive.
 
@@ -288,6 +298,8 @@ Queue saturation analysis showed one hot path in the ingest/admission write flow
 At high occupancy, that repeated count increased write transaction time and lock contention (`hookaido_store_sqlite_write_seconds`, `hookaido_store_sqlite_busy_total`, `hookaido_store_sqlite_retry_total`).
 
 Hookaido now maintains O(1) active-depth counters (`queue_counters`) via SQLite triggers and uses them for `max_depth` admission checks.
+
+For memory backend deployments, Hookaido also applies a retained-footprint pressure guard and emits `memory_pressure` ingress reject reasons before hard process failure risk.
 
 To validate improvements in your environment, compare before/after load runs using:
 - p95/p99 ingress latency and 503 rate

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -37,6 +38,7 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 		"hookaido_publish_scoped_rejected_total 0",
 		"hookaido_ingress_accepted_total 0",
 		"hookaido_ingress_rejected_total 0",
+		`hookaido_ingress_rejected_by_reason_total{reason="memory_pressure",status="503"} 0`,
 		`hookaido_ingress_rejected_by_reason_total{reason="queue_full",status="503"} 0`,
 		"hookaido_ingress_enqueued_total 0",
 		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 0`,
@@ -164,6 +166,7 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 
 func TestMetricsHandler_IngressRejectBreakdownNormalization(t *testing.T) {
 	m := newRuntimeMetrics()
+	m.observeIngressReject(http.StatusServiceUnavailable, "memory_pressure")
 	m.observeIngressReject(http.StatusServiceUnavailable, "queue_full")
 	m.observeIngressReject(http.StatusTeapot, "unexpected_reason")
 
@@ -173,6 +176,7 @@ func TestMetricsHandler_IngressRejectBreakdownNormalization(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
+		`hookaido_ingress_rejected_by_reason_total{reason="memory_pressure",status="503"} 1`,
 		`hookaido_ingress_rejected_by_reason_total{reason="queue_full",status="503"} 1`,
 		`hookaido_ingress_rejected_by_reason_total{reason="other",status="other"} 1`,
 	} {
@@ -396,10 +400,58 @@ func TestMetricsHandler_SQLiteStoreRuntimeMetrics(t *testing.T) {
 	}
 }
 
+func TestMetricsHandler_MemoryStoreRuntimeMetrics(t *testing.T) {
+	now := time.Unix(500, 0).UTC()
+	store := queue.NewMemoryStore(
+		queue.WithNowFunc(func() time.Time { return now }),
+		queue.WithQueueLimits(1, "drop_oldest"),
+	)
+	if err := store.Enqueue(queue.Envelope{
+		ID:      "evt_1",
+		Route:   "/r",
+		Target:  "pull",
+		Payload: []byte("alpha"),
+		Headers: map[string]string{"X-Test": "1"},
+	}); err != nil {
+		t.Fatalf("enqueue evt_1: %v", err)
+	}
+	if err := store.Enqueue(queue.Envelope{
+		ID:      "evt_2",
+		Route:   "/r",
+		Target:  "pull",
+		Payload: []byte("beta"),
+	}); err != nil {
+		t.Fatalf("enqueue evt_2: %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	h := newMetricsHandler("dev", now, m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_store_memory_items{state="queued"} 1`,
+		`hookaido_store_memory_items{state="leased"} 0`,
+		`hookaido_store_memory_items{state="delivered"} 0`,
+		`hookaido_store_memory_items{state="dead"} 0`,
+		`hookaido_store_memory_retained_bytes{state="queued"} `,
+		`hookaido_store_memory_retained_bytes_total `,
+		`hookaido_store_memory_evictions_total{reason="drop_oldest"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
 func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	m := newRuntimeMetrics()
 	m.observeIngressResult(true, 3)
 	m.observeIngressAdaptiveBackpressure("ready_lag")
+	m.observeIngressReject(http.StatusServiceUnavailable, "memory_pressure")
 	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
 	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
 
@@ -425,6 +477,13 @@ func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	if got := intFromAny(adaptiveByReason["ready_lag"]); got != 1 {
 		t.Fatalf("ingress adaptive_backpressure_by_reason.ready_lag=%d, want 1", got)
 	}
+	rejectedByReason, ok := ingress["rejected_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected rejected_by_reason map, got %T", ingress["rejected_by_reason"])
+	}
+	if got := intFromAny(rejectedByReason["memory_pressure"]); got != 1 {
+		t.Fatalf("ingress rejected_by_reason.memory_pressure=%d, want 1", got)
+	}
 
 	delivery, ok := diag["delivery"].(map[string]any)
 	if !ok {
@@ -438,6 +497,43 @@ func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	}
 	if got := intFromAny(delivery["dead_total"]); got != 1 {
 		t.Fatalf("delivery dead_total=%d, want 1", got)
+	}
+}
+
+func TestHealthDiagnostics_StoreMemoryPressure(t *testing.T) {
+	now := time.Unix(700, 0).UTC()
+	store := queue.NewMemoryStore(
+		queue.WithNowFunc(func() time.Time { return now }),
+		queue.WithQueueLimits(10, "reject"),
+		queue.WithMemoryPressureLimits(1, 1<<30),
+	)
+	if err := store.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead}); err != nil {
+		t.Fatalf("enqueue dead_1: %v", err)
+	}
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); !errors.Is(err, queue.ErrMemoryPressure) {
+		t.Fatalf("expected ErrMemoryPressure, got %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	diag := m.healthDiagnostics()
+	storeDiag, ok := diag["store"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected store diagnostics object, got %T", diag["store"])
+	}
+	pressure, ok := storeDiag["memory_pressure"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected memory_pressure diagnostics object, got %T", storeDiag["memory_pressure"])
+	}
+	if active, _ := pressure["active"].(bool); !active {
+		t.Fatalf("expected memory_pressure.active=true, got %#v", pressure["active"])
+	}
+	if got, _ := pressure["reason"].(string); got != "retained_items" {
+		t.Fatalf("expected memory pressure reason retained_items, got %q", got)
+	}
+	if got := intFromAny(pressure["rejected_total"]); got != 1 {
+		t.Fatalf("expected memory pressure rejected_total=1, got %d", got)
 	}
 }
 

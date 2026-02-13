@@ -261,9 +261,28 @@ type SQLiteRuntimeMetrics struct {
 	CheckpointErrorTotal      int64
 }
 
+type MemoryPressureRuntimeMetrics struct {
+	Active             bool
+	Reason             string
+	RetainedItems      int64
+	RetainedBytes      int64
+	RetainedItemLimit  int64
+	RetainedBytesLimit int64
+	RejectTotal        int64
+}
+
+type MemoryRuntimeMetrics struct {
+	ItemsByState           map[State]int64
+	RetainedBytesByState   map[State]int64
+	RetainedBytesTotal     int64
+	EvictionsTotalByReason map[string]int64
+	Pressure               MemoryPressureRuntimeMetrics
+}
+
 type StoreRuntimeMetrics struct {
 	Backend string
 	SQLite  *SQLiteRuntimeMetrics
+	Memory  *MemoryRuntimeMetrics
 }
 
 type RuntimeMetricsProvider interface {

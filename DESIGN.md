@@ -243,7 +243,7 @@ Error body (non-2xx):
 
 Endpoints (MVP):
 - `GET /healthz`
-- `GET /healthz?details=1` (JSON health diagnostics; includes queue rollups, queued age/lag indicators, top route/target backlog buckets, persisted-trend `trend_signals` evaluated with `defaults.trend_signals` policy, explicit `operator_actions` playbooks, ingress counters including adaptive-backpressure diagnostics, and tracing counters when runtime metrics are available)
+- `GET /healthz?details=1` (JSON health diagnostics; includes queue rollups, queued age/lag indicators, top route/target backlog buckets, persisted-trend `trend_signals` evaluated with `defaults.trend_signals` policy, explicit `operator_actions` playbooks, ingress counters including adaptive-backpressure diagnostics and rejection-by-reason counters, tracing counters when runtime metrics are available, and memory-store pressure diagnostics when backend=`memory`)
 - `GET /backlog/top_queued` (operator backlog drill-down from queue stats `top_queued`; query params: `route`, `target`, `limit` (default 100, max 1000); when provided, `route` must be an absolute Hookaido route path starting with `/`; response includes bounded-source/truncation indicators)
 - `GET /backlog/oldest_queued` (operator backlog drill-down for oldest queued items; query params: `route`, `target`, `limit` (default 100, max 1000); when provided, `route` must be an absolute Hookaido route path starting with `/`; response ordered by `received_at` ascending with per-item age/ready-lag indicators)
 - `GET /backlog/aging_summary` (operator backlog drill-down summary by `route+target`; query params: `route`, `target`, `states` (`queued|leased|dead`; default all three), `limit` (default 100, max 1000); when provided, `route` must be an absolute Hookaido route path starting with `/`; response aggregates oldest-first scan windows per selected state with aging/overdue indicators, age-window distribution, age percentiles (`p50/p90/p99`), and source truncation metadata)
@@ -302,13 +302,14 @@ Endpoints (MVP):
 - At-least-once.
 - Ingress ACK only after durable enqueue (queue ACK).
 - Retry on network errors, timeouts, 5xx, 429/408; no retry on other 4xx.
-- Backpressure: 429 (rate limit) or 503 (queue overload).
+- Backpressure: 429 (rate limit) or 503 (queue overload / memory pressure).
 
 ## Defaults (80/20)
 - `max_body`: `2mb`
 - `max_headers`: `64kb`
 - `pull_api`: `max_batch 100`, `default_lease_ttl 30s`, `max_lease_ttl off` (uncapped), `default_max_wait 0`, `max_wait off` (uncapped)
 - `queue_limits`: `max_depth 10000`, `drop_policy "reject"`
+- memory-backend pressure guard (runtime): retained non-active item limit `max(max_depth, 1000)` and retained non-active byte limit `256MiB` (whichever triggers first emits `ErrMemoryPressure` / ingress `503`)
 - `queue_retention`: `max_age "7d"`, `prune_interval "5m"`
 - `dlq_retention`: `max_age "30d"`, `max_depth 10000`
 - `deliver`: retry exponential (`max 8`, `base 2s`, `cap 2m`, `jitter 0.2`), `timeout 10s`, `concurrency 20`
@@ -364,8 +365,10 @@ Secret rotation semantics:
 - Metrics include tracing diagnostics counters: `hookaido_tracing_enabled`, `hookaido_tracing_init_failures_total`, `hookaido_tracing_export_errors_total`.
 - Metrics include publish mutation counters: `hookaido_publish_accepted_total`, `hookaido_publish_rejected_total`, rejection-class counters (`hookaido_publish_rejected_validation_total`, `hookaido_publish_rejected_policy_total`, `hookaido_publish_rejected_conflict_total`, `hookaido_publish_rejected_queue_full_total`, `hookaido_publish_rejected_store_total`), managed-ownership policy counters (`hookaido_publish_rejected_managed_target_mismatch_total`, `hookaido_publish_rejected_managed_resolver_missing_total`), and scoped counters (`hookaido_publish_scoped_accepted_total`, `hookaido_publish_scoped_rejected_total`).
 - Metrics include ingress counters: `hookaido_ingress_accepted_total`, `hookaido_ingress_rejected_total`, `hookaido_ingress_rejected_by_reason_total{reason,status}`, `hookaido_ingress_enqueued_total`, adaptive-backpressure counters `hookaido_ingress_adaptive_backpressure_total{reason}`, and `hookaido_ingress_adaptive_backpressure_applied_total`.
+- Ingress reject reason labels include `memory_pressure` for retained-footprint admission rejects in the memory backend.
 - Metrics include delivery counters: `hookaido_delivery_attempts_total`, `hookaido_delivery_acked_total`, `hookaido_delivery_retry_total`, `hookaido_delivery_dead_total`.
 - Metrics include on-scrape queue gauges: `hookaido_queue_depth{state}` (queued, leased, dead), `hookaido_queue_total`, `hookaido_queue_oldest_queued_age_seconds`, and `hookaido_queue_ready_lag_seconds`.
+- Metrics include memory-backend runtime gauges/counters when backend=`memory`: `hookaido_store_memory_items{state}`, `hookaido_store_memory_retained_bytes{state}`, `hookaido_store_memory_retained_bytes_total`, and `hookaido_store_memory_evictions_total{reason}`.
 
 ## CLI
 - `hookaido run --config ./Hookaidofile [--db ./hookaido.db] [--pid-file ./hookaido.pid] [--watch] [--log-level info] [--dotenv ./.env]`

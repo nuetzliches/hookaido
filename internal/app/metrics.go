@@ -562,6 +562,7 @@ var adaptiveBackpressureReasonOrder = []string{
 }
 
 var ingressRejectReasonOrder = []string{
+	"memory_pressure",
 	"queue_full",
 	"adaptive_backpressure",
 	"rate_limit",
@@ -630,6 +631,8 @@ func normalizeAdaptiveBackpressureReason(reason string) string {
 
 func normalizeIngressRejectReason(reason string) string {
 	switch strings.TrimSpace(reason) {
+	case "memory_pressure":
+		return "memory_pressure"
 	case "queue_full":
 		return "queue_full"
 	case "adaptive_backpressure":
@@ -815,7 +818,18 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 	for reason, count := range ingressAdaptiveByReason {
 		ingressAdaptiveByReasonAny[reason] = count
 	}
-	return map[string]any{
+	ingressRejectBreakdown := m.ingressRejectBreakdownSnapshot()
+	ingressRejectedByReasonAny := make(map[string]any, len(ingressRejectBreakdown))
+	for _, reason := range ingressRejectReasonOrder {
+		byStatus := ingressRejectBreakdown[reason]
+		total := int64(0)
+		for _, status := range ingressRejectStatusOrder {
+			total += byStatus[status]
+		}
+		ingressRejectedByReasonAny[reason] = total
+	}
+
+	diagnostics := map[string]any{
 		"tracing": map[string]any{
 			"enabled":             m.tracingEnabled.Load() == 1,
 			"init_failures_total": m.tracingInitFailuresTotal.Load(),
@@ -837,6 +851,7 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 		"ingress": map[string]any{
 			"accepted_total":                      m.ingressAcceptedTotal.Load(),
 			"rejected_total":                      m.ingressRejectedTotal.Load(),
+			"rejected_by_reason":                  ingressRejectedByReasonAny,
 			"enqueued_total":                      m.ingressEnqueuedTotal.Load(),
 			"adaptive_backpressure_applied_total": m.ingressAdaptiveTotal.Load(),
 			"adaptive_backpressure_by_reason":     ingressAdaptiveByReasonAny,
@@ -849,6 +864,44 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 		},
 		"pull": pullDiagnostics(pullSnapshot),
 	}
+
+	if m.queueStore != nil {
+		if provider, ok := m.queueStore.(queue.RuntimeMetricsProvider); ok {
+			runtime := provider.RuntimeMetrics()
+			if runtime.Memory != nil {
+				itemsByState := map[string]any{}
+				for _, state := range []queue.State{queue.StateQueued, queue.StateLeased, queue.StateDelivered, queue.StateDead} {
+					itemsByState[string(state)] = runtime.Memory.ItemsByState[state]
+				}
+				retainedBytesByState := map[string]any{}
+				for _, state := range []queue.State{queue.StateQueued, queue.StateLeased, queue.StateDelivered, queue.StateDead} {
+					retainedBytesByState[string(state)] = runtime.Memory.RetainedBytesByState[state]
+				}
+				evictions := make(map[string]any, len(runtime.Memory.EvictionsTotalByReason))
+				for reason, count := range runtime.Memory.EvictionsTotalByReason {
+					evictions[reason] = count
+				}
+				diagnostics["store"] = map[string]any{
+					"backend":                 runtime.Backend,
+					"items_by_state":          itemsByState,
+					"retained_bytes_by_state": retainedBytesByState,
+					"retained_bytes_total":    runtime.Memory.RetainedBytesTotal,
+					"evictions_total":         evictions,
+					"memory_pressure": map[string]any{
+						"active":               runtime.Memory.Pressure.Active,
+						"reason":               runtime.Memory.Pressure.Reason,
+						"retained_items":       runtime.Memory.Pressure.RetainedItems,
+						"retained_bytes":       runtime.Memory.Pressure.RetainedBytes,
+						"retained_item_limit":  runtime.Memory.Pressure.RetainedItemLimit,
+						"retained_bytes_limit": runtime.Memory.Pressure.RetainedBytesLimit,
+						"rejected_total":       runtime.Memory.Pressure.RejectTotal,
+					},
+				}
+			}
+		}
+	}
+
+	return diagnostics
 }
 
 func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http.Handler {
@@ -1074,7 +1127,34 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			}
 
 			if provider, ok := queueStore.(queue.RuntimeMetricsProvider); ok {
-				if runtime := provider.RuntimeMetrics(); runtime.SQLite != nil {
+				runtime := provider.RuntimeMetrics()
+				if runtime.Memory != nil {
+					memoryMetrics := runtime.Memory
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_memory_items Current number of in-memory store items by state.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_memory_items gauge\n")
+					for _, state := range []queue.State{queue.StateQueued, queue.StateLeased, queue.StateDelivered, queue.StateDead} {
+						_, _ = fmt.Fprintf(w, "hookaido_store_memory_items{state=%q} %d\n", string(state), memoryMetrics.ItemsByState[state])
+					}
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_memory_retained_bytes Estimated retained bytes in in-memory store by state.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_memory_retained_bytes gauge\n")
+					for _, state := range []queue.State{queue.StateQueued, queue.StateLeased, queue.StateDelivered, queue.StateDead} {
+						_, _ = fmt.Fprintf(w, "hookaido_store_memory_retained_bytes{state=%q} %d\n", string(state), memoryMetrics.RetainedBytesByState[state])
+					}
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_memory_retained_bytes_total Estimated total retained bytes in the in-memory store.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_memory_retained_bytes_total gauge\n")
+					_, _ = fmt.Fprintf(w, "hookaido_store_memory_retained_bytes_total %d\n", memoryMetrics.RetainedBytesTotal)
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_memory_evictions_total Total number of in-memory store evictions by reason.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_memory_evictions_total counter\n")
+					reasons := make([]string, 0, len(memoryMetrics.EvictionsTotalByReason))
+					for reason := range memoryMetrics.EvictionsTotalByReason {
+						reasons = append(reasons, reason)
+					}
+					sort.Strings(reasons)
+					for _, reason := range reasons {
+						_, _ = fmt.Fprintf(w, "hookaido_store_memory_evictions_total{reason=%q} %d\n", reason, memoryMetrics.EvictionsTotalByReason[reason])
+					}
+				}
+				if runtime.SQLite != nil {
 					sqliteMetrics := runtime.SQLite
 					writePrometheusHistogram(
 						w,

@@ -49,12 +49,29 @@ Returns detailed JSON diagnostics:
     "ingress": {
       "accepted_total": 100000,
       "rejected_total": 4123,
+      "rejected_by_reason": {
+        "memory_pressure": 12,
+        "queue_full": 41,
+        "adaptive_backpressure": 345
+      },
       "adaptive_backpressure_applied_total": 345,
       "adaptive_backpressure_by_reason": {
         "queued_pressure": 221,
         "ready_lag": 79,
         "oldest_queued_age": 31,
         "sustained_growth": 14
+      }
+    },
+    "store": {
+      "backend": "memory",
+      "items_by_state": { "queued": 1200, "leased": 300, "delivered": 4000, "dead": 23 },
+      "retained_bytes_total": 91234567,
+      "memory_pressure": {
+        "active": false,
+        "reason": "",
+        "retained_item_limit": 10000,
+        "retained_bytes_limit": 268435456,
+        "rejected_total": 12
       }
     }
   }
@@ -66,7 +83,8 @@ The health endpoint includes:
 - Queue state rollups with age/lag indicators
 - Top route/target backlog buckets
 - Persisted trend signals with operator action playbooks
-- Ingress counters and adaptive-backpressure diagnostics (when runtime metrics are enabled)
+- Ingress counters, rejection-by-reason counters, and adaptive-backpressure diagnostics (when runtime metrics are enabled)
+- Memory-store runtime diagnostics (`store.*`) when queue backend is `memory`
 - Tracing counters (when metrics are enabled)
 
 ## Queue Reads

@@ -1197,8 +1197,90 @@ func TestMemoryStore_QueueLimitsDropOldest(t *testing.T) {
 	}
 }
 
-// TestMemoryStore_MaxDepthCountsOnlyActive verifies that max_depth counts queued+leased
-// for active queue pressure. Dead items must not consume active depth budget.
+func TestMemoryStore_RuntimeMetrics(t *testing.T) {
+	now := time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC)
+	s := NewMemoryStore(
+		WithNowFunc(func() time.Time { return now }),
+		WithQueueLimits(1, "drop_oldest"),
+	)
+
+	if err := s.Enqueue(Envelope{
+		ID:      "evt_1",
+		Route:   "/r",
+		Target:  "pull",
+		Payload: []byte("alpha"),
+		Headers: map[string]string{"X-Test": "1"},
+	}); err != nil {
+		t.Fatalf("enqueue evt_1: %v", err)
+	}
+	if err := s.Enqueue(Envelope{
+		ID:     "dead_1",
+		Route:  "/r",
+		Target: "pull",
+		State:  StateDead,
+	}); err != nil {
+		t.Fatalf("enqueue dead_1: %v", err)
+	}
+	if err := s.Enqueue(Envelope{
+		ID:      "evt_2",
+		Route:   "/r",
+		Target:  "pull",
+		Payload: []byte("beta"),
+	}); err != nil {
+		t.Fatalf("enqueue evt_2: %v", err)
+	}
+
+	rm := s.RuntimeMetrics()
+	if rm.Backend != "memory" {
+		t.Fatalf("backend: got %q, want memory", rm.Backend)
+	}
+	if rm.Memory == nil {
+		t.Fatalf("expected memory runtime metrics")
+	}
+	if rm.Memory.ItemsByState[StateQueued] != 1 {
+		t.Fatalf("expected queued item count=1, got %d", rm.Memory.ItemsByState[StateQueued])
+	}
+	if rm.Memory.ItemsByState[StateDead] != 1 {
+		t.Fatalf("expected dead item count=1, got %d", rm.Memory.ItemsByState[StateDead])
+	}
+	if rm.Memory.RetainedBytesTotal <= 0 {
+		t.Fatalf("expected retained bytes total > 0")
+	}
+	if rm.Memory.EvictionsTotalByReason[memoryEvictionReasonDropOldest] != 1 {
+		t.Fatalf("expected drop_oldest eviction count=1, got %d", rm.Memory.EvictionsTotalByReason[memoryEvictionReasonDropOldest])
+	}
+}
+
+func TestMemoryStore_MemoryPressureRejectsEnqueue(t *testing.T) {
+	s := NewMemoryStore(
+		WithQueueLimits(10, "reject"),
+		WithMemoryPressureLimits(1, 1<<30),
+	)
+	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead}); err != nil {
+		t.Fatalf("enqueue dead_1: %v", err)
+	}
+	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); !errors.Is(err, ErrMemoryPressure) {
+		t.Fatalf("expected ErrMemoryPressure, got %v", err)
+	}
+
+	rm := s.RuntimeMetrics()
+	if rm.Memory == nil {
+		t.Fatalf("expected memory runtime metrics")
+	}
+	if !rm.Memory.Pressure.Active {
+		t.Fatalf("expected memory pressure active=true")
+	}
+	if rm.Memory.Pressure.Reason != "retained_items" {
+		t.Fatalf("expected memory pressure reason retained_items, got %q", rm.Memory.Pressure.Reason)
+	}
+	if rm.Memory.Pressure.RejectTotal != 1 {
+		t.Fatalf("expected reject_total=1, got %d", rm.Memory.Pressure.RejectTotal)
+	}
+}
+
+// TestMemoryStore_MaxDepthCountsOnlyActive verifies that max_depth counts only
+// queued+leased items, matching SQLite semantics. Dead/delivered/canceled items
+// must not consume depth budget.
 func TestMemoryStore_MaxDepthCountsOnlyActive(t *testing.T) {
 	s := NewMemoryStore(WithQueueLimits(2, "reject"))
 

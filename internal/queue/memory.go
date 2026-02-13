@@ -12,6 +12,7 @@ var (
 	ErrLeaseNotFound  = errors.New("lease not found")
 	ErrLeaseExpired   = errors.New("lease expired")
 	ErrQueueFull      = errors.New("queue full")
+	ErrMemoryPressure = errors.New("memory pressure")
 	ErrEnvelopeExists = errors.New("envelope already exists")
 )
 
@@ -42,6 +43,10 @@ type MemoryStore struct {
 	deliveredRetentionMaxAge time.Duration
 	dlqRetentionMaxAge       time.Duration
 	dlqMaxDepth              int
+	evictionsTotalByReason   map[string]int64
+	memoryPressureRejects    int64
+	memoryPressureItemLimit  int
+	memoryPressureBytesLimit int64
 }
 
 type backlogTrendRow struct {
@@ -55,18 +60,51 @@ type backlogTrendRow struct {
 
 const backlogTrendMaxRows = 200000
 
+const (
+	memoryEvictionReasonDropOldest         = "drop_oldest"
+	memoryEvictionReasonQueueRetentionAge  = "queue_retention_age"
+	memoryEvictionReasonDeliveredRetention = "delivered_retention_age"
+	memoryEvictionReasonDeadRetentionAge   = "dead_retention_age"
+	memoryEvictionReasonDeadRetentionDepth = "dead_retention_depth"
+
+	defaultMemoryPressureRetainedItemFloor = 1000
+	defaultMemoryPressureRetainedBytes     = 256 << 20 // 256 MiB
+)
+
+type memoryInventory struct {
+	itemsByState         map[State]int64
+	retainedBytesByState map[State]int64
+	totalRetainedBytes   int64
+	retainedItems        int64
+	retainedBytes        int64
+}
+
 func NewMemoryStore(opts ...MemoryOption) *MemoryStore {
 	s := &MemoryStore{
-		nowFn:      time.Now,
-		items:      make(map[string]*Envelope),
-		leases:     make(map[string]string),
-		notify:     make(chan struct{}),
-		dropPolicy: "reject",
+		nowFn:                  time.Now,
+		items:                  make(map[string]*Envelope),
+		leases:                 make(map[string]string),
+		notify:                 make(chan struct{}),
+		dropPolicy:             "reject",
+		evictionsTotalByReason: make(map[string]int64),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+// WithMemoryPressureLimits overrides memory pressure limits for the in-memory
+// backend. Positive values enable explicit thresholds.
+func WithMemoryPressureLimits(retainedItems int, retainedBytes int64) MemoryOption {
+	return func(s *MemoryStore) {
+		if retainedItems > 0 {
+			s.memoryPressureItemLimit = retainedItems
+		}
+		if retainedBytes > 0 {
+			s.memoryPressureBytesLimit = retainedBytes
+		}
+	}
 }
 
 func WithQueueLimits(maxDepth int, dropPolicy string) MemoryOption {
@@ -140,6 +178,11 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 			activeCount = s.activeCountLocked()
 			activeDeliveredCount = s.activeDeliveredCountLocked()
 		}
+	}
+
+	if pressure := s.memoryPressureStatusLocked(); pressure.Active {
+		s.memoryPressureRejects++
+		return ErrMemoryPressure
 	}
 
 	if env.ID == "" {
@@ -259,6 +302,11 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 		}
 	}
 
+	if pressure := s.memoryPressureStatusLocked(); pressure.Active {
+		s.memoryPressureRejects++
+		return 0, ErrMemoryPressure
+	}
+
 	// Commit all items.
 	for _, env := range prepared {
 		s.items[env.ID] = env
@@ -296,6 +344,121 @@ func (s *MemoryStore) activeDeliveredCountLocked() int {
 	return n
 }
 
+func (s *MemoryStore) evictLocked(id string, reason string) bool {
+	env := s.items[id]
+	if env == nil {
+		return false
+	}
+	delete(s.items, id)
+	if env.LeaseID != "" {
+		delete(s.leases, env.LeaseID)
+	}
+	s.incEvictionLocked(reason)
+	return true
+}
+
+func (s *MemoryStore) incEvictionLocked(reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return
+	}
+	if s.evictionsTotalByReason == nil {
+		s.evictionsTotalByReason = make(map[string]int64)
+	}
+	s.evictionsTotalByReason[reason]++
+}
+
+func (s *MemoryStore) memoryPressureStatusLocked() MemoryPressureRuntimeMetrics {
+	inv := s.memoryInventoryLocked()
+	itemLimit := int64(s.effectiveMemoryPressureItemLimitLocked())
+	bytesLimit := s.effectiveMemoryPressureBytesLimitLocked()
+
+	pressure := MemoryPressureRuntimeMetrics{
+		Active:             false,
+		Reason:             "",
+		RetainedItems:      inv.retainedItems,
+		RetainedBytes:      inv.retainedBytes,
+		RetainedItemLimit:  itemLimit,
+		RetainedBytesLimit: bytesLimit,
+		RejectTotal:        s.memoryPressureRejects,
+	}
+	if itemLimit > 0 && inv.retainedItems >= itemLimit {
+		pressure.Active = true
+		pressure.Reason = "retained_items"
+		return pressure
+	}
+	if bytesLimit > 0 && inv.retainedBytes >= bytesLimit {
+		pressure.Active = true
+		pressure.Reason = "retained_bytes"
+		return pressure
+	}
+	return pressure
+}
+
+func (s *MemoryStore) effectiveMemoryPressureItemLimitLocked() int {
+	if s.memoryPressureItemLimit > 0 {
+		return s.memoryPressureItemLimit
+	}
+	if s.maxDepth <= 0 {
+		return 0
+	}
+	if s.maxDepth < defaultMemoryPressureRetainedItemFloor {
+		return defaultMemoryPressureRetainedItemFloor
+	}
+	return s.maxDepth
+}
+
+func (s *MemoryStore) effectiveMemoryPressureBytesLimitLocked() int64 {
+	if s.memoryPressureBytesLimit > 0 {
+		return s.memoryPressureBytesLimit
+	}
+	return defaultMemoryPressureRetainedBytes
+}
+
+func (s *MemoryStore) memoryInventoryLocked() memoryInventory {
+	inv := memoryInventory{
+		itemsByState:         make(map[State]int64),
+		retainedBytesByState: make(map[State]int64),
+	}
+	for _, env := range s.items {
+		if env == nil {
+			continue
+		}
+		inv.itemsByState[env.State]++
+		size := envelopeRetainedBytes(env)
+		inv.retainedBytesByState[env.State] += size
+		inv.totalRetainedBytes += size
+		switch env.State {
+		case StateDelivered, StateDead, StateCanceled:
+			inv.retainedItems++
+			inv.retainedBytes += size
+		}
+	}
+	return inv
+}
+
+func envelopeRetainedBytes(env *Envelope) int64 {
+	if env == nil {
+		return 0
+	}
+
+	size := int64(0)
+	size += int64(len(env.ID))
+	size += int64(len(env.Route))
+	size += int64(len(env.Target))
+	size += int64(len(env.Payload))
+	size += int64(len(env.DeadReason))
+	size += int64(len(env.LeaseID))
+
+	for k, v := range env.Headers {
+		size += int64(len(k) + len(v))
+	}
+	for k, v := range env.Trace {
+		size += int64(len(k) + len(v))
+	}
+	return size
+}
+
 func (s *MemoryStore) dropOldestQueuedLocked() bool {
 	for _, id := range s.order {
 		env := s.items[id]
@@ -305,8 +468,7 @@ func (s *MemoryStore) dropOldestQueuedLocked() bool {
 		if env.State != StateQueued {
 			continue
 		}
-		delete(s.items, id)
-		return true
+		return s.evictLocked(id, memoryEvictionReasonDropOldest)
 	}
 	return false
 }
@@ -334,7 +496,7 @@ func (s *MemoryStore) maybePruneLocked(now time.Time) {
 			if env.ReceivedAt.IsZero() || env.ReceivedAt.After(cutoff) {
 				continue
 			}
-			delete(s.items, id)
+			s.evictLocked(id, memoryEvictionReasonQueueRetentionAge)
 		}
 	}
 
@@ -350,7 +512,7 @@ func (s *MemoryStore) maybePruneLocked(now time.Time) {
 			if env.ReceivedAt.IsZero() || env.ReceivedAt.After(cutoff) {
 				continue
 			}
-			delete(s.items, id)
+			s.evictLocked(id, memoryEvictionReasonDeadRetentionAge)
 		}
 	}
 
@@ -370,7 +532,7 @@ func (s *MemoryStore) maybePruneLocked(now time.Time) {
 			if ts.IsZero() || ts.After(cutoff) {
 				continue
 			}
-			delete(s.items, id)
+			s.evictLocked(id, memoryEvictionReasonDeliveredRetention)
 		}
 	}
 
@@ -392,7 +554,7 @@ func (s *MemoryStore) maybePruneLocked(now time.Time) {
 			})
 			excess := len(items) - s.dlqMaxDepth
 			for i := 0; i < excess; i++ {
-				delete(s.items, items[i].id)
+				s.evictLocked(items[i].id, memoryEvictionReasonDeadRetentionDepth)
 			}
 		}
 	}
@@ -1462,6 +1624,40 @@ func (s *MemoryStore) ListAttempts(req AttemptListRequest) (AttemptListResponse,
 	}
 
 	return AttemptListResponse{Items: items}, nil
+}
+
+func (s *MemoryStore) RuntimeMetrics() StoreRuntimeMetrics {
+	out := StoreRuntimeMetrics{Backend: "memory"}
+	if s == nil {
+		return out
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	inv := s.memoryInventoryLocked()
+	itemsByState := make(map[State]int64, len(inv.itemsByState))
+	for st, n := range inv.itemsByState {
+		itemsByState[st] = n
+	}
+	retainedBytesByState := make(map[State]int64, len(inv.retainedBytesByState))
+	for st, n := range inv.retainedBytesByState {
+		retainedBytesByState[st] = n
+	}
+	evictions := make(map[string]int64, len(s.evictionsTotalByReason))
+	for reason, n := range s.evictionsTotalByReason {
+		evictions[reason] = n
+	}
+	pressure := s.memoryPressureStatusLocked()
+
+	out.Memory = &MemoryRuntimeMetrics{
+		ItemsByState:           itemsByState,
+		RetainedBytesByState:   retainedBytesByState,
+		RetainedBytesTotal:     inv.totalRetainedBytes,
+		EvictionsTotalByReason: evictions,
+		Pressure:               pressure,
+	}
+	return out
 }
 
 func (s *MemoryStore) requeueExpiredLeasesLocked(now time.Time) {

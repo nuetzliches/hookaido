@@ -384,6 +384,10 @@ func TestMetricsHandler_SQLiteStoreRuntimeMetrics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
+		`hookaido_store_operation_seconds_bucket{backend="sqlite",operation="write_tx",le="+Inf"}`,
+		`hookaido_store_operation_seconds_count{backend="sqlite",operation="write_tx"} `,
+		`hookaido_store_operation_total{backend="sqlite",operation="tx_commit"} `,
+		`hookaido_store_errors_total{backend="sqlite",operation="begin_tx",kind="busy"} `,
 		`hookaido_store_sqlite_write_seconds_bucket{le="+Inf"}`,
 		`hookaido_store_sqlite_write_seconds_count `,
 		`hookaido_store_sqlite_dequeue_seconds_bucket{le="+Inf"}`,

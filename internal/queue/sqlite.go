@@ -2964,16 +2964,44 @@ func (s *SQLiteStore) RuntimeMetrics() StoreRuntimeMetrics {
 	s.metrics.mu.Lock()
 	defer s.metrics.mu.Unlock()
 
+	writeDuration := s.metrics.writeDuration.snapshot()
+	dequeueDuration := s.metrics.dequeueDuration.snapshot()
+	checkpointDuration := s.metrics.checkpointDuration.snapshot()
+	busyTotal := s.metrics.busyTotal
+	retryTotal := s.metrics.retryTotal
+	txCommitTotal := s.metrics.txCommitTotal
+	txRollbackTotal := s.metrics.txRollbackTotal
+	checkpointTotal := s.metrics.checkpointTotal
+	checkpointErrorTotal := s.metrics.checkpointErrorTotal
+
+	out.Common = StoreCommonRuntimeMetrics{
+		OperationDurationSeconds: []StoreOperationDurationRuntimeMetric{
+			{Operation: "write_tx", DurationSeconds: writeDuration},
+			{Operation: "dequeue_tx", DurationSeconds: dequeueDuration},
+			{Operation: "checkpoint", DurationSeconds: checkpointDuration},
+		},
+		OperationTotal: []StoreOperationCounterRuntimeMetric{
+			{Operation: "tx_commit", Total: txCommitTotal},
+			{Operation: "tx_rollback", Total: txRollbackTotal},
+			{Operation: "checkpoint", Total: checkpointTotal},
+			{Operation: "retry", Total: retryTotal},
+		},
+		ErrorsTotal: []StoreOperationErrorRuntimeMetric{
+			{Operation: "begin_tx", Kind: "busy", Total: busyTotal},
+			{Operation: "checkpoint", Kind: "error", Total: checkpointErrorTotal},
+		},
+	}
+
 	sqliteMetrics := &SQLiteRuntimeMetrics{
-		WriteDurationSeconds:      s.metrics.writeDuration.snapshot(),
-		DequeueDurationSeconds:    s.metrics.dequeueDuration.snapshot(),
-		CheckpointDurationSeconds: s.metrics.checkpointDuration.snapshot(),
-		BusyTotal:                 s.metrics.busyTotal,
-		RetryTotal:                s.metrics.retryTotal,
-		TxCommitTotal:             s.metrics.txCommitTotal,
-		TxRollbackTotal:           s.metrics.txRollbackTotal,
-		CheckpointTotal:           s.metrics.checkpointTotal,
-		CheckpointErrorTotal:      s.metrics.checkpointErrorTotal,
+		WriteDurationSeconds:      writeDuration,
+		DequeueDurationSeconds:    dequeueDuration,
+		CheckpointDurationSeconds: checkpointDuration,
+		BusyTotal:                 busyTotal,
+		RetryTotal:                retryTotal,
+		TxCommitTotal:             txCommitTotal,
+		TxRollbackTotal:           txRollbackTotal,
+		CheckpointTotal:           checkpointTotal,
+		CheckpointErrorTotal:      checkpointErrorTotal,
 	}
 	out.SQLite = sqliteMetrics
 	return out

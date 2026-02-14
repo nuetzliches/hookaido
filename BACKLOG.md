@@ -12,7 +12,6 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## P1 - Medium Priority (v1.x)
 
-- [ ] **Store observability backend-agnostic metrics (#38)** — In progress: unify store runtime metric vocabulary with backend/operation labels (`hookaido_store_operation_seconds`, `hookaido_store_operation_total`, `hookaido_store_errors_total`) while keeping backend-specific compatibility series.
 - [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
 - [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
 - [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).
@@ -40,6 +39,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## Completed (move here when done)
 
+- [x] **Store observability backend-agnostic metrics (#38)** — Unified store runtime metric vocabulary with backend/operation labels (`hookaido_store_operation_seconds`, `hookaido_store_operation_total`, `hookaido_store_errors_total`) across `sqlite`, `memory`, and `postgres`, while retaining SQLite compatibility series.
 - [x] **Optional gRPC worker API (Phase 2)** — Added worker transport contract and handlers, shared Pull operation core, opt-in runtime listener/config wiring via `pull_api.grpc_listen` with listener guardrails, auth parity (global + route override), integration/E2E parity coverage, and docs for operations. Scope is fixed to pull-worker lease transport (`dequeue`/`ack`/`nack`/`extend`) with explicit MCP non-goal for worker lease ops.
 - [x] **Drain fairness under saturation** — Completed saturation tuning across push drain paths: route-shared workers with target-aware dequeue micro-batching (`single-target` up to 4, `multi-target` up to 2), single-target lease-mutation batching with fallback safety, and reproducible push benchmarks with reject-reason and tail-latency (`p95_ms`/`p99_ms`) guardrails.
 - [x] **Mixed-workload tail latency playbook** — Added reproducible mixed ingress+drain benchmark profile in `internal/pullapi/bench_test.go` (`BenchmarkMixedIngressDrain`) with `p95_ms`/`p99_ms` reporting and Makefile targets `bench-pull-mixed-baseline`, `bench-pull-mixed`, `bench-pull-mixed-compare`.

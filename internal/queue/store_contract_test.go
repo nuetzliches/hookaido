@@ -1,0 +1,212 @@
+package queue
+
+import (
+	"path/filepath"
+	"sort"
+	"testing"
+	"time"
+)
+
+type storeFactory struct {
+	name string
+	new  func(t *testing.T, now *time.Time) Store
+}
+
+func contractStoreFactories() []storeFactory {
+	return []storeFactory{
+		{
+			name: "memory",
+			new: func(t *testing.T, now *time.Time) Store {
+				t.Helper()
+				return NewMemoryStore(
+					WithNowFunc(func() time.Time { return now.UTC() }),
+				)
+			},
+		},
+		{
+			name: "sqlite",
+			new: func(t *testing.T, now *time.Time) Store {
+				t.Helper()
+				dbPath := filepath.Join(t.TempDir(), "hookaido.db")
+				s, err := NewSQLiteStore(
+					dbPath,
+					WithSQLiteNowFunc(func() time.Time { return now.UTC() }),
+					WithSQLitePollInterval(5*time.Millisecond),
+					WithSQLiteCheckpointInterval(0),
+				)
+				if err != nil {
+					t.Fatalf("new sqlite store: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		},
+	}
+}
+
+func TestStoreContract_DequeueAck(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 2, 14, 21, 0, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			for _, id := range []string{"evt_1", "evt_2"} {
+				if err := store.Enqueue(Envelope{ID: id, Route: "/r", Target: "pull"}); err != nil {
+					t.Fatalf("enqueue %s: %v", id, err)
+				}
+			}
+
+			got := make([]string, 0, 2)
+			for i := 0; i < 2; i++ {
+				resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+				if err != nil {
+					t.Fatalf("dequeue %d: %v", i+1, err)
+				}
+				if len(resp.Items) != 1 {
+					t.Fatalf("dequeue %d items=%d, want 1", i+1, len(resp.Items))
+				}
+				item := resp.Items[0]
+				got = append(got, item.ID)
+				if err := store.Ack(item.LeaseID); err != nil {
+					t.Fatalf("ack %d: %v", i+1, err)
+				}
+			}
+
+			sort.Strings(got)
+			if got[0] != "evt_1" || got[1] != "evt_2" {
+				t.Fatalf("acked ids=%v, want [evt_1 evt_2]", got)
+			}
+		})
+	}
+}
+
+func TestStoreContract_NackDelayRequeue(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 2, 14, 21, 5, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			if err := store.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			if len(resp.Items) != 1 {
+				t.Fatalf("dequeue items=%d, want 1", len(resp.Items))
+			}
+			if err := store.Nack(resp.Items[0].LeaseID, 2*time.Second); err != nil {
+				t.Fatalf("nack: %v", err)
+			}
+
+			resp, err = store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			if err != nil {
+				t.Fatalf("dequeue before delay: %v", err)
+			}
+			if len(resp.Items) != 0 {
+				t.Fatalf("dequeue before delay items=%d, want 0", len(resp.Items))
+			}
+
+			now = now.Add(3 * time.Second)
+			resp, err = store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			if err != nil {
+				t.Fatalf("dequeue after delay: %v", err)
+			}
+			if len(resp.Items) != 1 {
+				t.Fatalf("dequeue after delay items=%d, want 1", len(resp.Items))
+			}
+			if resp.Items[0].ID != "evt_1" {
+				t.Fatalf("dequeue after delay id=%q, want evt_1", resp.Items[0].ID)
+			}
+			if err := store.Ack(resp.Items[0].LeaseID); err != nil {
+				t.Fatalf("ack: %v", err)
+			}
+		})
+	}
+}
+
+func TestStoreContract_ExtendLease(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 2, 14, 21, 10, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			if err := store.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 2 * time.Second})
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			if len(resp.Items) != 1 {
+				t.Fatalf("dequeue items=%d, want 1", len(resp.Items))
+			}
+			leaseID := resp.Items[0].LeaseID
+
+			now = now.Add(1 * time.Second)
+			if err := store.Extend(leaseID, 5*time.Second); err != nil {
+				t.Fatalf("extend: %v", err)
+			}
+
+			// Ensure the lease is still valid after the original ttl.
+			now = now.Add(2 * time.Second)
+			if err := store.Ack(leaseID); err != nil {
+				t.Fatalf("ack after extend: %v", err)
+			}
+		})
+	}
+}
+
+func TestStoreContract_MarkDeadAndRequeue(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 2, 14, 21, 15, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			if err := store.Enqueue(Envelope{ID: "evt_dead", Route: "/r", Target: "pull"}); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			if len(resp.Items) != 1 {
+				t.Fatalf("dequeue items=%d, want 1", len(resp.Items))
+			}
+			if err := store.MarkDead(resp.Items[0].LeaseID, "test_failure"); err != nil {
+				t.Fatalf("mark dead: %v", err)
+			}
+
+			dead, err := store.ListDead(DeadListRequest{Route: "/r", Limit: 10})
+			if err != nil {
+				t.Fatalf("list dead: %v", err)
+			}
+			if len(dead.Items) != 1 {
+				t.Fatalf("dead items=%d, want 1", len(dead.Items))
+			}
+			if dead.Items[0].ID != "evt_dead" {
+				t.Fatalf("dead id=%q, want evt_dead", dead.Items[0].ID)
+			}
+
+			requeueResp, err := store.RequeueDead(DeadRequeueRequest{IDs: []string{"evt_dead"}})
+			if err != nil {
+				t.Fatalf("requeue dead: %v", err)
+			}
+			if requeueResp.Requeued != 1 {
+				t.Fatalf("requeued=%d, want 1", requeueResp.Requeued)
+			}
+
+			resp, err = store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			if err != nil {
+				t.Fatalf("dequeue requeued: %v", err)
+			}
+			if len(resp.Items) != 1 {
+				t.Fatalf("requeued dequeue items=%d, want 1", len(resp.Items))
+			}
+			if resp.Items[0].ID != "evt_dead" {
+				t.Fatalf("requeued dequeue id=%q, want evt_dead", resp.Items[0].ID)
+			}
+		})
+	}
+}

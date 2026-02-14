@@ -12,6 +12,8 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## P1 - Medium Priority (v1.x)
 
+- [ ] **Adaptive backpressure A/B validation gate (#53)** — Run reproducible saturation A/B (`adaptive_backpressure` off vs on) with identical load profiles, publish side-by-side metric deltas (`adaptive_backpressure`, `queue_full`, lag/age, p95/p99), and record pass/fail outcome for v1.5.
+- [ ] **Queue-full reliance follow-up decision (#54)** — Based on #53 evidence, decide whether to keep current default behavior (`adaptive_backpressure` opt-in) with stronger guidance or ship tuned admission-control defaults/recommendations in v1.5.
 - [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
 - [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
 - [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).

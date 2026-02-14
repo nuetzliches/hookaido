@@ -32,7 +32,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
   - [x] Draft worker transport contract (`internal/workerapi/proto/workerapi.proto`) aligned with Pull API operation semantics.
   - [x] Extracted transport-neutral Pull operations in `internal/pullapi/ops.go` and switched HTTP handlers to use them (shared semantics base for gRPC adapter).
   - [ ] Add opt-in runtime listener/config wiring with mTLS/token auth parity.
-  - [ ] Implement gRPC handlers via shared pull/queue operation layer (no semantic drift).
+  - [x] Implemented gRPC worker handlers in `internal/workerapi/server.go` on top of shared Pull operations (`dequeue`, `ack`, `nack`, `extend`) with parity-focused tests.
   - [ ] Add integration + E2E coverage (dequeue/ack/nack/extend, conflicts, auth, replay/idempotent retry parity).
   - [ ] Document deployment/operations guidance and explicit non-goal MCP surface decision for worker lease ops.
 - [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.

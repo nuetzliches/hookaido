@@ -1,6 +1,6 @@
 # Development Status
 
-Last updated: 2026-02-12
+Last updated: 2026-02-14
 Current release: v1.0.3
 
 Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change history: `CHANGELOG.md`. Prioritized work items: `BACKLOG.md`.
@@ -42,5 +42,6 @@ Current weighted implementation grade: **~95%**.
 ## What's Missing (MVP Core)
 
 - Runtime reload has restart-required edges (listener/prefix changes, dispatcher-affecting settings).
+- MCP coverage decision for optional Worker gRPC lease operations (`dequeue`/`ack`/`nack`/`extend`) is deferred: lease mutation tooling stays on Admin/Pull surfaces for now to avoid expanding high-impact mutation paths before role/guardrail review; follow-up is to either add explicit `operate`-scoped worker tools with parity constraints or document Worker gRPC as out-of-scope for MCP v1.x.
 
 See `BACKLOG.md` for prioritized next steps.

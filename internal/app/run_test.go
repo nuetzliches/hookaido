@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/nuetzliches/hookaido/internal/admin"
 	"github.com/nuetzliches/hookaido/internal/config"
 	"github.com/nuetzliches/hookaido/internal/queue"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestAuthorizePull_PerRouteOverridesGlobal(t *testing.T) {
@@ -82,6 +84,70 @@ pull_api { auth token "raw:global" }
 	req2 := httptest.NewRequest(http.MethodPost, "http://example.com/e/dequeue", nil)
 	req2.Header.Set("Authorization", "Bearer wrong")
 	if state.authorizePull(req2) {
+		t.Fatalf("expected wrong token to be rejected")
+	}
+}
+
+func TestAuthorizeWorker_PerRouteOverridesGlobal(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:global" }
+
+"/x" {
+  pull { path "/e" auth token "raw:route" }
+}
+`)
+	cfg, err := config.Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := config.Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+	state := newRuntimeState(compiled)
+	if err := state.loadAuth(compiled); err != nil {
+		t.Fatalf("loadAuth: %v", err)
+	}
+
+	routeCtx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer route"))
+	if !state.authorizeWorker(routeCtx, "/e") {
+		t.Fatalf("expected route token to authorize worker endpoint")
+	}
+
+	globalCtx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer global"))
+	if state.authorizeWorker(globalCtx, "/e") {
+		t.Fatalf("expected global token to be rejected for route with custom tokens")
+	}
+}
+
+func TestAuthorizeWorker_UsesGlobalWhenRouteHasNoTokens(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:global" }
+
+"/x" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := config.Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := config.Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+	state := newRuntimeState(compiled)
+	if err := state.loadAuth(compiled); err != nil {
+		t.Fatalf("loadAuth: %v", err)
+	}
+
+	globalCtx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer global"))
+	if !state.authorizeWorker(globalCtx, "/e") {
+		t.Fatalf("expected global token to authorize worker endpoint")
+	}
+
+	wrongCtx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer wrong"))
+	if state.authorizeWorker(wrongCtx, "/e") {
 		t.Fatalf("expected wrong token to be rejected")
 	}
 }

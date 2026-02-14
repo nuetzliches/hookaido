@@ -1806,10 +1806,21 @@ func (s *MemoryStore) RuntimeMetrics() StoreRuntimeMetrics {
 		retainedBytesByState[st] = n
 	}
 	evictions := make(map[string]int64, len(s.evictionsTotalByReason))
+	evictionTotal := int64(0)
 	for reason, n := range s.evictionsTotalByReason {
 		evictions[reason] = n
+		evictionTotal += n
 	}
 	pressure := s.memoryPressureStatusLocked()
+	out.Common = StoreCommonRuntimeMetrics{
+		OperationTotal: []StoreOperationCounterRuntimeMetric{
+			{Operation: "enqueue_reject", Total: pressure.RejectTotal},
+			{Operation: "evict", Total: evictionTotal},
+		},
+		ErrorsTotal: []StoreOperationErrorRuntimeMetric{
+			{Operation: "enqueue", Kind: "memory_pressure", Total: pressure.RejectTotal},
+		},
+	}
 
 	out.Memory = &MemoryRuntimeMetrics{
 		ItemsByState:           itemsByState,

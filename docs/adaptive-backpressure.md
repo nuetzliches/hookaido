@@ -87,6 +87,6 @@ Use production-like ingress load tests for threshold tuning decisions. The bench
 
 When dashboards span versions, gate adaptive panels/alerts with:
 
-- `hookaido_metrics_schema_info{schema="1.2.0"} == 1`
+- `hookaido_metrics_schema_info{schema="1.3.0"} == 1`
 
-This avoids interpreting missing pre-`1.2.0` series as zero.
+This avoids interpreting missing pre-`1.3.0` series as zero.

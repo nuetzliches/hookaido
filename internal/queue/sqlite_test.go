@@ -1495,6 +1495,37 @@ func TestSQLiteStore_RuntimeMetrics(t *testing.T) {
 	if rm.Backend != "sqlite" {
 		t.Fatalf("backend: got %q, want sqlite", rm.Backend)
 	}
+	durationByOperation := make(map[string]HistogramSnapshot, len(rm.Common.OperationDurationSeconds))
+	for _, metric := range rm.Common.OperationDurationSeconds {
+		durationByOperation[metric.Operation] = metric.DurationSeconds
+	}
+	if durationByOperation["write_tx"].Count == 0 {
+		t.Fatalf("expected write_tx duration count > 0")
+	}
+	if durationByOperation["dequeue_tx"].Count == 0 {
+		t.Fatalf("expected dequeue_tx duration count > 0")
+	}
+	if durationByOperation["checkpoint"].Count == 0 {
+		t.Fatalf("expected checkpoint duration count > 0")
+	}
+	totalByOperation := make(map[string]int64, len(rm.Common.OperationTotal))
+	for _, metric := range rm.Common.OperationTotal {
+		totalByOperation[metric.Operation] = metric.Total
+	}
+	if totalByOperation["tx_commit"] == 0 {
+		t.Fatalf("expected tx_commit total > 0")
+	}
+	if totalByOperation["checkpoint"] != 1 {
+		t.Fatalf("expected checkpoint total=1, got %d", totalByOperation["checkpoint"])
+	}
+	errorsByOperationAndKind := make(map[string]int64, len(rm.Common.ErrorsTotal))
+	for _, metric := range rm.Common.ErrorsTotal {
+		errorsByOperationAndKind[metric.Operation+":"+metric.Kind] = metric.Total
+	}
+	if _, ok := errorsByOperationAndKind["begin_tx:busy"]; !ok {
+		t.Fatalf("expected begin_tx:busy error metric to exist")
+	}
+
 	if rm.SQLite == nil {
 		t.Fatalf("expected sqlite runtime metrics")
 	}

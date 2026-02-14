@@ -34,6 +34,11 @@ type PostgresStore struct {
 
 var _ Store = (*PostgresStore)(nil)
 
+const (
+	postgresMaxDequeueBatch = 100
+	postgresMaxListLimit    = 1000
+)
+
 const postgresSchemaV1 = `
 CREATE TABLE IF NOT EXISTS queue_items (
   id             TEXT PRIMARY KEY,
@@ -312,8 +317,8 @@ func (s *PostgresStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
 	if batch <= 0 {
 		batch = 1
 	}
-	if batch > 100 {
-		batch = 100
+	if batch > postgresMaxDequeueBatch {
+		batch = postgresMaxDequeueBatch
 	}
 
 	leaseTTL := req.LeaseTTL
@@ -349,6 +354,11 @@ func (s *PostgresStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
 }
 
 func (s *PostgresStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.Duration) (DequeueResponse, error) {
+	batch = clampSliceCap(batch, postgresMaxDequeueBatch)
+	if batch == 0 {
+		batch = 1
+	}
+
 	now := req.Now
 	if now.IsZero() {
 		now = s.now()
@@ -396,7 +406,7 @@ FOR UPDATE SKIP LOCKED
 	}
 	defer rows.Close()
 
-	items := make([]Envelope, 0, batch)
+	items := make([]Envelope, 0, clampSliceCap(batch, postgresMaxDequeueBatch))
 	for rows.Next() {
 		var (
 			item        Envelope
@@ -664,8 +674,8 @@ func (s *PostgresStore) ListDead(req DeadListRequest) (DeadListResponse, error) 
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > postgresMaxListLimit {
+		limit = postgresMaxListLimit
 	}
 
 	args := make([]any, 0, 4)
@@ -697,7 +707,7 @@ LIMIT $` + fmt.Sprintf("%d", limitIdx)
 	}
 	defer rows.Close()
 
-	items := make([]Envelope, 0, limit)
+	items := make([]Envelope, 0, clampSliceCap(limit, postgresMaxListLimit))
 	for rows.Next() {
 		item, err := scanQueueItem(rows)
 		if err != nil {
@@ -823,8 +833,8 @@ func (s *PostgresStore) ListMessages(req MessageListRequest) (MessageListRespons
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > postgresMaxListLimit {
+		limit = postgresMaxListLimit
 	}
 
 	order := strings.ToLower(strings.TrimSpace(req.Order))
@@ -872,7 +882,7 @@ WHERE 1 = 1
 	}
 	defer rows.Close()
 
-	items := make([]Envelope, 0, limit)
+	items := make([]Envelope, 0, clampSliceCap(limit, postgresMaxListLimit))
 	for rows.Next() {
 		item, err := scanQueueItem(rows)
 		if err != nil {
@@ -1250,8 +1260,8 @@ func (s *PostgresStore) ListAttempts(req AttemptListRequest) (AttemptListRespons
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > postgresMaxListLimit {
+		limit = postgresMaxListLimit
 	}
 
 	query := `
@@ -1294,7 +1304,7 @@ FROM delivery_attempts
 	}
 	defer rows.Close()
 
-	items := make([]DeliveryAttempt, 0, limit)
+	items := make([]DeliveryAttempt, 0, clampSliceCap(limit, postgresMaxListLimit))
 	for rows.Next() {
 		var (
 			attempt    DeliveryAttempt
@@ -1417,8 +1427,8 @@ func (s *PostgresStore) selectMessageIDsByFilter(req MessageManageFilterRequest,
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > postgresMaxListLimit {
+		limit = postgresMaxListLimit
 	}
 
 	allowedSet := make(map[State]struct{}, len(allowed))
@@ -1470,7 +1480,7 @@ WHERE 1 = 1
 	}
 	defer rows.Close()
 
-	ids := make([]string, 0, limit)
+	ids := make([]string, 0, clampSliceCap(limit, postgresMaxListLimit))
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -1722,4 +1732,14 @@ func nullInt(v int) any {
 		return nil
 	}
 	return v
+}
+
+func clampSliceCap(size, max int) int {
+	if size <= 0 || max <= 0 {
+		return 0
+	}
+	if size > max {
+		return max
+	}
+	return size
 }

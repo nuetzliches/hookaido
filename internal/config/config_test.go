@@ -236,6 +236,7 @@ func TestParseFormat_PullAPILimits(t *testing.T) {
 	in := []byte(`
 pull_api {
   auth token "raw:t"
+  grpc_listen ":9943"
   max_batch 25
   default_lease_ttl "45s"
   max_lease_ttl "60s"
@@ -258,6 +259,9 @@ pull_api {
 	got := string(out)
 	if !strings.Contains(got, "max_batch 25") {
 		t.Fatalf("expected pull_api max_batch, got:\n%s", got)
+	}
+	if !strings.Contains(got, `grpc_listen ":9943"`) {
+		t.Fatalf("expected pull_api grpc_listen, got:\n%s", got)
 	}
 	if !strings.Contains(got, `default_lease_ttl "45s"`) {
 		t.Fatalf("expected pull_api default_lease_ttl, got:\n%s", got)
@@ -1670,6 +1674,74 @@ pull_api { auth token "raw:t" }
 	}
 	if !found {
 		t.Fatalf("expected ingress listener error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_PullAPIGrpcListenMustNotShareListener(t *testing.T) {
+	in := []byte(`
+ingress { listen ":8443" }
+pull_api {
+  listen ":9443"
+  grpc_listen ":8443"
+  auth token "raw:t"
+}
+
+"/x" { pull { path "/e" } }
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "pull_api.grpc_listen must not share a listener") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected pull_api.grpc_listen listener conflict error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_PullAPIGrpcListenMustNotShareMetricsListener(t *testing.T) {
+	in := []byte(`
+observability {
+  metrics {
+    enabled on
+    listen ":9901"
+  }
+}
+pull_api {
+  grpc_listen ":9901"
+  auth token "raw:t"
+}
+
+"/x" { pull { path "/e" } }
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "pull_api.grpc_listen must not share a listener with observability.metrics.listen") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected pull_api.grpc_listen metrics conflict error, got %#v", res.Errors)
 	}
 }
 
@@ -4124,10 +4196,43 @@ pull_api {}
 	}
 }
 
+func TestCompile_PullAPIGrpcListenRequiresPullRoutes(t *testing.T) {
+	in := []byte(`
+pull_api {
+  grpc_listen ":9943"
+  auth token "raw:t"
+}
+
+"/x" {
+  deliver "https://ci.internal/build" {}
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "pull_api.grpc_listen requires at least one pull route") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected pull_api.grpc_listen pull-route requirement error, got %#v", res.Errors)
+	}
+}
+
 func TestCompile_PullAPILimits(t *testing.T) {
 	in := []byte(`
 pull_api {
   auth token "raw:t"
+  grpc_listen ":9943"
   max_batch 25
   default_lease_ttl 45s
   max_lease_ttl 60s
@@ -4147,6 +4252,9 @@ pull_api {
 	}
 	if compiled.PullAPI.MaxBatch != 25 {
 		t.Fatalf("pull max_batch: got %d", compiled.PullAPI.MaxBatch)
+	}
+	if compiled.PullAPI.GRPCListen != ":9943" {
+		t.Fatalf("pull grpc_listen: got %q", compiled.PullAPI.GRPCListen)
 	}
 	if compiled.PullAPI.DefaultLeaseTTL != 45*time.Second {
 		t.Fatalf("pull default_lease_ttl: got %s", compiled.PullAPI.DefaultLeaseTTL)
@@ -4316,6 +4424,7 @@ func TestParse_PullAPIDuplicateDirective(t *testing.T) {
 		{name: "Listen", first: `listen ":9443"`, second: `listen ":9555"`, want: "duplicate pull_api listen"},
 		{name: "Prefix", first: `prefix "/pull"`, second: `prefix "/v2/pull"`, want: "duplicate pull_api prefix"},
 		{name: "MaxBatch", first: "max_batch 10", second: "max_batch 20", want: "duplicate pull_api max_batch"},
+		{name: "GRPCListen", first: `grpc_listen ":9943"`, second: `grpc_listen ":9955"`, want: "duplicate pull_api grpc_listen"},
 		{name: "DefaultLeaseTTL", first: "default_lease_ttl 30s", second: "default_lease_ttl 60s", want: "duplicate pull_api default_lease_ttl"},
 		{name: "MaxLeaseTTL", first: "max_lease_ttl 90s", second: "max_lease_ttl 120s", want: "duplicate pull_api max_lease_ttl"},
 		{name: "DefaultMaxWait", first: "default_max_wait 5s", second: "default_max_wait 8s", want: "duplicate pull_api default_max_wait"},

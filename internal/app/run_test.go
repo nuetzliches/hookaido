@@ -604,6 +604,26 @@ pull_api {
 	}
 }
 
+func TestRequiresRestartForReload_PullAPIGrpcListenChanged(t *testing.T) {
+	running := compileForReloadTest(t, `
+pull_api {
+  auth token "raw:t"
+  grpc_listen ":9943"
+}
+"/x" { pull { path "/e1" } }
+`)
+	updated := compileForReloadTest(t, `
+pull_api {
+  auth token "raw:t"
+  grpc_listen ":9953"
+}
+"/x" { pull { path "/e1" } }
+`)
+	if !requiresRestartForReload(updated, running) {
+		t.Fatalf("expected restart required when pull_api.grpc_listen changes")
+	}
+}
+
 func TestRequiresRestartForReload_EgressPolicyChangedWithDeliver(t *testing.T) {
 	running := compileForReloadTest(t, `
 defaults {

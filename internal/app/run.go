@@ -34,6 +34,10 @@ import (
 	"github.com/nuetzliches/hookaido/internal/queue"
 	"github.com/nuetzliches/hookaido/internal/router"
 	"github.com/nuetzliches/hookaido/internal/secrets"
+	"github.com/nuetzliches/hookaido/internal/workerapi"
+	workerapipb "github.com/nuetzliches/hookaido/internal/workerapi/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 const backlogTrendCaptureInterval = time.Minute
@@ -293,8 +297,10 @@ type runtimeState struct {
 	trendSignals         config.TrendSignalsConfig
 	adaptiveBackpressure config.AdaptiveBackpressureConfig
 	pullAuthorize        pullapi.Authorizer
+	workerAuthorize      workerapi.Authorizer
 	adminAuthorize       admin.Authorizer
 	pullByRoute          map[string]pullapi.Authorizer
+	workerByRoute        map[string]workerapi.Authorizer
 	basicByRoute         map[string]*ingress.BasicAuth
 	forwardByRoute       map[string]*ingress.ForwardAuth
 	hmacByRoute          map[string]*ingress.HMACAuth
@@ -311,6 +317,7 @@ func newRuntimeState(compiled config.Compiled) *runtimeState {
 		trendSignals:         compiled.Defaults.TrendSignals,
 		adaptiveBackpressure: compiled.Defaults.AdaptiveBackpressure,
 		pullByRoute:          make(map[string]pullapi.Authorizer),
+		workerByRoute:        make(map[string]workerapi.Authorizer),
 		basicByRoute:         make(map[string]*ingress.BasicAuth),
 		forwardByRoute:       make(map[string]*ingress.ForwardAuth),
 		hmacByRoute:          make(map[string]*ingress.HMACAuth),
@@ -513,6 +520,23 @@ func (s *runtimeState) authorizePull(r *http.Request) bool {
 		return true
 	}
 	return auth(r)
+}
+
+func (s *runtimeState) authorizeWorker(ctx context.Context, endpoint string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	auth := s.workerAuthorize
+	if len(s.workerByRoute) > 0 {
+		if route, ok := s.pathToRoute[strings.TrimSpace(endpoint)]; ok {
+			if ra, ok := s.workerByRoute[route]; ok && ra != nil {
+				auth = ra
+			}
+		}
+	}
+	if auth == nil {
+		return true
+	}
+	return auth(ctx, endpoint)
 }
 
 func (s *runtimeState) authorizeAdmin(r *http.Request) bool {
@@ -836,6 +860,7 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 	}
 
 	pullByRoute := make(map[string]pullapi.Authorizer)
+	workerByRoute := make(map[string]workerapi.Authorizer)
 	for _, rt := range compiled.Routes {
 		if rt.Pull == nil || len(rt.Pull.AuthTokens) == 0 {
 			continue
@@ -849,6 +874,7 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			routeTokens = append(routeTokens, b)
 		}
 		pullByRoute[rt.Path] = pullapi.BearerTokenAuthorizer(routeTokens)
+		workerByRoute[rt.Path] = workerapi.BearerTokenAuthorizer(routeTokens)
 	}
 
 	hmacByRoute := make(map[string]*ingress.HMACAuth, len(compiled.Routes))
@@ -938,8 +964,10 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 
 	s.mu.Lock()
 	s.pullAuthorize = pullapi.BearerTokenAuthorizer(tokens)
+	s.workerAuthorize = workerapi.BearerTokenAuthorizer(tokens)
 	s.adminAuthorize = admin.BearerTokenAuthorizer(adminTokens)
 	s.pullByRoute = pullByRoute
+	s.workerByRoute = workerByRoute
 	s.basicByRoute = basicByRoute
 	s.forwardByRoute = forwardByRoute
 	s.hmacByRoute = hmacByRoute
@@ -1710,7 +1738,7 @@ func startServers(
 	upsertManagedEndpoint func(req admin.ManagementEndpointUpsertRequest) (admin.ManagementEndpointMutationResult, error),
 	deleteManagedEndpoint func(req admin.ManagementEndpointDeleteRequest) (admin.ManagementEndpointMutationResult, error),
 	cancel context.CancelFunc,
-) ([]*http.Server, error) {
+) ([]shutdownServer, error) {
 	if runtimeLogger == nil {
 		runtimeLogger = slog.Default()
 	}
@@ -1767,6 +1795,13 @@ func startServers(
 	}
 	pullHandler.ObserveExtend = func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
 		appMetrics.observePullExtend(route, statusCode, leaseID, extendBy, leaseExpired)
+	}
+
+	workerHandler := workerapi.NewServer(pullHandler)
+	workerHandler.ResolveRoute = state.resolvePull
+	workerHandler.Authorize = state.authorizeWorker
+	if compiled.PullAPI.MaxBatch > 0 {
+		workerHandler.MaxLeaseBatch = compiled.PullAPI.MaxBatch
 	}
 
 	adminH := admin.NewServer(store)
@@ -1846,11 +1881,12 @@ func startServers(
 		ln   net.Listener
 	}
 	var entries []serverEntry
+	listeners := []net.Listener{ingressLn}
 	entries = append(entries, serverEntry{name: "ingress", srv: ingressSrv, ln: ingressLn})
 
 	closeEntries := func() {
-		for _, e := range entries {
-			_ = e.ln.Close()
+		for _, ln := range listeners {
+			_ = ln.Close()
 		}
 	}
 
@@ -1860,6 +1896,7 @@ func startServers(
 			closeEntries()
 			return nil, fmt.Errorf("pull/admin listen %q: %w", compiled.PullAPI.Listen, err)
 		}
+		listeners = append(listeners, sharedLn)
 		if compiled.HasPullRoutes {
 			pullMounted := mountPrefix(compiled.PullAPI.Prefix, pullHandler)
 			adminMounted := mountPrefix(compiled.AdminAPI.Prefix, adminH)
@@ -1896,6 +1933,7 @@ func startServers(
 				closeEntries()
 				return nil, fmt.Errorf("pull_api listen %q: %w", compiled.PullAPI.Listen, err)
 			}
+			listeners = append(listeners, pullLn)
 			pullSrv := &http.Server{
 				Addr:    compiled.PullAPI.Listen,
 				Handler: mountPrefix(compiled.PullAPI.Prefix, pullHandler),
@@ -1912,6 +1950,7 @@ func startServers(
 			closeEntries()
 			return nil, fmt.Errorf("admin_api listen %q: %w", compiled.AdminAPI.Listen, err)
 		}
+		listeners = append(listeners, adminLn)
 		adminSrv := &http.Server{
 			Addr:    compiled.AdminAPI.Listen,
 			Handler: mountPrefix(compiled.AdminAPI.Prefix, adminH),
@@ -1923,10 +1962,32 @@ func startServers(
 		entries = append(entries, serverEntry{name: "admin_api", srv: adminSrv, ln: adminLn})
 	}
 
-	servers := make([]*http.Server, 0, len(entries))
+	servers := make([]shutdownServer, 0, len(entries)+2)
 	for _, e := range entries {
 		servers = append(servers, e.srv)
 		serveOnListener(runtimeLogger, e.name, e.srv, e.ln, cancel)
+	}
+
+	if strings.TrimSpace(compiled.PullAPI.GRPCListen) != "" {
+		grpcOpts := make([]grpc.ServerOption, 0, 1)
+		if compiled.PullAPI.TLS.Enabled {
+			tlsCfg, err := buildTLSConfig(compiled.PullAPI.TLS)
+			if err != nil {
+				closeEntries()
+				return nil, fmt.Errorf("pull_api.grpc_listen tls: %w", err)
+			}
+			grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		}
+		grpcLn, err := net.Listen("tcp", compiled.PullAPI.GRPCListen)
+		if err != nil {
+			closeEntries()
+			return nil, fmt.Errorf("pull_api.grpc_listen %q: %w", compiled.PullAPI.GRPCListen, err)
+		}
+		listeners = append(listeners, grpcLn)
+		grpcSrv := grpc.NewServer(grpcOpts...)
+		workerapipb.RegisterWorkerServiceServer(grpcSrv, workerHandler)
+		serveGRPCOnListener(runtimeLogger, "pull_worker_grpc", grpcSrv, grpcLn, cancel)
+		servers = append(servers, grpcServerHandle{server: grpcSrv})
 	}
 
 	if compiled.Observability.Metrics.Enabled {
@@ -1935,6 +1996,7 @@ func startServers(
 			closeEntries()
 			return nil, fmt.Errorf("metrics listen %q: %w", compiled.Observability.Metrics.Listen, err)
 		}
+		listeners = append(listeners, metricsLn)
 		metricsHandler := mountPrefix(compiled.Observability.Metrics.Prefix, newMetricsHandler(version, time.Now(), appMetrics))
 		metricsHandler = wrapTracingHandler(compiled.Observability.TracingEnabled, "metrics", metricsHandler)
 		if accessLogger != nil {
@@ -1974,8 +2036,40 @@ func startServers(
 			slog.String("prefix", compiled.Observability.Metrics.Prefix),
 		)
 	}
+	if strings.TrimSpace(compiled.PullAPI.GRPCListen) != "" {
+		runtimeLogger.Info("pull_worker_grpc_listening", slog.String("addr", compiled.PullAPI.GRPCListen))
+	}
 
 	return servers, nil
+}
+
+type shutdownServer interface {
+	Shutdown(ctx context.Context) error
+}
+
+type grpcServerHandle struct {
+	server *grpc.Server
+}
+
+func (h grpcServerHandle) Shutdown(ctx context.Context) error {
+	if h.server == nil {
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		h.server.GracefulStop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		h.server.Stop()
+		<-done
+		return ctx.Err()
+	}
 }
 
 func mountPrefix(prefix string, next http.Handler) http.Handler {
@@ -2041,6 +2135,22 @@ func listenWithTLS(addr string, tlsCfg config.TLSConfig) (net.Listener, error) {
 		return nil, err
 	}
 	return tls.NewListener(ln, cfg), nil
+}
+
+func serveGRPCOnListener(logger *slog.Logger, name string, srv *grpc.Server, ln net.Listener, cancel func()) {
+	go func() {
+		err := srv.Serve(ln)
+		if err == nil || errors.Is(err, grpc.ErrServerStopped) {
+			return
+		}
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("grpc_server_error", slog.String("name", name), slog.Any("err", err))
+		if cancel != nil {
+			cancel()
+		}
+	}()
 }
 
 func newQueueStore(compiled config.Compiled, dbPath string) (queue.Store, string, func() error, error) {
@@ -2412,6 +2522,7 @@ func requiresRestartForReload(compiled, running config.Compiled) bool {
 		compiled.PullAPI.Prefix != running.PullAPI.Prefix ||
 		compiled.AdminAPI.Prefix != running.AdminAPI.Prefix ||
 		compiled.PullAPI.Listen != running.PullAPI.Listen ||
+		compiled.PullAPI.GRPCListen != running.PullAPI.GRPCListen ||
 		compiled.AdminAPI.Listen != running.AdminAPI.Listen ||
 		compiled.PullAPI.MaxBatch != running.PullAPI.MaxBatch ||
 		compiled.PullAPI.DefaultLeaseTTL != running.PullAPI.DefaultLeaseTTL ||

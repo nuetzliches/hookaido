@@ -126,7 +126,7 @@ In Admin-proxy mode:
 - Errors map to explicit MCP error messages with structured metadata
 - `--admin-endpoint-allowlist` restricts which Admin API targets may be proxied
 
-Worker gRPC lease operations (`dequeue`, `ack`, `nack`, `extend`) are intentionally out of MCP scope in v1.x. MCP keeps lease mutation control on existing Admin/Pull operational paths.
+Worker gRPC lease operations (`dequeue`, `ack`, `nack`, `extend`) are intentionally out of MCP scope. MCP keeps lease mutation control on existing Admin/Pull operational paths.
 
 ## Audit
 

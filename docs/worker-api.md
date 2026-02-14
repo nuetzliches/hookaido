@@ -73,7 +73,18 @@ Worker gRPC reuses `pull_api.tls`:
 
 ## MCP Scope Decision
 
-Worker lease operations are intentionally **not** exposed as MCP tools in v1.x. MCP keeps lease mutations on existing Admin/Pull operational surfaces to avoid duplicating high-impact mutation paths.
+Worker lease operations are intentionally **not** exposed as MCP tools. MCP keeps lease mutations on existing Admin/Pull operational surfaces to avoid duplicating high-impact mutation paths.
+
+## Scope Guardrail
+
+Worker gRPC is intentionally constrained to pull-worker lease operations only:
+
+- `Dequeue`
+- `Ack`
+- `Nack`
+- `Extend`
+
+It is not a second admin/publish/control-plane API and is not planned to become one.
 
 See:
 

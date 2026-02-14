@@ -2,6 +2,8 @@
 
 The Pull API is Hookaido's consumer protocol. Internal workers connect to the Pull API to dequeue messages, process them, and acknowledge completion — all via outbound-only HTTP calls.
 
+If your workers prefer gRPC transport, see [Worker gRPC API](worker-api.md). It reuses the same runtime semantics and auth model.
+
 ## Base URL
 
 The full endpoint for a pull route is:

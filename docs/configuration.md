@@ -140,6 +140,7 @@ Controls the Pull API listener for consumer workers.
 ```hcl
 pull_api {
   listen :9443
+  grpc_listen 127.0.0.1:9943  # optional gRPC worker listener
   prefix /pull        # optional URL prefix
   auth token env:HOOKAIDO_PULL_TOKEN
 
@@ -156,6 +157,7 @@ pull_api {
 | Directive           | Default      | Description                                |
 | ------------------- | ------------ | ------------------------------------------ |
 | `listen`            | `:9443`      | Bind address                               |
+| `grpc_listen`       | —            | Optional gRPC worker listener address      |
 | `prefix`            | —            | URL path prefix for all pull endpoints     |
 | `auth token`        | **required** | Bearer token allowlist (`env:`/`file:`/`vault:`/`raw:` ref) |
 | `max_batch`         | `100`        | Max items per dequeue request              |
@@ -166,6 +168,8 @@ pull_api {
 | `tls`               | —            | TLS and optional mTLS configuration        |
 
 > Pull API auth is required when pull routes are present. Deliver-only configs can omit it entirely — the Pull API server is skipped in that case.
+>
+> `grpc_listen` is optional and only valid when at least one pull route exists. It must use a dedicated listener address (it cannot share with ingress/pull/admin/metrics listeners).
 
 ### `admin_api`
 
@@ -590,7 +594,7 @@ If any of these change, Hookaido rejects the reload and requires a process resta
 
 | Config area                                                                  | Reason                                  |
 | ---------------------------------------------------------------------------- | --------------------------------------- |
-| Listener addresses (`ingress.listen`, `pull_api.listen`, `admin_api.listen`) | Socket rebind                           |
+| Listener addresses (`ingress.listen`, `pull_api.listen`, `pull_api.grpc_listen`, `admin_api.listen`) | Socket rebind                           |
 | Listener TLS (`tls { ... }` on any listener)                                 | TLS config baked at startup             |
 | API prefixes (`pull_api.prefix`, `admin_api.prefix`)                         | HTTP mux topology                       |
 | Shared listener mode toggle                                                  | Server topology                         |

@@ -62,6 +62,7 @@ graph LR
 | [Deployment Modes](deployment-modes.md) | `dmz-queue pull`, push mode, and shared listener behavior |
 | [Ingress](ingress.md) | Matching, auth, and rate limiting |
 | [Pull API](pull-api.md) | Dequeue, ack, nack, extend contract |
+| [Worker gRPC API](worker-api.md) | Optional gRPC transport for pull workers |
 | [Admin API](admin-api.md) | Health, backlog, DLQ, and message mutation endpoints |
 | [Delivery](delivery.md) | Push retries, timeouts, concurrency, and signing |
 | [Security](security.md) | Secret refs, TLS/mTLS, replay protection, SSRF policy |

@@ -1269,6 +1269,13 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 }
 
 func dequeueCandidateIDsTx(ctx context.Context, conn *sql.Conn, req DequeueRequest, now time.Time, batch int) ([]string, error) {
+	if batch <= 0 {
+		batch = 1
+	}
+	if batch > 100 {
+		batch = 100
+	}
+
 	var b strings.Builder
 	b.WriteString(`
 SELECT id

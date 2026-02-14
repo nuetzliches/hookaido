@@ -3,7 +3,7 @@ name: container
 on:
   push:
     tags:
-      - "v*"
+      - "v*.*.*"
   workflow_dispatch:
 
 permissions: read-all
@@ -18,6 +18,13 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate release tag format
+        run: |
+          if ! [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "container publish tags must match vX.Y.Z (got: ${GITHUB_REF_NAME})" >&2
+            exit 1
+          fi
 
       - name: Compute Build Metadata
         id: build_meta

@@ -144,7 +144,7 @@ Notes:
 
 Tag-based release workflow is defined in `.github/workflows/release.yml`.
 
-- Trigger: `push` tag matching `v*`
+- Trigger: `push` tag matching `v*.*.*` with strict guardrail `^v[0-9]+\.[0-9]+\.[0-9]+$`
 - Guardrail: fails closed when `HOOKAIDO_RELEASE_SIGNING_KEY_PEM` is missing
 - Build: signed artifacts via `internal/tools/release`
 - Verify: `hookaido verify-release --require-signature --require-sbom` must pass before publish
@@ -160,10 +160,10 @@ Tag-based release workflow is defined in `.github/workflows/release.yml`.
 
 Container publish workflow is defined in `.github/workflows/container.yml`.
 
-- Trigger: `push` tag matching `v*` (and manual `workflow_dispatch`)
+- Trigger: `push` tag matching `v*.*.*` (and manual `workflow_dispatch`) with strict guardrail `^v[0-9]+\.[0-9]+\.[0-9]+$`
 - Registry: GHCR (`ghcr.io/nuetzliches/hookaido`)
 - Platforms: `linux/amd64`, `linux/arm64`
-- Tags: semver tags (`vX.Y.Z`, `vX.Y`, `vX`), `latest`, and short `sha-*`
+- Tags: semver tags (`X.Y.Z`, `X.Y`, `X`), `latest`, and short `sha-*`
 - Attestation: `actions/attest-build-provenance@v3` with `push-to-registry: true`
 - Metadata: OCI labels include source URL and image description
 - Build metadata: Docker build args wire to `hookaido version --long` (`version`, `commit`, `build_date`)

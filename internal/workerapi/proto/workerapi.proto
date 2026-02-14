@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package hookaido.worker.v1;
+
+option go_package = "github.com/nuetzliches/hookaido/internal/workerapi/proto;workerapipb";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// WorkerService is the optional Phase-2 gRPC transport for internal workers.
+// It mirrors Pull API semantics without changing queue/delivery guarantees.
+service WorkerService {
+  rpc Dequeue(DequeueRequest) returns (DequeueResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Nack(NackRequest) returns (NackResponse);
+  rpc Extend(ExtendRequest) returns (google.protobuf.Empty);
+}
+
+message DequeueRequest {
+  // Pull endpoint path (same route selector used by HTTP Pull API).
+  string endpoint = 1;
+
+  // Optional; defaults to 1 and is capped by server policy.
+  uint32 batch = 2;
+
+  // Optional dequeue wait and lease values.
+  google.protobuf.Duration max_wait = 3;
+  google.protobuf.Duration lease_ttl = 4;
+}
+
+message DequeueResponse {
+  repeated DequeueItem items = 1;
+}
+
+message DequeueItem {
+  string id = 1;
+  string lease_id = 2;
+  google.protobuf.Timestamp received_at = 3;
+  int32 attempt = 4;
+  google.protobuf.Timestamp next_run_at = 5;
+  string route = 6;
+  bytes payload = 7;
+  map<string, string> headers = 8;
+  map<string, string> trace = 9;
+}
+
+message AckRequest {
+  // Pull endpoint path.
+  string endpoint = 1;
+
+  // Exactly one of lease_id or lease_ids must be set.
+  string lease_id = 2;
+  repeated string lease_ids = 3;
+}
+
+message NackRequest {
+  // Pull endpoint path.
+  string endpoint = 1;
+
+  // Exactly one of lease_id or lease_ids must be set.
+  string lease_id = 2;
+  repeated string lease_ids = 3;
+
+  // Ignored when dead=true.
+  google.protobuf.Duration delay = 4;
+  bool dead = 5;
+  string reason = 6;
+}
+
+message ExtendRequest {
+  // Pull endpoint path.
+  string endpoint = 1;
+  string lease_id = 2;
+  google.protobuf.Duration extend_by = 3;
+}
+
+message AckResponse {
+  // Number of successful acks. Includes idempotent duplicate retries.
+  uint32 acked = 1;
+  repeated LeaseConflict conflicts = 2;
+}
+
+message NackResponse {
+  // Number of successful nack/dead operations. Includes idempotent retries.
+  uint32 succeeded = 1;
+  repeated LeaseConflict conflicts = 2;
+}
+
+message LeaseConflict {
+  string lease_id = 1;
+  bool expired = 2;
+}

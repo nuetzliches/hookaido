@@ -994,23 +994,81 @@ func (s *SQLiteStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.D
 	if err := s.requeueExpiredLeases(ctx, conn, now); err != nil {
 		return DequeueResponse{}, err
 	}
+	if batch == 1 {
+		item, ok, err := s.dequeueCandidateSingleTx(ctx, conn, req, now, leaseUntil)
+		if err != nil {
+			return DequeueResponse{}, err
+		}
+		if ok {
+			if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
+				return DequeueResponse{}, err
+			}
+			committed = true
+			return DequeueResponse{Items: []Envelope{item}}, nil
+		}
+		if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
+			return DequeueResponse{}, err
+		}
+		committed = true
+		return DequeueResponse{}, nil
+	}
 
+	ids, err := dequeueCandidateIDsTx(ctx, conn, req, now, batch)
+	if err != nil {
+		return DequeueResponse{}, err
+	}
+	if len(ids) == 0 {
+		if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
+			return DequeueResponse{}, err
+		}
+		committed = true
+		return DequeueResponse{}, nil
+	}
+	if len(ids) == 1 {
+		item, ok, err := s.dequeueLeaseSingleTx(ctx, conn, ids[0], leaseUntil)
+		if err != nil {
+			return DequeueResponse{}, err
+		}
+		if ok {
+			if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
+				return DequeueResponse{}, err
+			}
+			committed = true
+			return DequeueResponse{Items: []Envelope{item}}, nil
+		}
+	}
+
+	leaseIDs := newHexIDs("lease_", len(ids))
+	indexByID := make(map[string]int, len(ids))
+	for i, id := range ids {
+		indexByID[id] = i
+	}
+
+	caseExpr := strings.Builder{}
+	caseExpr.WriteString("CASE id")
+	args := make([]any, 0, 1+(len(ids)*2)+3+len(ids))
+	args = append(args, string(StateLeased))
+	for i, id := range ids {
+		caseExpr.WriteString(" WHEN ? THEN ?")
+		args = append(args, id, leaseIDs[i])
+	}
+	caseExpr.WriteString(" END")
+
+	inPlaceholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
 	query := `
-SELECT id, route, target, state, received_at, attempt, next_run_at, payload, headers_json, trace_json, schema_version, dead_reason
-FROM queue_items
+UPDATE queue_items
+SET state = ?,
+    attempt = attempt + 1,
+    lease_id = ` + caseExpr.String() + `,
+    lease_until = ?,
+    next_run_at = ?
 WHERE state = ?
-  AND next_run_at <= ?`
-	args := []any{string(StateQueued), now.UnixNano()}
-	if req.Route != "" {
-		query += " AND route = ?"
-		args = append(args, req.Route)
+  AND id IN (` + inPlaceholders + `)
+RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version;`
+	args = append(args, leaseUntil.UnixNano(), leaseUntil.UnixNano(), string(StateQueued))
+	for _, id := range ids {
+		args = append(args, id)
 	}
-	if req.Target != "" {
-		query += " AND target = ?"
-		args = append(args, req.Target)
-	}
-	query += " ORDER BY next_run_at ASC, received_at ASC LIMIT ?"
-	args = append(args, batch)
 
 	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1018,68 +1076,60 @@ WHERE state = ?
 	}
 	defer rows.Close()
 
-	out := make([]Envelope, 0)
+	out := make([]Envelope, len(ids))
+	filled := make([]bool, len(ids))
+	filledCount := 0
 	for rows.Next() {
 		var env Envelope
 		var receivedAtNanos int64
-		var nextRunAtNanos int64
-		var state string
 		var headersJSON sql.NullString
 		var traceJSON sql.NullString
-		var deadReason sql.NullString
 
 		if err := rows.Scan(
 			&env.ID,
 			&env.Route,
 			&env.Target,
-			&state,
 			&receivedAtNanos,
 			&env.Attempt,
-			&nextRunAtNanos,
 			&env.Payload,
 			&headersJSON,
 			&traceJSON,
 			&env.SchemaVersion,
-			&deadReason,
 		); err != nil {
 			return DequeueResponse{}, err
 		}
 
-		env.State = State(state)
-		env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
-		env.NextRunAt = time.Unix(0, nextRunAtNanos).UTC()
-		env.Headers = unmarshalStringMap(headersJSON)
-		env.Trace = unmarshalStringMap(traceJSON)
-		if deadReason.Valid {
-			env.DeadReason = deadReason.String
-		}
-
-		leaseID := newHexID("lease_")
-		if _, err := conn.ExecContext(ctx, `
-UPDATE queue_items
-SET state = ?, attempt = attempt + 1, lease_id = ?, lease_until = ?, next_run_at = ?
-WHERE id = ? AND state = ?;
-`,
-			string(StateLeased),
-			leaseID,
-			leaseUntil.UnixNano(),
-			leaseUntil.UnixNano(),
-			env.ID,
-			string(StateQueued),
-		); err != nil {
-			return DequeueResponse{}, err
+		idx, ok := indexByID[env.ID]
+		if !ok {
+			continue
 		}
 
 		env.State = StateLeased
-		env.Attempt++
-		env.LeaseID = leaseID
-		env.LeaseUntil = leaseUntil.UTC()
-		env.NextRunAt = env.LeaseUntil
-
-		out = append(out, env)
+		env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
+		env.NextRunAt = leaseUntil
+		env.LeaseUntil = leaseUntil
+		env.LeaseID = leaseIDs[idx]
+		env.Headers = unmarshalStringMap(headersJSON)
+		env.Trace = unmarshalStringMap(traceJSON)
+		out[idx] = env
+		if !filled[idx] {
+			filled[idx] = true
+			filledCount++
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return DequeueResponse{}, err
+	}
+
+	if filledCount != len(out) {
+		compact := make([]Envelope, 0, filledCount)
+		for i := range out {
+			if !filled[i] {
+				continue
+			}
+			compact = append(compact, out[i])
+		}
+		out = compact
 	}
 
 	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
@@ -1090,34 +1140,222 @@ WHERE id = ? AND state = ?;
 	return DequeueResponse{Items: out}, nil
 }
 
-func (s *SQLiteStore) Ack(leaseID string) error {
-	return s.withLease(leaseID, func(ctx context.Context, conn *sql.Conn, item leaseItem) error {
-		if item.expired {
-			if err := s.requeueLease(ctx, conn, item.id, item.route, item.target, item.attempt); err != nil {
-				return err
-			}
-			return ErrLeaseExpired
-		}
+func (s *SQLiteStore) dequeueCandidateSingleTx(ctx context.Context, conn *sql.Conn, req DequeueRequest, now time.Time, leaseUntil time.Time) (Envelope, bool, error) {
+	leaseID := newHexID("lease_")
 
+	var b strings.Builder
+	b.WriteString(`
+WITH candidate AS (
+  SELECT id
+  FROM queue_items
+  WHERE state = ?
+    AND next_run_at <= ?`)
+
+	args := []any{string(StateQueued), now.UnixNano()}
+	if req.Route != "" {
+		b.WriteString(" AND route = ?")
+		args = append(args, req.Route)
+	}
+	if req.Target != "" {
+		b.WriteString(" AND target = ?")
+		args = append(args, req.Target)
+	}
+
+	b.WriteString(`
+  ORDER BY next_run_at ASC, received_at ASC
+  LIMIT 1
+)
+UPDATE queue_items
+SET state = ?,
+    attempt = attempt + 1,
+    lease_id = ?,
+    lease_until = ?,
+    next_run_at = ?
+WHERE id = (SELECT id FROM candidate)
+RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version;`)
+
+	args = append(args,
+		string(StateLeased),
+		leaseID,
+		leaseUntil.UnixNano(),
+		leaseUntil.UnixNano(),
+	)
+
+	var env Envelope
+	var receivedAtNanos int64
+	var headersJSON sql.NullString
+	var traceJSON sql.NullString
+
+	err := conn.QueryRowContext(ctx, b.String(), args...).Scan(
+		&env.ID,
+		&env.Route,
+		&env.Target,
+		&receivedAtNanos,
+		&env.Attempt,
+		&env.Payload,
+		&headersJSON,
+		&traceJSON,
+		&env.SchemaVersion,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Envelope{}, false, nil
+		}
+		return Envelope{}, false, err
+	}
+
+	env.State = StateLeased
+	env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
+	env.NextRunAt = leaseUntil
+	env.LeaseUntil = leaseUntil
+	env.LeaseID = leaseID
+	env.Headers = unmarshalStringMap(headersJSON)
+	env.Trace = unmarshalStringMap(traceJSON)
+	return env, true, nil
+}
+
+func (s *SQLiteStore) dequeueLeaseSingleTx(ctx context.Context, conn *sql.Conn, id string, leaseUntil time.Time) (Envelope, bool, error) {
+	leaseID := newHexID("lease_")
+
+	var env Envelope
+	var receivedAtNanos int64
+	var headersJSON sql.NullString
+	var traceJSON sql.NullString
+
+	err := conn.QueryRowContext(ctx, `
+UPDATE queue_items
+SET state = ?,
+    attempt = attempt + 1,
+    lease_id = ?,
+    lease_until = ?,
+    next_run_at = ?
+WHERE state = ?
+  AND id = ?
+RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version;
+`,
+		string(StateLeased),
+		leaseID,
+		leaseUntil.UnixNano(),
+		leaseUntil.UnixNano(),
+		string(StateQueued),
+		id,
+	).Scan(
+		&env.ID,
+		&env.Route,
+		&env.Target,
+		&receivedAtNanos,
+		&env.Attempt,
+		&env.Payload,
+		&headersJSON,
+		&traceJSON,
+		&env.SchemaVersion,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Envelope{}, false, nil
+		}
+		return Envelope{}, false, err
+	}
+
+	env.State = StateLeased
+	env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
+	env.NextRunAt = leaseUntil
+	env.LeaseUntil = leaseUntil
+	env.LeaseID = leaseID
+	env.Headers = unmarshalStringMap(headersJSON)
+	env.Trace = unmarshalStringMap(traceJSON)
+
+	return env, true, nil
+}
+
+func dequeueCandidateIDsTx(ctx context.Context, conn *sql.Conn, req DequeueRequest, now time.Time, batch int) ([]string, error) {
+	var b strings.Builder
+	b.WriteString(`
+SELECT id
+FROM queue_items
+WHERE state = ?
+  AND next_run_at <= ?`)
+
+	args := []any{string(StateQueued), now.UnixNano()}
+	if req.Route != "" {
+		b.WriteString(" AND route = ?")
+		args = append(args, req.Route)
+	}
+	if req.Target != "" {
+		b.WriteString(" AND target = ?")
+		args = append(args, req.Target)
+	}
+
+	b.WriteString(`
+ORDER BY next_run_at ASC, received_at ASC
+LIMIT ?;
+`)
+
+	args = append(args, batch)
+
+	rows, err := conn.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, batch)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func (s *SQLiteStore) Ack(leaseID string) error {
+	return s.withLeaseMutation(leaseID, func(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) (int64, error) {
 		if s.deliveredRetentionMaxAge > 0 {
-			now := s.now()
-			_, err := conn.ExecContext(ctx, `
+			return execRowsAffectedTx(ctx, conn, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
-WHERE id = ?;
+WHERE lease_id = ?
+  AND state = ?
+  AND (lease_until IS NULL OR lease_until > ?);
 `,
 				string(StateDelivered),
 				now.UnixNano(),
-				item.id,
+				leaseID,
+				string(StateLeased),
+				now.UnixNano(),
 			)
-			if err != nil {
-				return err
-			}
-			return nil
 		}
 
-		_, err := conn.ExecContext(ctx, `DELETE FROM queue_items WHERE id = ?;`, item.id)
-		return err
+		return execRowsAffectedTx(ctx, conn, `
+DELETE FROM queue_items
+WHERE lease_id = ?
+  AND state = ?
+  AND (lease_until IS NULL OR lease_until > ?);
+`,
+			leaseID,
+			string(StateLeased),
+			now.UnixNano(),
+		)
+	})
+}
+
+func (s *SQLiteStore) AckBatch(leaseIDs []string) (LeaseBatchResult, error) {
+	return s.withLeaseBatch(leaseIDs, func(ctx context.Context, conn *sql.Conn, now time.Time, itemIDs []string) error {
+		if s.deliveredRetentionMaxAge > 0 {
+			return s.execByItemIDsTx(ctx, conn, `
+UPDATE queue_items
+SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
+WHERE id IN (`, []any{string(StateDelivered), now.UnixNano()}, itemIDs)
+		}
+
+		return s.execByItemIDsTx(ctx, conn, `
+DELETE FROM queue_items
+WHERE id IN (`, nil, itemIDs)
 	})
 }
 
@@ -1126,30 +1364,48 @@ func (s *SQLiteStore) Nack(leaseID string, delay time.Duration) error {
 		delay = 0
 	}
 
-	return s.withLease(leaseID, func(ctx context.Context, conn *sql.Conn, item leaseItem) error {
-		if item.expired {
-			if err := s.requeueLease(ctx, conn, item.id, item.route, item.target, item.attempt); err != nil {
-				return err
-			}
-			return ErrLeaseExpired
-		}
-
-		nextRunAt := s.now().Add(delay)
-		_, err := conn.ExecContext(ctx, `
+	err := s.withLeaseMutation(leaseID, func(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) (int64, error) {
+		nextRunAt := now.Add(delay)
+		return execRowsAffectedTx(ctx, conn, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
-WHERE id = ?;
+WHERE lease_id = ?
+  AND state = ?
+  AND (lease_until IS NULL OR lease_until > ?);
 `,
 			string(StateQueued),
 			nextRunAt.UnixNano(),
-			item.id,
+			leaseID,
+			string(StateLeased),
+			now.UnixNano(),
 		)
-		if err != nil {
-			return err
-		}
-		s.signal()
-		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.signal()
+	return nil
+}
+
+func (s *SQLiteStore) NackBatch(leaseIDs []string, delay time.Duration) (LeaseBatchResult, error) {
+	if delay < 0 {
+		delay = 0
+	}
+
+	res, err := s.withLeaseBatch(leaseIDs, func(ctx context.Context, conn *sql.Conn, now time.Time, itemIDs []string) error {
+		nextRunAt := now.Add(delay)
+		return s.execByItemIDsTx(ctx, conn, `
+UPDATE queue_items
+SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
+WHERE id IN (`, []any{string(StateQueued), nextRunAt.UnixNano()}, itemIDs)
+	})
+	if err != nil {
+		return LeaseBatchResult{}, err
+	}
+	if res.Succeeded > 0 {
+		s.signal()
+	}
+	return res, nil
 }
 
 func (s *SQLiteStore) Extend(leaseID string, extendBy time.Duration) error {
@@ -1157,59 +1413,351 @@ func (s *SQLiteStore) Extend(leaseID string, extendBy time.Duration) error {
 		return nil
 	}
 
-	return s.withLease(leaseID, func(ctx context.Context, conn *sql.Conn, item leaseItem) error {
-		if item.expired {
-			if err := s.requeueLease(ctx, conn, item.id, item.route, item.target, item.attempt); err != nil {
-				return err
-			}
-			return ErrLeaseExpired
-		}
-
-		newUntil := item.leaseUntil.Add(extendBy)
-		_, err := conn.ExecContext(ctx, `
+	return s.withLeaseMutation(leaseID, func(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) (int64, error) {
+		extendNanos := extendBy.Nanoseconds()
+		return execRowsAffectedTx(ctx, conn, `
 UPDATE queue_items
-SET lease_until = ?, next_run_at = ?
-WHERE id = ?;
+SET lease_until = lease_until + ?, next_run_at = lease_until + ?
+WHERE lease_id = ?
+  AND state = ?
+  AND lease_until IS NOT NULL
+  AND lease_until > ?;
 `,
-			newUntil.UnixNano(),
-			newUntil.UnixNano(),
-			item.id,
+			extendNanos,
+			extendNanos,
+			leaseID,
+			string(StateLeased),
+			now.UnixNano(),
 		)
-		return err
 	})
 }
 
 func (s *SQLiteStore) MarkDead(leaseID string, reason string) error {
-	return s.withLease(leaseID, func(ctx context.Context, conn *sql.Conn, item leaseItem) error {
-		if item.expired {
-			if err := s.requeueLease(ctx, conn, item.id, item.route, item.target, item.attempt); err != nil {
-				return err
-			}
-			return ErrLeaseExpired
-		}
+	var deadReason any
+	if strings.TrimSpace(reason) != "" {
+		deadReason = reason
+	}
 
-		now := s.now()
-		var deadReason any
-		if strings.TrimSpace(reason) != "" {
-			deadReason = reason
-		}
-
-		_, err := conn.ExecContext(ctx, `
+	err := s.withLeaseMutation(leaseID, func(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) (int64, error) {
+		return execRowsAffectedTx(ctx, conn, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = ?
-WHERE id = ?;
+WHERE lease_id = ?
+  AND state = ?
+  AND (lease_until IS NULL OR lease_until > ?);
 `,
 			string(StateDead),
 			now.UnixNano(),
 			deadReason,
-			item.id,
+			leaseID,
+			string(StateLeased),
+			now.UnixNano(),
 		)
-		if err != nil {
+	})
+	if err != nil {
+		return err
+	}
+	s.signal()
+	return nil
+}
+
+func (s *SQLiteStore) MarkDeadBatch(leaseIDs []string, reason string) (LeaseBatchResult, error) {
+	var deadReason any
+	if strings.TrimSpace(reason) != "" {
+		deadReason = reason
+	}
+
+	res, err := s.withLeaseBatch(leaseIDs, func(ctx context.Context, conn *sql.Conn, now time.Time, itemIDs []string) error {
+		return s.execByItemIDsTx(ctx, conn, `
+UPDATE queue_items
+SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = ?
+WHERE id IN (`, []any{string(StateDead), now.UnixNano(), deadReason}, itemIDs)
+	})
+	if err != nil {
+		return LeaseBatchResult{}, err
+	}
+	if res.Succeeded > 0 {
+		s.signal()
+	}
+	return res, nil
+}
+
+func (s *SQLiteStore) withLeaseMutation(
+	leaseID string,
+	mutate func(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) (int64, error),
+) error {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return ErrLeaseNotFound
+	}
+
+	now := s.now()
+
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
+	}()
+
+	affected, err := mutate(ctx, conn, now, leaseID)
+	if err != nil {
+		return err
+	}
+	if affected > 0 {
+		if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 			return err
 		}
-		s.signal()
+		committed = true
 		return nil
-	})
+	}
+
+	expired, err := s.resolveSingleLeaseConflictTx(ctx, conn, leaseID, now)
+	if err != nil {
+		return err
+	}
+	if !expired {
+		return ErrLeaseNotFound
+	}
+
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
+		return err
+	}
+	committed = true
+	return ErrLeaseExpired
+}
+
+func (s *SQLiteStore) resolveSingleLeaseConflictTx(ctx context.Context, conn *sql.Conn, leaseID string, now time.Time) (bool, error) {
+	var itemID string
+	var state string
+	var leaseUntilNanos sql.NullInt64
+
+	err := conn.QueryRowContext(ctx, `
+SELECT id, state, lease_until
+FROM queue_items
+WHERE lease_id = ?
+LIMIT 1;
+`, leaseID).Scan(&itemID, &state, &leaseUntilNanos)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if state != string(StateLeased) {
+		return false, nil
+	}
+	if !leaseUntilNanos.Valid {
+		return false, nil
+	}
+
+	leaseUntil := time.Unix(0, leaseUntilNanos.Int64).UTC()
+	if now.Before(leaseUntil) {
+		return false, nil
+	}
+	if err := s.requeueLease(ctx, conn, itemID, "", "", 0); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SQLiteStore) withLeaseBatch(
+	leaseIDs []string,
+	fn func(ctx context.Context, conn *sql.Conn, now time.Time, itemIDs []string) error,
+) (LeaseBatchResult, error) {
+	now := s.now()
+	res := LeaseBatchResult{
+		Conflicts: make([]LeaseBatchConflict, 0),
+	}
+	if len(leaseIDs) == 0 {
+		return res, nil
+	}
+
+	normalized := make([]string, 0, len(leaseIDs))
+	unique := make([]string, 0, len(leaseIDs))
+	seenUnique := make(map[string]struct{}, len(leaseIDs))
+	for _, rawLeaseID := range leaseIDs {
+		leaseID := strings.TrimSpace(rawLeaseID)
+		if leaseID == "" {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			continue
+		}
+		normalized = append(normalized, leaseID)
+		if _, ok := seenUnique[leaseID]; ok {
+			continue
+		}
+		seenUnique[leaseID] = struct{}{}
+		unique = append(unique, leaseID)
+	}
+	if len(normalized) == 0 {
+		return res, nil
+	}
+
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return LeaseBatchResult{}, err
+	}
+	defer conn.Close()
+
+	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
+	if err != nil {
+		return LeaseBatchResult{}, err
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
+	}()
+
+	leasedByLeaseID, err := s.lookupLeasesTx(ctx, conn, unique, now)
+	if err != nil {
+		return LeaseBatchResult{}, err
+	}
+
+	processed := make(map[string]struct{}, len(normalized))
+	expiredIDs := make([]string, 0)
+	validIDs := make([]string, 0)
+
+	for _, leaseID := range normalized {
+		if _, ok := processed[leaseID]; ok {
+			// Keep legacy behavior for duplicate lease IDs in one batch:
+			// only the first occurrence may succeed.
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+		processed[leaseID] = struct{}{}
+
+		item, found := leasedByLeaseID[leaseID]
+		if !found {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+		if item.expired {
+			expiredIDs = append(expiredIDs, item.id)
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+				LeaseID: leaseID,
+				Expired: true,
+			})
+			continue
+		}
+		validIDs = append(validIDs, item.id)
+	}
+
+	if err := s.requeueLeaseIDsTx(ctx, conn, expiredIDs, now); err != nil {
+		return LeaseBatchResult{}, err
+	}
+
+	if len(validIDs) > 0 {
+		if err := fn(ctx, conn, now, validIDs); err != nil {
+			return LeaseBatchResult{}, err
+		}
+		res.Succeeded = len(validIDs)
+	}
+
+	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
+		return LeaseBatchResult{}, err
+	}
+	committed = true
+	return res, nil
+}
+
+func (s *SQLiteStore) lookupLeasesTx(ctx context.Context, conn *sql.Conn, leaseIDs []string, now time.Time) (map[string]leaseItem, error) {
+	out := make(map[string]leaseItem, len(leaseIDs))
+	if len(leaseIDs) == 0 {
+		return out, nil
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(leaseIDs)), ",")
+	args := make([]any, 0, len(leaseIDs))
+	for _, leaseID := range leaseIDs {
+		args = append(args, leaseID)
+	}
+
+	rows, err := conn.QueryContext(ctx, `
+SELECT lease_id, id, state, lease_until
+FROM queue_items
+WHERE lease_id IN (`+placeholders+`);
+`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var leaseID string
+		var item leaseItem
+		var state string
+		var leaseUntilNanos sql.NullInt64
+
+		if err := rows.Scan(&leaseID, &item.id, &state, &leaseUntilNanos); err != nil {
+			return nil, err
+		}
+		if state != string(StateLeased) {
+			continue
+		}
+		if leaseUntilNanos.Valid {
+			item.leaseUntil = time.Unix(0, leaseUntilNanos.Int64).UTC()
+			if !now.Before(item.leaseUntil) {
+				item.expired = true
+			}
+		}
+		out[leaseID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *SQLiteStore) requeueLeaseIDsTx(ctx context.Context, conn *sql.Conn, itemIDs []string, now time.Time) error {
+	return s.execByItemIDsTx(ctx, conn, `
+UPDATE queue_items
+SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
+WHERE id IN (`, []any{string(StateQueued), now.UnixNano()}, itemIDs)
+}
+
+func execRowsAffectedTx(ctx context.Context, conn *sql.Conn, query string, args ...any) (int64, error) {
+	res, err := conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *SQLiteStore) execByItemIDsTx(ctx context.Context, conn *sql.Conn, queryPrefix string, args []any, itemIDs []string) error {
+	if len(itemIDs) == 0 {
+		return nil
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(itemIDs)), ",")
+	query := queryPrefix + placeholders + `);`
+	execArgs := make([]any, 0, len(args)+len(itemIDs))
+	execArgs = append(execArgs, args...)
+	for _, id := range itemIDs {
+		execArgs = append(execArgs, id)
+	}
+
+	_, err := conn.ExecContext(ctx, query, execArgs...)
+	return err
 }
 
 func (s *SQLiteStore) ListDead(req DeadListRequest) (DeadListResponse, error) {
@@ -2621,6 +3169,21 @@ func newHexID(prefix string) string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return prefix + hex.EncodeToString(b[:])
+}
+
+func newHexIDs(prefix string, count int) []string {
+	if count <= 0 {
+		return nil
+	}
+	raw := make([]byte, count*8)
+	_, _ = rand.Read(raw)
+
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		start := i * 8
+		out = append(out, prefix+hex.EncodeToString(raw[start:start+8]))
+	}
+	return out
 }
 
 func normalizeUniqueIDs(ids []string) []string {

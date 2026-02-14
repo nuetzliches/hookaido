@@ -108,6 +108,9 @@ defaults {
 }
 ```
 
+`deliver_concurrency` is a shared per-route budget across all route targets.
+When a route has multiple targets, dispatcher workers are not pinned permanently to one target; idle-target capacity can drain backlog from active targets under saturation.
+
 ## Dead-Lettering
 
 Messages are moved to the DLQ when:

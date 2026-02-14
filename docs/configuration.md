@@ -340,6 +340,8 @@ defaults {
 - `oldest_queued_age`: reject when `oldest_queued_age_seconds` reaches this duration.
 - `sustained_growth`: when `on`, also reject on sustained backlog growth signals (if trend samples are available).
 
+For production threshold tuning profiles, see [Adaptive Backpressure Tuning](adaptive-backpressure.md).
+
 ### `observability`
 
 See [Observability](observability.md) for full reference.
@@ -499,6 +501,8 @@ Per-route concurrency can override the global default:
   deliver "https://ci.internal/build" { ... }
 }
 ```
+
+`deliver_concurrency` is enforced as a shared per-route budget across all route targets.
 
 ## Placeholders
 

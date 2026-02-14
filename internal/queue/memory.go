@@ -696,6 +696,63 @@ func (s *MemoryStore) Ack(leaseID string) error {
 	return nil
 }
 
+func (s *MemoryStore) AckBatch(leaseIDs []string) (LeaseBatchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.nowFn()
+	res := LeaseBatchResult{
+		Conflicts: make([]LeaseBatchConflict, 0),
+	}
+
+	for _, rawLeaseID := range leaseIDs {
+		leaseID := strings.TrimSpace(rawLeaseID)
+		if leaseID == "" {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			continue
+		}
+
+		itemID, ok := s.leases[leaseID]
+		if !ok {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+
+		env := s.items[itemID]
+		if env == nil || env.State != StateLeased || env.LeaseID != leaseID {
+			delete(s.leases, leaseID)
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+
+		if !env.LeaseUntil.IsZero() && !now.Before(env.LeaseUntil) {
+			// Expired leases become visible again; treat this ack as invalid.
+			s.requeueLocked(now, env)
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+				LeaseID: leaseID,
+				Expired: true,
+			})
+			continue
+		}
+
+		delete(s.leases, leaseID)
+		if s.deliveredRetentionMaxAge > 0 {
+			env.State = StateDelivered
+			env.LeaseID = ""
+			env.LeaseUntil = time.Time{}
+			env.NextRunAt = now
+			env.DeadReason = ""
+			res.Succeeded++
+			continue
+		}
+
+		delete(s.items, itemID)
+		res.Succeeded++
+	}
+
+	return res, nil
+}
+
 func (s *MemoryStore) Nack(leaseID string, delay time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -727,6 +784,60 @@ func (s *MemoryStore) Nack(leaseID string, delay time.Duration) error {
 	}
 	env.NextRunAt = now.Add(delay)
 	return nil
+}
+
+func (s *MemoryStore) NackBatch(leaseIDs []string, delay time.Duration) (LeaseBatchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.nowFn()
+	if delay < 0 {
+		delay = 0
+	}
+
+	res := LeaseBatchResult{
+		Conflicts: make([]LeaseBatchConflict, 0),
+	}
+
+	for _, rawLeaseID := range leaseIDs {
+		leaseID := strings.TrimSpace(rawLeaseID)
+		if leaseID == "" {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			continue
+		}
+
+		itemID, ok := s.leases[leaseID]
+		if !ok {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+
+		env := s.items[itemID]
+		if env == nil || env.State != StateLeased || env.LeaseID != leaseID {
+			delete(s.leases, leaseID)
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+
+		if !env.LeaseUntil.IsZero() && !now.Before(env.LeaseUntil) {
+			s.requeueLocked(now, env)
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+				LeaseID: leaseID,
+				Expired: true,
+			})
+			continue
+		}
+
+		delete(s.leases, leaseID)
+		env.State = StateQueued
+		env.LeaseID = ""
+		env.LeaseUntil = time.Time{}
+		env.DeadReason = ""
+		env.NextRunAt = now.Add(delay)
+		res.Succeeded++
+	}
+
+	return res, nil
 }
 
 func (s *MemoryStore) Extend(leaseID string, extendBy time.Duration) error {
@@ -787,6 +898,56 @@ func (s *MemoryStore) MarkDead(leaseID string, reason string) error {
 	env.NextRunAt = now
 	env.DeadReason = reason
 	return nil
+}
+
+func (s *MemoryStore) MarkDeadBatch(leaseIDs []string, reason string) (LeaseBatchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.nowFn()
+	res := LeaseBatchResult{
+		Conflicts: make([]LeaseBatchConflict, 0),
+	}
+
+	for _, rawLeaseID := range leaseIDs {
+		leaseID := strings.TrimSpace(rawLeaseID)
+		if leaseID == "" {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			continue
+		}
+
+		itemID, ok := s.leases[leaseID]
+		if !ok {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+
+		env := s.items[itemID]
+		if env == nil || env.State != StateLeased || env.LeaseID != leaseID {
+			delete(s.leases, leaseID)
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+
+		if !env.LeaseUntil.IsZero() && !now.Before(env.LeaseUntil) {
+			s.requeueLocked(now, env)
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+				LeaseID: leaseID,
+				Expired: true,
+			})
+			continue
+		}
+
+		delete(s.leases, leaseID)
+		env.State = StateDead
+		env.LeaseID = ""
+		env.LeaseUntil = time.Time{}
+		env.NextRunAt = now
+		env.DeadReason = reason
+		res.Succeeded++
+	}
+
+	return res, nil
 }
 
 func (s *MemoryStore) ListDead(req DeadListRequest) (DeadListResponse, error) {

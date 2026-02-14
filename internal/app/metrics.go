@@ -14,6 +14,8 @@ import (
 	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
+const metricsSchemaVersion = "1.2.0"
+
 type runtimeMetrics struct {
 	tracingEnabled                             atomic.Int64
 	tracingInitFailuresTotal                   atomic.Int64
@@ -955,6 +957,9 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_build_info Build information.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_build_info gauge\n")
 		_, _ = fmt.Fprintf(w, "hookaido_build_info{version=%q} 1\n", version)
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_metrics_schema_info Prometheus metrics schema version information.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_metrics_schema_info gauge\n")
+		_, _ = fmt.Fprintf(w, "hookaido_metrics_schema_info{schema=%q} 1\n", metricsSchemaVersion)
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_start_time_seconds Start time since unix epoch.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_start_time_seconds gauge\n")
 		_, _ = fmt.Fprintf(w, "hookaido_start_time_seconds %d\n", start.Unix())

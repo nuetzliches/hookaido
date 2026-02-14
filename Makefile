@@ -31,7 +31,7 @@ PUSH_SKEWED_BASELINE := $(BENCH_DIR)/push-skewed-baseline.txt
 PUSH_SKEWED_COMPARE := $(BENCH_DIR)/push-skewed-compare.txt
 BENCHSTAT_CMD := golang.org/x/perf/cmd/benchstat@v0.0.0-20260211190930-8161c38c6cdc
 
-.PHONY: build test fmt lint check bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare release-check dist dist-signed dist-verify
+.PHONY: build test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare release-check dist dist-signed dist-verify
 
 build:
 	@mkdir -p "$(BINDIR)"
@@ -47,6 +47,20 @@ lint:
 	go vet ./...
 
 check: lint test
+
+proto-worker:
+	@GO_BIN_DIR="$$(go env GOPATH)/bin"; \
+	BUF_BIN="$$(command -v buf 2>/dev/null || true)"; \
+	[ -n "$$BUF_BIN" ] || BUF_BIN="$$GO_BIN_DIR/buf"; \
+	PROTOC_GO_BIN="$$(command -v protoc-gen-go 2>/dev/null || true)"; \
+	[ -n "$$PROTOC_GO_BIN" ] || PROTOC_GO_BIN="$$GO_BIN_DIR/protoc-gen-go"; \
+	PROTOC_GRPC_BIN="$$(command -v protoc-gen-go-grpc 2>/dev/null || true)"; \
+	[ -n "$$PROTOC_GRPC_BIN" ] || PROTOC_GRPC_BIN="$$GO_BIN_DIR/protoc-gen-go-grpc"; \
+	[ -x "$$BUF_BIN" ] || { echo "buf is required (install: go install github.com/bufbuild/buf/cmd/buf@v1.57.0)"; exit 1; }; \
+	[ -x "$$PROTOC_GO_BIN" ] || { echo "protoc-gen-go is required (install: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11)"; exit 1; }; \
+	[ -x "$$PROTOC_GRPC_BIN" ] || { echo "protoc-gen-go-grpc is required (install: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1)"; exit 1; }; \
+	PATH="$$GO_BIN_DIR:$$PATH"; \
+	cd internal/workerapi/proto && "$$BUF_BIN" generate
 
 bench-pull:
 	@mkdir -p "$(BENCH_DIR)"

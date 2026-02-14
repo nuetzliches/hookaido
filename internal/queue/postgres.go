@@ -14,8 +14,6 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-var errPostgresNotImplemented = errors.New("postgres store: method not implemented")
-
 type PostgresOption func(*PostgresStore)
 
 type PostgresStore struct {
@@ -507,6 +505,37 @@ WHERE id = $1
 	})
 }
 
+func (s *PostgresStore) AckBatch(leaseIDs []string) (LeaseBatchResult, error) {
+	res := LeaseBatchResult{Conflicts: make([]LeaseBatchConflict, 0)}
+
+	for _, rawLeaseID := range leaseIDs {
+		leaseID := strings.TrimSpace(rawLeaseID)
+		if leaseID == "" {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			continue
+		}
+
+		err := s.Ack(leaseID)
+		if err == nil {
+			res.Succeeded++
+			continue
+		}
+		switch {
+		case errors.Is(err, ErrLeaseExpired):
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+				LeaseID: leaseID,
+				Expired: true,
+			})
+		case errors.Is(err, ErrLeaseNotFound):
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+		default:
+			return LeaseBatchResult{}, err
+		}
+	}
+
+	return res, nil
+}
+
 func (s *PostgresStore) Nack(leaseID string, delay time.Duration) error {
 	if delay < 0 {
 		delay = 0
@@ -526,6 +555,37 @@ WHERE id = $3
 		)
 		return err
 	})
+}
+
+func (s *PostgresStore) NackBatch(leaseIDs []string, delay time.Duration) (LeaseBatchResult, error) {
+	res := LeaseBatchResult{Conflicts: make([]LeaseBatchConflict, 0)}
+
+	for _, rawLeaseID := range leaseIDs {
+		leaseID := strings.TrimSpace(rawLeaseID)
+		if leaseID == "" {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			continue
+		}
+
+		err := s.Nack(leaseID, delay)
+		if err == nil {
+			res.Succeeded++
+			continue
+		}
+		switch {
+		case errors.Is(err, ErrLeaseExpired):
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+				LeaseID: leaseID,
+				Expired: true,
+			})
+		case errors.Is(err, ErrLeaseNotFound):
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+		default:
+			return LeaseBatchResult{}, err
+		}
+	}
+
+	return res, nil
 }
 
 func (s *PostgresStore) Extend(leaseID string, extendBy time.Duration) error {
@@ -566,6 +626,37 @@ WHERE id = $4
 		)
 		return err
 	})
+}
+
+func (s *PostgresStore) MarkDeadBatch(leaseIDs []string, reason string) (LeaseBatchResult, error) {
+	res := LeaseBatchResult{Conflicts: make([]LeaseBatchConflict, 0)}
+
+	for _, rawLeaseID := range leaseIDs {
+		leaseID := strings.TrimSpace(rawLeaseID)
+		if leaseID == "" {
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			continue
+		}
+
+		err := s.MarkDead(leaseID, reason)
+		if err == nil {
+			res.Succeeded++
+			continue
+		}
+		switch {
+		case errors.Is(err, ErrLeaseExpired):
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+				LeaseID: leaseID,
+				Expired: true,
+			})
+		case errors.Is(err, ErrLeaseNotFound):
+			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+		default:
+			return LeaseBatchResult{}, err
+		}
+	}
+
+	return res, nil
 }
 
 func (s *PostgresStore) ListDead(req DeadListRequest) (DeadListResponse, error) {
@@ -721,35 +812,290 @@ WHERE id = $1
 }
 
 func (s *PostgresStore) ListMessages(req MessageListRequest) (MessageListResponse, error) {
-	return MessageListResponse{}, errPostgresNotImplemented
+	if s == nil || s.db == nil {
+		return MessageListResponse{}, errors.New("postgres store is closed")
+	}
+	if err := s.maybePrune(s.now()); err != nil {
+		return MessageListResponse{}, err
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	order := strings.ToLower(strings.TrimSpace(req.Order))
+	orderByReceived := "DESC"
+	orderByID := "DESC"
+	switch order {
+	case "", MessageOrderDesc:
+	case MessageOrderAsc:
+		orderByReceived = "ASC"
+		orderByID = "ASC"
+	default:
+		return MessageListResponse{}, fmt.Errorf("invalid message order %q", req.Order)
+	}
+
+	query := `
+SELECT id, route, target, state, received_at, attempt, next_run_at,
+       payload, headers_json, trace_json, dead_reason, schema_version, lease_id, lease_until
+FROM queue_items
+WHERE 1 = 1
+`
+	args := make([]any, 0, 8)
+	if req.Route != "" {
+		query += fmt.Sprintf(" AND route = $%d", len(args)+1)
+		args = append(args, req.Route)
+	}
+	if req.Target != "" {
+		query += fmt.Sprintf(" AND target = $%d", len(args)+1)
+		args = append(args, req.Target)
+	}
+	if req.State != "" {
+		query += fmt.Sprintf(" AND state = $%d", len(args)+1)
+		args = append(args, string(req.State))
+	}
+	if !req.Before.IsZero() {
+		query += fmt.Sprintf(" AND received_at < $%d", len(args)+1)
+		args = append(args, req.Before.UTC())
+	}
+
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY received_at %s, id %s LIMIT $%d", orderByReceived, orderByID, len(args))
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return MessageListResponse{}, err
+	}
+	defer rows.Close()
+
+	items := make([]Envelope, 0, limit)
+	for rows.Next() {
+		item, err := scanQueueItem(rows)
+		if err != nil {
+			return MessageListResponse{}, err
+		}
+		if !req.IncludePayload {
+			item.Payload = nil
+		}
+		if !req.IncludeHeaders {
+			item.Headers = nil
+		}
+		if !req.IncludeTrace {
+			item.Trace = nil
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return MessageListResponse{}, err
+	}
+
+	return MessageListResponse{Items: items}, nil
 }
 
 func (s *PostgresStore) LookupMessages(req MessageLookupRequest) (MessageLookupResponse, error) {
-	return MessageLookupResponse{}, errPostgresNotImplemented
+	ids := normalizeUniqueIDs(req.IDs)
+	if len(ids) == 0 {
+		return MessageLookupResponse{}, nil
+	}
+
+	rows, err := s.db.QueryContext(context.Background(), `
+SELECT id, route, state
+FROM queue_items
+WHERE id = ANY($1)
+`,
+		ids,
+	)
+	if err != nil {
+		return MessageLookupResponse{}, err
+	}
+	defer rows.Close()
+
+	byID := make(map[string]MessageLookupItem, len(ids))
+	for rows.Next() {
+		var item MessageLookupItem
+		var state string
+		if err := rows.Scan(&item.ID, &item.Route, &state); err != nil {
+			return MessageLookupResponse{}, err
+		}
+		item.State = State(state)
+		byID[item.ID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return MessageLookupResponse{}, err
+	}
+
+	items := make([]MessageLookupItem, 0, len(ids))
+	for _, id := range ids {
+		item, ok := byID[id]
+		if !ok {
+			continue
+		}
+		items = append(items, item)
+	}
+	return MessageLookupResponse{Items: items}, nil
 }
 
 func (s *PostgresStore) CancelMessages(req MessageCancelRequest) (MessageCancelResponse, error) {
-	return MessageCancelResponse{}, errPostgresNotImplemented
+	ids := normalizeUniqueIDs(req.IDs)
+	if len(ids) == 0 {
+		return MessageCancelResponse{}, nil
+	}
+
+	res, err := s.db.ExecContext(context.Background(), `
+UPDATE queue_items
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+WHERE state = ANY($3)
+  AND id = ANY($4)
+`,
+		string(StateCanceled),
+		s.now().UTC(),
+		[]string{string(StateQueued), string(StateLeased), string(StateDead)},
+		ids,
+	)
+	if err != nil {
+		return MessageCancelResponse{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return MessageCancelResponse{}, err
+	}
+	return MessageCancelResponse{Canceled: int(n), Matched: int(n)}, nil
 }
 
 func (s *PostgresStore) RequeueMessages(req MessageRequeueRequest) (MessageRequeueResponse, error) {
-	return MessageRequeueResponse{}, errPostgresNotImplemented
+	ids := normalizeUniqueIDs(req.IDs)
+	if len(ids) == 0 {
+		return MessageRequeueResponse{}, nil
+	}
+
+	res, err := s.db.ExecContext(context.Background(), `
+UPDATE queue_items
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+WHERE state = ANY($3)
+  AND id = ANY($4)
+`,
+		string(StateQueued),
+		s.now().UTC(),
+		[]string{string(StateDead), string(StateCanceled)},
+		ids,
+	)
+	if err != nil {
+		return MessageRequeueResponse{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return MessageRequeueResponse{}, err
+	}
+	return MessageRequeueResponse{Requeued: int(n), Matched: int(n)}, nil
 }
 
 func (s *PostgresStore) ResumeMessages(req MessageResumeRequest) (MessageResumeResponse, error) {
-	return MessageResumeResponse{}, errPostgresNotImplemented
+	ids := normalizeUniqueIDs(req.IDs)
+	if len(ids) == 0 {
+		return MessageResumeResponse{}, nil
+	}
+
+	res, err := s.db.ExecContext(context.Background(), `
+UPDATE queue_items
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+WHERE state = $3
+  AND id = ANY($4)
+`,
+		string(StateQueued),
+		s.now().UTC(),
+		string(StateCanceled),
+		ids,
+	)
+	if err != nil {
+		return MessageResumeResponse{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return MessageResumeResponse{}, err
+	}
+	return MessageResumeResponse{Resumed: int(n), Matched: int(n)}, nil
 }
 
 func (s *PostgresStore) CancelMessagesByFilter(req MessageManageFilterRequest) (MessageCancelResponse, error) {
-	return MessageCancelResponse{}, errPostgresNotImplemented
+	ids, err := s.selectMessageIDsByFilter(req, []State{StateQueued, StateLeased, StateDead})
+	if err != nil {
+		return MessageCancelResponse{}, err
+	}
+	if len(ids) == 0 {
+		if req.PreviewOnly {
+			return MessageCancelResponse{PreviewOnly: true}, nil
+		}
+		return MessageCancelResponse{}, nil
+	}
+	if req.PreviewOnly {
+		return MessageCancelResponse{
+			Canceled:    0,
+			Matched:     len(ids),
+			PreviewOnly: true,
+		}, nil
+	}
+	resp, err := s.CancelMessages(MessageCancelRequest{IDs: ids})
+	if err != nil {
+		return MessageCancelResponse{}, err
+	}
+	resp.Matched = len(ids)
+	return resp, nil
 }
 
 func (s *PostgresStore) RequeueMessagesByFilter(req MessageManageFilterRequest) (MessageRequeueResponse, error) {
-	return MessageRequeueResponse{}, errPostgresNotImplemented
+	ids, err := s.selectMessageIDsByFilter(req, []State{StateDead, StateCanceled})
+	if err != nil {
+		return MessageRequeueResponse{}, err
+	}
+	if len(ids) == 0 {
+		if req.PreviewOnly {
+			return MessageRequeueResponse{PreviewOnly: true}, nil
+		}
+		return MessageRequeueResponse{}, nil
+	}
+	if req.PreviewOnly {
+		return MessageRequeueResponse{
+			Requeued:    0,
+			Matched:     len(ids),
+			PreviewOnly: true,
+		}, nil
+	}
+	resp, err := s.RequeueMessages(MessageRequeueRequest{IDs: ids})
+	if err != nil {
+		return MessageRequeueResponse{}, err
+	}
+	resp.Matched = len(ids)
+	return resp, nil
 }
 
 func (s *PostgresStore) ResumeMessagesByFilter(req MessageManageFilterRequest) (MessageResumeResponse, error) {
-	return MessageResumeResponse{}, errPostgresNotImplemented
+	ids, err := s.selectMessageIDsByFilter(req, []State{StateCanceled})
+	if err != nil {
+		return MessageResumeResponse{}, err
+	}
+	if len(ids) == 0 {
+		if req.PreviewOnly {
+			return MessageResumeResponse{PreviewOnly: true}, nil
+		}
+		return MessageResumeResponse{}, nil
+	}
+	if req.PreviewOnly {
+		return MessageResumeResponse{
+			Resumed:     0,
+			Matched:     len(ids),
+			PreviewOnly: true,
+		}, nil
+	}
+	resp, err := s.ResumeMessages(MessageResumeRequest{IDs: ids})
+	if err != nil {
+		return MessageResumeResponse{}, err
+	}
+	resp.Matched = len(ids)
+	return resp, nil
 }
 
 func (s *PostgresStore) Stats() (Stats, error) {
@@ -1064,6 +1410,78 @@ FOR UPDATE
 	}
 	committed = true
 	return nil
+}
+
+func (s *PostgresStore) selectMessageIDsByFilter(req MessageManageFilterRequest, allowed []State) ([]string, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	allowedSet := make(map[State]struct{}, len(allowed))
+	for _, st := range allowed {
+		allowedSet[st] = struct{}{}
+	}
+
+	states := make([]State, 0, len(allowed))
+	if req.State != "" {
+		if _, ok := allowedSet[req.State]; !ok {
+			return nil, nil
+		}
+		states = append(states, req.State)
+	} else {
+		states = append(states, allowed...)
+	}
+
+	query := `
+SELECT id
+FROM queue_items
+WHERE 1 = 1
+`
+	args := make([]any, 0, 6)
+	if req.Route != "" {
+		query += fmt.Sprintf(" AND route = $%d", len(args)+1)
+		args = append(args, req.Route)
+	}
+	if req.Target != "" {
+		query += fmt.Sprintf(" AND target = $%d", len(args)+1)
+		args = append(args, req.Target)
+	}
+	if !req.Before.IsZero() {
+		query += fmt.Sprintf(" AND received_at < $%d", len(args)+1)
+		args = append(args, req.Before.UTC())
+	}
+	stateStrings := make([]string, 0, len(states))
+	for _, st := range states {
+		stateStrings = append(stateStrings, string(st))
+	}
+	query += fmt.Sprintf(" AND state = ANY($%d)", len(args)+1)
+	args = append(args, stateStrings)
+
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY received_at DESC, id DESC LIMIT $%d", len(args))
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (s *PostgresStore) requeueExpiredLeasesTx(ctx context.Context, tx *sql.Tx, now time.Time) error {

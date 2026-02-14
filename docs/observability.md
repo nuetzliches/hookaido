@@ -153,7 +153,15 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_pull_lease_active`          | gauge   | Active Pull leases currently tracked by `route`                              |
 | `hookaido_pull_lease_expired_total`   | counter | Lease expirations observed during Pull `ack`/`nack`/`extend` by `route`      |
 
-**Store/SQLite metrics:**
+**Store common metrics:**
+
+| Metric                                                  | Type      | Description                                                            |
+| ------------------------------------------------------- | --------- | ---------------------------------------------------------------------- |
+| `hookaido_store_operation_seconds{backend,operation}`   | histogram | Store operation duration by backend and operation                      |
+| `hookaido_store_operation_total{backend,operation}`     | counter   | Store operation totals by backend and operation                        |
+| `hookaido_store_errors_total{backend,operation,kind}`   | counter   | Store operation errors by backend, operation, and normalized kind      |
+
+**Store/SQLite compatibility metrics (sqlite backend):**
 
 | Metric                                           | Type      | Description                                                                |
 | ------------------------------------------------ | --------- | -------------------------------------------------------------------------- |
@@ -329,9 +337,9 @@ Use these series together:
 
 ## Dashboard Compatibility Notes
 
-When dashboards span mixed Hookaido versions (for example `v1.1.x` and `v1.2.x`), treat missing metrics as "not emitted" rather than zero:
+When dashboards span mixed Hookaido versions (for example `v1.2.x` and `v1.3.x`), treat missing metrics as "not emitted" rather than zero:
 
-- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.2.0"} == 1` (or `hookaido_build_info` version labels).
+- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.3.0"} == 1` (or `hookaido_build_info` version labels).
 - In PromQL, prefer compatibility-safe expressions (for example `metric OR on() vector(0)`) where appropriate.
 - Document minimum supported Hookaido version per dashboard bundle to avoid false "all good" signals from absent series.
 

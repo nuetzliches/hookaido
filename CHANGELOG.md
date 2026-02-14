@@ -25,7 +25,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Push saturation benchmarks now also emit reject-reason splits (`ingress_rejects_queue_full`, `ingress_rejects_adaptive_backpressure`, `ingress_rejects_memory_pressure`, `ingress_rejects_other`) for clearer ingress-vs-drain tuning under load.
 - Push saturation/skewed benchmarks now emit ingress tail-latency metrics (`p95_ms`, `p99_ms`) for queue-pressure tuning based on latency guardrails, not only throughput/reject counters.
 - Adaptive backpressure production tuning guide (`docs/adaptive-backpressure.md`) with data-driven starting profiles (`balanced`, `latency_first`, `throughput_first`), metric-driven decision matrix, and rollout guardrails for enterprise workloads.
-- Metrics schema marker `hookaido_metrics_schema_info{schema="1.2.0"}` for dashboard compatibility gating across mixed Hookaido versions.
+- Metrics schema marker `hookaido_metrics_schema_info{schema="1.3.0"}` for dashboard compatibility gating across mixed Hookaido versions.
 
 ### Changed
 

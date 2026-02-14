@@ -22,7 +22,7 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.2.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.3.0"} 1`,
 		"hookaido_tracing_enabled 0",
 		"hookaido_tracing_init_failures_total 0",
 		"hookaido_tracing_export_errors_total 0",
@@ -81,7 +81,7 @@ func TestMetricsHandler_WithDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.2.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.3.0"} 1`,
 		"hookaido_tracing_enabled 1",
 		"hookaido_tracing_init_failures_total 1",
 		"hookaido_tracing_export_errors_total 2",
@@ -439,6 +439,9 @@ func TestMetricsHandler_MemoryStoreRuntimeMetrics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
+		`hookaido_store_operation_total{backend="memory",operation="enqueue_reject"} 0`,
+		`hookaido_store_operation_total{backend="memory",operation="evict"} 1`,
+		`hookaido_store_errors_total{backend="memory",operation="enqueue",kind="memory_pressure"} 0`,
 		`hookaido_store_memory_items{state="queued"} 1`,
 		`hookaido_store_memory_items{state="leased"} 0`,
 		`hookaido_store_memory_items{state="delivered"} 0`,
@@ -446,6 +449,38 @@ func TestMetricsHandler_MemoryStoreRuntimeMetrics(t *testing.T) {
 		`hookaido_store_memory_retained_bytes{state="queued"} `,
 		`hookaido_store_memory_retained_bytes_total `,
 		`hookaido_store_memory_evictions_total{reason="drop_oldest"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_MemoryStoreCommonErrorMetrics(t *testing.T) {
+	now := time.Unix(700, 0).UTC()
+	store := queue.NewMemoryStore(
+		queue.WithNowFunc(func() time.Time { return now }),
+		queue.WithQueueLimits(10, "reject"),
+		queue.WithMemoryPressureLimits(1, 1<<30),
+	)
+	if err := store.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead}); err != nil {
+		t.Fatalf("enqueue dead_1: %v", err)
+	}
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); !errors.Is(err, queue.ErrMemoryPressure) {
+		t.Fatalf("expected ErrMemoryPressure, got %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	h := newMetricsHandler("dev", now, m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_store_operation_total{backend="memory",operation="enqueue_reject"} 1`,
+		`hookaido_store_errors_total{backend="memory",operation="enqueue",kind="memory_pressure"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)

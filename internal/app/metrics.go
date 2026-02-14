@@ -14,7 +14,7 @@ import (
 	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
-const metricsSchemaVersion = "1.2.0"
+const metricsSchemaVersion = "1.3.0"
 
 type runtimeMetrics struct {
 	tracingEnabled                             atomic.Int64

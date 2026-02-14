@@ -13,6 +13,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Memory-backend observability on `/metrics`: `hookaido_store_memory_items{state}`, `hookaido_store_memory_retained_bytes{state}`, `hookaido_store_memory_retained_bytes_total`, and `hookaido_store_memory_evictions_total{reason}`.
 - Ingress rejection breakdown counters via `hookaido_ingress_rejected_by_reason_total{reason,status}` now include `memory_pressure` (`status="503"`) for memory-backend pressure rejects.
 - Pull API `POST {endpoint}/ack` and `POST {endpoint}/nack` now support batch form via `lease_ids` (up to 100 IDs per request), returning aggregate success/conflict output for high-throughput worker lease operations.
+- Optional gRPC worker listener via `pull_api.grpc_listen`: starts WorkerService (`Dequeue`, `Ack`, `Nack`, `Extend`) on shared Pull operation semantics, applies `pull_api.tls` for TLS/mTLS, enforces dedicated-listener conflict guards, and keeps Pull token auth parity (global + per-route override).
 - Reproducible Pull benchmark workflow docs (`docs/performance.md`) plus Make targets for baseline/current capture and `benchstat` diff (`bench-pull-baseline`, `bench-pull`, `bench-pull-compare`).
 - Isolated Extend benchmarking targets (`bench-pull-extend`, `bench-pull-extend-compare`) for lower-variance validation of active-lease Pull `extend` changes.
 - Sustained-drain Pull benchmarking targets (`bench-pull-drain-baseline`, `bench-pull-drain`, `bench-pull-drain-compare`) focused on dequeue + batch `ack` with `batch=15`.

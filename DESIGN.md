@@ -54,7 +54,7 @@ Global:
 - `outbound { ... }` (channel wrapper for API-to-queue-to-push flows; `deliver` required, no `auth`/`match`/`rate_limit`/`pull`)
 - `internal { ... }` (channel wrapper for internal job queues; `pull` required, no `auth`/`match`/`rate_limit`/`deliver`)
 - `vars { NAME value ... }` (top-level reusable values)
-- `pull_api { listen, prefix?, tls?, auth?, max_batch?, default_lease_ttl?, max_lease_ttl?, default_max_wait?, max_wait? }`
+- `pull_api { listen, grpc_listen?, prefix?, tls?, auth?, max_batch?, default_lease_ttl?, max_lease_ttl?, default_max_wait?, max_wait? }`
 - `admin_api { listen, prefix?, tls?, auth? }`
 - `queue_limits { max_depth, drop_policy }`
 - `queue_retention { max_age, prune_interval }`
@@ -210,6 +210,17 @@ Persisted, replayable envelope:
   - `max_lease_ttl` (default `off`/uncapped): optional upper bound for effective dequeue `lease_ttl`.
   - `default_max_wait` (default `0`): used when dequeue request omits `max_wait`.
   - `max_wait` (default `off`/uncapped): optional upper bound for request `max_wait`.
+
+## Worker API (gRPC, optional)
+- Enabled only when `pull_api.grpc_listen` is set.
+- Listener guardrails:
+  - Requires at least one configured pull route.
+  - Must not share a listener address with `ingress.listen`, `pull_api.listen`, `admin_api.listen`, or `observability.metrics.listen`.
+- TLS/mTLS uses `pull_api.tls` (same cert/client-auth settings as Pull HTTP API).
+- Auth token parity with Pull HTTP API:
+  - Global allowlist: `pull_api { auth token ... }`.
+  - Route override: `pull { auth token ... }` replaces global tokens for that route.
+- Service operations mirror Pull API semantics (`dequeue`, `ack`, `nack`, `extend`) and reuse the same route mapping (`endpoint` = configured `pull.path`, relative to `pull_api.prefix`).
 
 Endpoints:
 - `POST {endpoint}/dequeue`

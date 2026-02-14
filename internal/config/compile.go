@@ -180,6 +180,8 @@ type APIConfig struct {
 	Listen string
 	Prefix string
 
+	GRPCListen string
+
 	TLS TLSConfig
 
 	AuthTokens []string
@@ -1163,12 +1165,22 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 	if compiled.Ingress.Listen == compiled.PullAPI.Listen || compiled.Ingress.Listen == compiled.AdminAPI.Listen {
 		res.Errors = append(res.Errors, "ingress.listen must not share a listener with pull_api/admin_api")
 	}
+	if compiled.PullAPI.GRPCListen != "" {
+		if compiled.PullAPI.GRPCListen == compiled.Ingress.Listen ||
+			compiled.PullAPI.GRPCListen == compiled.PullAPI.Listen ||
+			compiled.PullAPI.GRPCListen == compiled.AdminAPI.Listen {
+			res.Errors = append(res.Errors, "pull_api.grpc_listen must not share a listener with ingress/pull_api/admin_api")
+		}
+	}
 
 	if compiled.Observability.Metrics.Enabled {
 		if compiled.Observability.Metrics.Listen == compiled.Ingress.Listen ||
 			compiled.Observability.Metrics.Listen == compiled.PullAPI.Listen ||
 			compiled.Observability.Metrics.Listen == compiled.AdminAPI.Listen {
 			res.Errors = append(res.Errors, "observability.metrics.listen must not share a listener with ingress/pull_api/admin_api")
+		}
+		if compiled.PullAPI.GRPCListen != "" && compiled.Observability.Metrics.Listen == compiled.PullAPI.GRPCListen {
+			res.Errors = append(res.Errors, "pull_api.grpc_listen must not share a listener with observability.metrics.listen")
 		}
 	}
 
@@ -1200,6 +1212,9 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 	// Pull API is required only when pull routes are configured.
 	if hasPullRoutes && cfg.PullAPI == nil {
 		res.Errors = append(res.Errors, "pull_api block is required when using pull routes")
+	}
+	if compiled.PullAPI.GRPCListen != "" && !hasPullRoutes {
+		res.Errors = append(res.Errors, "pull_api.grpc_listen requires at least one pull route")
 	}
 
 	// Pull API auth is required when pull routes exist or when pull_api is configured.
@@ -2568,6 +2583,14 @@ func compileAPI(name string, in *APIBlock, defaultListen string) (APIConfig, Val
 				} else {
 					out.MaxBatch = v
 				}
+			}
+		}
+		if in.GRPCListenSet {
+			raw := strings.TrimSpace(resolveValue(in.GRPCListen, "pull_api.grpc_listen", &res))
+			if raw == "" {
+				res.Errors = append(res.Errors, "pull_api.grpc_listen must not be empty")
+			} else {
+				out.GRPCListen = raw
 			}
 		}
 		if in.DefaultLeaseTTLSet {

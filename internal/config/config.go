@@ -110,6 +110,10 @@ type APIBlock struct {
 	MaxBatchQuoted bool
 	MaxBatchSet    bool
 
+	GRPCListen       string
+	GRPCListenQuoted bool
+	GRPCListenSet    bool
+
 	DefaultLeaseTTL       string
 	DefaultLeaseTTLQuoted bool
 	DefaultLeaseTTLSet    bool

@@ -29,6 +29,11 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 - [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [x] **~~Documentation UX refresh~~** — Moved to Completed.
 - [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
+  - [x] Draft worker transport contract (`internal/workerapi/proto/workerapi.proto`) aligned with Pull API operation semantics.
+  - [ ] Add opt-in runtime listener/config wiring with mTLS/token auth parity.
+  - [ ] Implement gRPC handlers via shared pull/queue operation layer (no semantic drift).
+  - [ ] Add integration + E2E coverage (dequeue/ack/nack/extend, conflicts, auth, replay/idempotent retry parity).
+  - [ ] Document deployment/operations guidance and explicit non-goal MCP surface decision for worker lease ops.
 - [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
 - [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
 - [x] **~~CII Best Practices badge~~** — Moved to Completed.

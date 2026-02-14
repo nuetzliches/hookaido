@@ -60,6 +60,7 @@ nav:
       - Configuration: configuration.md
       - Ingress: ingress.md
       - Pull API: pull-api.md
+      - Worker gRPC API: worker-api.md
       - Delivery (Push): delivery.md
       - Admin API: admin-api.md
       - Management Model: management-model.md

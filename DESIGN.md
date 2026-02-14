@@ -221,6 +221,7 @@ Persisted, replayable envelope:
   - Global allowlist: `pull_api { auth token ... }`.
   - Route override: `pull { auth token ... }` replaces global tokens for that route.
 - Service operations mirror Pull API semantics (`dequeue`, `ack`, `nack`, `extend`) and reuse the same route mapping (`endpoint` = configured `pull.path`, relative to `pull_api.prefix`).
+- MCP coverage decision (v1.x): no Worker-lease MCP tools; dequeue/ack/nack/extend stay on Pull/Worker runtime transports only.
 
 Endpoints:
 - `POST {endpoint}/dequeue`

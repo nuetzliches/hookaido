@@ -28,13 +28,6 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.
 - [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [x] **~~Documentation UX refresh~~** — Moved to Completed.
-- [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
-  - [x] Draft worker transport contract (`internal/workerapi/proto/workerapi.proto`) aligned with Pull API operation semantics.
-  - [x] Extracted transport-neutral Pull operations in `internal/pullapi/ops.go` and switched HTTP handlers to use them (shared semantics base for gRPC adapter).
-  - [x] Added opt-in runtime listener/config wiring with `pull_api.grpc_listen`, listener conflict validation, and Pull-token parity (global + per-route override) for gRPC worker auth.
-  - [x] Implemented gRPC worker handlers in `internal/workerapi/server.go` on top of shared Pull operations (`dequeue`, `ack`, `nack`, `extend`) with parity-focused tests.
-  - [x] Added integration + E2E coverage (gRPC dequeue/ack/nack/extend, batch conflict handling, auth route overrides, and idempotent retry parity).
-  - [ ] Document deployment/operations guidance and explicit non-goal MCP surface decision for worker lease ops.
 - [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
 - [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
 - [x] **~~CII Best Practices badge~~** — Moved to Completed.
@@ -46,6 +39,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## Completed (move here when done)
 
+- [x] **Optional gRPC worker API (Phase 2)** — Added worker transport contract and handlers, shared Pull operation core, opt-in runtime listener/config wiring via `pull_api.grpc_listen` with listener guardrails, auth parity (global + route override), integration/E2E parity coverage, and docs for operations plus explicit MCP non-goal decision for worker lease ops.
 - [x] **Drain fairness under saturation** — Completed saturation tuning across push drain paths: route-shared workers with target-aware dequeue micro-batching (`single-target` up to 4, `multi-target` up to 2), single-target lease-mutation batching with fallback safety, and reproducible push benchmarks with reject-reason and tail-latency (`p95_ms`/`p99_ms`) guardrails.
 - [x] **Mixed-workload tail latency playbook** — Added reproducible mixed ingress+drain benchmark profile in `internal/pullapi/bench_test.go` (`BenchmarkMixedIngressDrain`) with `p95_ms`/`p99_ms` reporting and Makefile targets `bench-pull-mixed-baseline`, `bench-pull-mixed`, `bench-pull-mixed-compare`.
 - [x] **Adaptive backpressure production tuning guide** — Added dedicated operations guide `docs/adaptive-backpressure.md` with recommended starting profiles (`balanced`, `latency_first`, `throughput_first`), a metrics-first decision matrix, and guardrails for dashboard/version compatibility.

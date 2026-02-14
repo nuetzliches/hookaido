@@ -26,10 +26,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Push saturation benchmarks now also emit reject-reason splits (`ingress_rejects_queue_full`, `ingress_rejects_adaptive_backpressure`, `ingress_rejects_memory_pressure`, `ingress_rejects_other`) for clearer ingress-vs-drain tuning under load.
 - Push saturation/skewed benchmarks now emit ingress tail-latency metrics (`p95_ms`, `p99_ms`) for queue-pressure tuning based on latency guardrails, not only throughput/reject counters.
 - Adaptive backpressure production tuning guide (`docs/adaptive-backpressure.md`) with data-driven starting profiles (`balanced`, `latency_first`, `throughput_first`), metric-driven decision matrix, and rollout guardrails for enterprise workloads.
+- Reproducible adaptive backpressure A/B runtime harness (`scripts/adaptive-ab.sh`) plus Make targets (`adaptive-ab`, `adaptive-ab-all`, `adaptive-ab-pull`, `adaptive-ab-mixed`) to capture `final-metrics.txt`/`final-health.json`/`monitor-output.log` artifacts, generate side-by-side comparison tables for `adaptive off` vs `on`, and report Pull contention metrics (`hookaido_pull_acked_total`, `hookaido_pull_ack_conflict_total`, `hookaido_pull_nack_conflict_total`, `pull_ack_conflict_ratio_percent`).
+- Calibrated mixed saturation target (`make adaptive-ab-mixed-saturation`) for issue validation (`#53/#54/#55`) with fixed high-pressure profile (`duration=30s`, `ingress_workers=256`, `mixed_drain_workers=8`, `dequeue_batch=5`, `queue_max_depth=2000`).
 - Metrics schema marker `hookaido_metrics_schema_info{schema="1.3.0"}` for dashboard compatibility gating across mixed Hookaido versions.
 
 ### Changed
 
+- Adaptive backpressure policy decision for v1.5 is now explicit in docs: keep runtime default `enabled off`, with recommended opt-in enterprise starting profile (`min_total 400`, `queued_percent 88`, `ready_lag 45s`, `oldest_queued_age 90s`, `sustained_growth on`) and same-host-only interpretation guardrails for benchmark evidence.
 - MCP queue tool backend routing now treats non-SQLite backends (`memory`, `postgres`) as Admin-proxy mode; local SQLite access remains only for `queue.backend sqlite`.
 - Worker gRPC scope is now explicitly fixed to pull-worker lease transport (`dequeue`/`ack`/`nack`/`extend`) and documented as out-of-scope for admin/publish/control-plane and MCP lease mutation tools.
 - SQLite runtime instrumentation now populates both backend-agnostic store metric families and legacy `hookaido_store_sqlite_*` series for compatibility during dashboard migration.

@@ -30,8 +30,21 @@ PUSH_SKEWED_CURRENT := $(BENCH_DIR)/push-skewed.txt
 PUSH_SKEWED_BASELINE := $(BENCH_DIR)/push-skewed-baseline.txt
 PUSH_SKEWED_COMPARE := $(BENCH_DIR)/push-skewed-compare.txt
 BENCHSTAT_CMD := golang.org/x/perf/cmd/benchstat@v0.0.0-20260211190930-8161c38c6cdc
+ADAPTIVE_AB_SCRIPT := scripts/adaptive-ab.sh
+ADAPTIVE_AB_ROOT := .artifacts/adaptive-ab
+ADAPTIVE_AB_BACKEND ?= sqlite
+ADAPTIVE_AB_DURATION ?= 120
+ADAPTIVE_AB_INGRESS_WORKERS ?= 16
+ADAPTIVE_AB_MIXED_DRAIN_WORKERS ?= 8
+ADAPTIVE_AB_DEQUEUE_BATCH ?= 15
+ADAPTIVE_AB_QUEUE_MAX_DEPTH ?= 50000
+ADAPTIVE_AB_MIXED_SAT_DURATION ?= 30
+ADAPTIVE_AB_MIXED_SAT_INGRESS_WORKERS ?= 256
+ADAPTIVE_AB_MIXED_SAT_DRAIN_WORKERS ?= 8
+ADAPTIVE_AB_MIXED_SAT_DEQUEUE_BATCH ?= 5
+ADAPTIVE_AB_MIXED_SAT_QUEUE_MAX_DEPTH ?= 2000
 
-.PHONY: build test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare release-check dist dist-signed dist-verify
+.PHONY: build test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation release-check dist dist-signed dist-verify
 
 build:
 	@mkdir -p "$(BINDIR)"
@@ -148,6 +161,61 @@ bench-push-skewed-compare:
 	@test -f "$(PUSH_SKEWED_BASELINE)" || (echo "baseline missing: run 'make bench-push-skewed-baseline' first" && exit 1)
 	@test -f "$(PUSH_SKEWED_CURRENT)" || (echo "current skewed push run missing: run 'make bench-push-skewed' first" && exit 1)
 	go run "$(BENCHSTAT_CMD)" "$(PUSH_SKEWED_BASELINE)" "$(PUSH_SKEWED_CURRENT)" | tee "$(PUSH_SKEWED_COMPARE)"
+
+adaptive-ab:
+	"$(ADAPTIVE_AB_SCRIPT)" \
+		--scenario mixed \
+		--output-root "$(ADAPTIVE_AB_ROOT)" \
+		--backend "$(ADAPTIVE_AB_BACKEND)" \
+		--duration-seconds "$(ADAPTIVE_AB_DURATION)" \
+		--ingress-workers "$(ADAPTIVE_AB_INGRESS_WORKERS)" \
+		--mixed-drain-workers "$(ADAPTIVE_AB_MIXED_DRAIN_WORKERS)" \
+		--dequeue-batch "$(ADAPTIVE_AB_DEQUEUE_BATCH)" \
+		--queue-max-depth "$(ADAPTIVE_AB_QUEUE_MAX_DEPTH)"
+
+adaptive-ab-all:
+	"$(ADAPTIVE_AB_SCRIPT)" \
+		--scenario all \
+		--output-root "$(ADAPTIVE_AB_ROOT)" \
+		--backend "$(ADAPTIVE_AB_BACKEND)" \
+		--duration-seconds "$(ADAPTIVE_AB_DURATION)" \
+		--ingress-workers "$(ADAPTIVE_AB_INGRESS_WORKERS)" \
+		--mixed-drain-workers "$(ADAPTIVE_AB_MIXED_DRAIN_WORKERS)" \
+		--dequeue-batch "$(ADAPTIVE_AB_DEQUEUE_BATCH)" \
+		--queue-max-depth "$(ADAPTIVE_AB_QUEUE_MAX_DEPTH)"
+
+adaptive-ab-pull:
+	"$(ADAPTIVE_AB_SCRIPT)" \
+		--scenario pull \
+		--output-root "$(ADAPTIVE_AB_ROOT)" \
+		--backend "$(ADAPTIVE_AB_BACKEND)" \
+		--duration-seconds "$(ADAPTIVE_AB_DURATION)" \
+		--ingress-workers "$(ADAPTIVE_AB_INGRESS_WORKERS)" \
+		--mixed-drain-workers "$(ADAPTIVE_AB_MIXED_DRAIN_WORKERS)" \
+		--dequeue-batch "$(ADAPTIVE_AB_DEQUEUE_BATCH)" \
+		--queue-max-depth "$(ADAPTIVE_AB_QUEUE_MAX_DEPTH)"
+
+adaptive-ab-mixed:
+	"$(ADAPTIVE_AB_SCRIPT)" \
+		--scenario mixed \
+		--output-root "$(ADAPTIVE_AB_ROOT)" \
+		--backend "$(ADAPTIVE_AB_BACKEND)" \
+		--duration-seconds "$(ADAPTIVE_AB_DURATION)" \
+		--ingress-workers "$(ADAPTIVE_AB_INGRESS_WORKERS)" \
+		--mixed-drain-workers "$(ADAPTIVE_AB_MIXED_DRAIN_WORKERS)" \
+		--dequeue-batch "$(ADAPTIVE_AB_DEQUEUE_BATCH)" \
+		--queue-max-depth "$(ADAPTIVE_AB_QUEUE_MAX_DEPTH)"
+
+adaptive-ab-mixed-saturation:
+	"$(ADAPTIVE_AB_SCRIPT)" \
+		--scenario mixed \
+		--output-root "$(ADAPTIVE_AB_ROOT)" \
+		--backend "$(ADAPTIVE_AB_BACKEND)" \
+		--duration-seconds "$(ADAPTIVE_AB_MIXED_SAT_DURATION)" \
+		--ingress-workers "$(ADAPTIVE_AB_MIXED_SAT_INGRESS_WORKERS)" \
+		--mixed-drain-workers "$(ADAPTIVE_AB_MIXED_SAT_DRAIN_WORKERS)" \
+		--dequeue-batch "$(ADAPTIVE_AB_MIXED_SAT_DEQUEUE_BATCH)" \
+		--queue-max-depth "$(ADAPTIVE_AB_MIXED_SAT_QUEUE_MAX_DEPTH)"
 
 release-check: check build
 

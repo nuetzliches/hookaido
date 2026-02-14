@@ -1,8 +1,10 @@
 package queue
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,7 +15,7 @@ type storeFactory struct {
 }
 
 func contractStoreFactories() []storeFactory {
-	return []storeFactory{
+	out := []storeFactory{
 		{
 			name: "memory",
 			new: func(t *testing.T, now *time.Time) Store {
@@ -42,6 +44,28 @@ func contractStoreFactories() []storeFactory {
 			},
 		},
 	}
+
+	dsn := strings.TrimSpace(os.Getenv("HOOKAIDO_TEST_POSTGRES_DSN"))
+	if dsn != "" {
+		out = append(out, storeFactory{
+			name: "postgres",
+			new: func(t *testing.T, now *time.Time) Store {
+				t.Helper()
+				s, err := NewPostgresStore(
+					dsn,
+					WithPostgresNowFunc(func() time.Time { return now.UTC() }),
+					WithPostgresPollInterval(5*time.Millisecond),
+				)
+				if err != nil {
+					t.Fatalf("new postgres store: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		})
+	}
+
+	return out
 }
 
 func TestStoreContract_DequeueAck(t *testing.T) {

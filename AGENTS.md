@@ -20,15 +20,17 @@ Project: Hookaido (Webhook ingress queue, Caddy-style).
 ## Scope & Phasing
 
 - MVP Core: ingress, routing, queue, pull API, retry/DLQ, HMAC+replay, SSRF policies, observability, config reload.
-- Phase 2 (opt-in): management model, publish API, delivery attempt store, forward hooks, outbound signing.
+- Phase 2 (opt-in): incremental expansions only after explicit prioritization in `BACKLOG.md`.
 
 ## Hard Guardrails
 
 - Default deployment: `dmz-queue pull` (Ingress + Queue in the DMZ, internal workers pull).
 - Pull mode is explicit: `pull { ... }` and it excludes `deliver`.
+- Worker gRPC stays limited to pull-worker lease transport (`dequeue`, `ack`, `nack`, `extend`) and must not become an admin/publish/control-plane surface.
 - `path` is a path relative to `pull_api`; full endpoint = `pull_api.prefix` + `pull.path` (slash-normalized).
 - Admin API and Pull API are logically separated.
 - Default: separate listeners. Optional: shared listener with strict `/pull/*` vs `/admin/*` prefixes.
+- Queue backend DSL surface is `sqlite|memory|postgres`; runtime remains single-backend per process (mixed route backends rejected).
 - Config changes must be round-trip safe (`config fmt` stable, diff-friendly).
 
 ## Delivery Semantics
@@ -54,25 +56,31 @@ Project: Hookaido (Webhook ingress queue, Caddy-style).
 ## Tests
 
 - Target mix: 70% unit, 20% integration, 10% E2E.
-- Required: DSL parser/merge rules, retry logic, Queue API (dequeue/ack/lease), SQLite WAL/recovery.
+- Required: DSL parser/merge rules, retry logic, Queue API (dequeue/ack/lease), backend parity contract tests, SQLite WAL/recovery.
 
 ## Go Version
 
 - Pin in `go.mod` and CI.
 - Prefer the same minimum Go version as Caddy unless there is a strong reason to diverge.
-
-## Compatibility Policy
-
 - Track Caddy's minimum supported Go version for the `go` directive.
 - CI uses the latest patch of that minor (e.g., `1.25.x`).
 - Bump the minimum only when Caddy does, or when a required feature/bugfix justifies it.
 
+## Git & Release Workflow
+
+- `main` is protected: no direct pushes, no local-only merges to `main`; use PRs.
+- SemVer tags are strict `vX.Y.Z` only. Never create `vX.Y` tags.
+- Create release tags only from the merged/up-to-date `origin/main` state.
+- Container/release publishing is tag-driven; treat tagging as a production action.
+
 ## Documentation Hygiene
 
 - `STATUS.md` is the lightweight project snapshot — update only for milestone changes (new capability area, progress score change, or "What's Missing" shifts). Do not add per-feature bullets.
+- `STATUS.md` must keep `Current release` aligned with the latest shipped tag.
 - `CHANGELOG.md` tracks user-visible behavior changes (API/DSL/defaults/runtime semantics) under `Unreleased` using condensed thematic bullets grouped as `Added`, `Changed`, `Fixed`. Skip pure refactors or test-only edits.
 - `BACKLOG.md` is the prioritized work list — update when priorities change, items are completed, or new work is identified. Move completed items to the "Completed" section.
 - `DESIGN.md` is the canonical spec — update when adding or changing DSL, API, or runtime semantics.
+- `README.md` should be updated whenever user-visible setup/runtime flags or supported backends change.
 
 ## MCP Coverage Policy
 

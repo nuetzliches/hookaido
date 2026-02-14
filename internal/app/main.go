@@ -42,7 +42,7 @@ func printHelp() {
 	fmt.Fprintln(os.Stdout, "hookaido")
 	fmt.Fprintln(os.Stdout, "")
 	fmt.Fprintln(os.Stdout, "Usage:")
-	fmt.Fprintln(os.Stdout, "  hookaido run --config ./Hookaidofile [--db ./.data/hookaido.db] [--pid-file ./hookaido.pid] [--watch] [--log-level info] [--dotenv ./.env]")
+	fmt.Fprintln(os.Stdout, "  hookaido run --config ./Hookaidofile [--db ./.data/hookaido.db] [--postgres-dsn postgres://user:pass@host:5432/db] [--pid-file ./hookaido.pid] [--watch] [--log-level info] [--dotenv ./.env]")
 	fmt.Fprintln(os.Stdout, "  hookaido config fmt --config ./Hookaidofile")
 	fmt.Fprintln(os.Stdout, "  hookaido config validate --config ./Hookaidofile --format json|text [--strict-secrets]")
 	fmt.Fprintln(os.Stdout, "  hookaido mcp serve --config ./Hookaidofile --db ./.data/hookaido.db [--enable-mutations] [--enable-runtime-control] [--admin-endpoint-allowlist host:port,https://host/admin]")

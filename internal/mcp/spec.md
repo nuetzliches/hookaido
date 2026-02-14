@@ -62,7 +62,7 @@ Arguments:
 ```
 
 Notes:
-- `summary.queue_backend` reports the compiled runtime queue backend (`sqlite`, `memory`, or `mixed` when config is invalid).
+- `summary.queue_backend` reports the compiled runtime queue backend (`sqlite`, `memory`, `postgres`, or `mixed` when config is invalid).
 - `summary.publish_policy_direct_enabled`, `summary.publish_policy_managed_enabled`, `summary.publish_policy_allow_pull_routes`, `summary.publish_policy_allow_deliver_routes`, `summary.publish_policy_require_actor`, `summary.publish_policy_require_request_id`, `summary.publish_policy_fail_closed`, `summary.publish_policy_actor_allowlist`, and `summary.publish_policy_actor_prefixes` report compiled publish-path policy settings from `defaults.publish_policy`.
 - Compile errors include ingress HMAC header-collision validation for route `auth hmac` (`signature_header`, `timestamp_header`, and `nonce_header` must be distinct after defaults are applied).
 
@@ -79,7 +79,7 @@ Arguments:
 Notes:
 - Preserves observability metrics shorthand (`observability { metrics on|off }`) in formatted output.
 - Preserves observability tracing shorthand (`observability { tracing on|off }`) in formatted output.
-- Preserves route queue shorthand (`queue sqlite|memory`) in formatted output.
+- Preserves route queue shorthand (`queue sqlite|memory|postgres`) in formatted output.
 - Normalizes mixed route HMAC shorthand+inline options (`auth hmac secret_ref "S1" { ... }`) into stable block output (`auth hmac { ... }`).
 
 ### `config_diff`
@@ -155,8 +155,8 @@ Notes:
 
 Queue tool backend behavior:
 - When compiled `queue_backend` is `sqlite`, MCP queue tools use direct SQLite access.
-- When compiled `queue_backend` is `memory`, MCP queue tools proxy the configured Admin API endpoints.
-- Memory backend proxy mode requires a running Hookaido instance that serves the Admin API.
+- When compiled `queue_backend` is `memory` or `postgres`, MCP queue tools proxy the configured Admin API endpoints.
+- Admin-proxy mode requires a running Hookaido instance that serves the Admin API.
 - Worker lease operations are an explicit MCP non-goal: MCP does not expose dequeue/ack/nack/extend endpoints (including Pull API batch ack/nack via `lease_ids`), and lease control remains on Pull/Worker runtime transports.
 - Coverage decision: Pull API lease-retry idempotency (`ack`/`nack` duplicate success window) remains Pull runtime behavior only; no MCP tool surface changes required.
 - In proxy mode, queue read (`GET`) calls use bounded retries for transient failures (`408/429/5xx` and transport errors).
@@ -282,7 +282,7 @@ Notes:
 - When moving an existing endpoint mapping to another route, target publish profile (mode + targets) must match the current route; drift is rejected with `management_route_target_mismatch`.
 - When runtime queue context is available, moves are rejected while the current mapped route still has active `queued`/`leased` backlog (`management_route_backlog_active`):
   - `queue.backend sqlite`: checked from local SQLite queue (`--db`).
-  - `queue.backend memory`: checked via Admin API proxy `GET /messages` state probes.
+  - `queue.backend memory|postgres`: checked via Admin API proxy `GET /messages` state probes.
   - If runtime queue context is unavailable (for example offline config mutation), this guardrail is best-effort and may not trigger.
 - `mode` defaults to `write_only`; supported values: `write_only`, `write_and_reload`, `preview_only`.
 - Route must exist in compiled config.
@@ -701,7 +701,7 @@ Arguments:
 ```
 
 Notes:
-- `summary.queue_backend` reports the compiled runtime queue backend (`sqlite`, `memory`, or `mixed` when config is invalid).
+- `summary.queue_backend` reports the compiled runtime queue backend (`sqlite`, `memory`, `postgres`, or `mixed` when config is invalid).
 - `summary.publish_policy_direct_enabled`, `summary.publish_policy_managed_enabled`, `summary.publish_policy_allow_pull_routes`, `summary.publish_policy_allow_deliver_routes`, `summary.publish_policy_require_actor`, `summary.publish_policy_require_request_id`, `summary.publish_policy_fail_closed`, `summary.publish_policy_actor_allowlist`, and `summary.publish_policy_actor_prefixes` report compiled publish-path policy settings from `defaults.publish_policy`.
 
 ### `instance_logs_tail` (requires `--enable-runtime-control`)

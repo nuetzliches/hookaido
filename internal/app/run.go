@@ -47,6 +47,7 @@ func run() int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "./Hookaidofile", "path to config file")
 	dbPath := fs.String("db", "./hookaido.db", "path to sqlite queue db file")
+	postgresDSN := fs.String("postgres-dsn", "", "postgres DSN for queue backend postgres (fallback env: HOOKAIDO_POSTGRES_DSN)")
 	pidFile := fs.String("pid-file", "", "write process PID to file (for runtime control)")
 	logLevel := fs.String("log-level", "info", "log level (debug|info|warn|error)")
 	dotenvPath := fs.String("dotenv", "", "load environment variables from file (dev only)")
@@ -224,7 +225,7 @@ func run() int {
 			}
 		}
 	}()
-	store, queueBackend, closeStore, err := newQueueStore(compiled, *dbPath)
+	store, queueBackend, closeStore, err := newQueueStore(compiled, *dbPath, resolvePostgresDSN(*postgresDSN))
 	if err != nil {
 		runtimeLogger.Error("open_queue_failed", slog.Any("err", err))
 		return 1
@@ -2153,7 +2154,14 @@ func serveGRPCOnListener(logger *slog.Logger, name string, srv *grpc.Server, ln 
 	}()
 }
 
-func newQueueStore(compiled config.Compiled, dbPath string) (queue.Store, string, func() error, error) {
+func resolvePostgresDSN(flagValue string) string {
+	if dsn := strings.TrimSpace(flagValue); dsn != "" {
+		return dsn
+	}
+	return strings.TrimSpace(os.Getenv("HOOKAIDO_POSTGRES_DSN"))
+}
+
+func newQueueStore(compiled config.Compiled, dbPath, postgresDSN string) (queue.Store, string, func() error, error) {
 	backend := queueBackendForCompiled(compiled)
 	switch backend {
 	case "sqlite":
@@ -2176,6 +2184,18 @@ func newQueueStore(compiled config.Compiled, dbPath string) (queue.Store, string
 			queue.WithDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
 		)
 		return store, backend, func() error { return nil }, nil
+	case "postgres":
+		store, err := queue.NewPostgresStore(
+			postgresDSN,
+			queue.WithPostgresQueueLimits(compiled.QueueLimits.MaxDepth, compiled.QueueLimits.DropPolicy),
+			queue.WithPostgresRetention(compiled.QueueRetention.MaxAge, compiled.QueueRetention.PruneInterval),
+			queue.WithPostgresDeliveredRetention(compiled.DeliveredRetention.MaxAge),
+			queue.WithPostgresDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
+		)
+		if err != nil {
+			return nil, backend, nil, err
+		}
+		return store, backend, store.Close, nil
 	case "mixed":
 		return nil, backend, nil, errors.New("mixed route queue backends are not supported yet")
 	default:

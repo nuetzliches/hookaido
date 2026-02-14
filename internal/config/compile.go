@@ -794,8 +794,8 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				res.Errors = append(res.Errors, fmt.Sprintf("route %q queue.backend must not be empty", rPath))
 			} else {
 				raw = strings.ToLower(raw)
-				if raw != "sqlite" && raw != "memory" {
-					res.Errors = append(res.Errors, fmt.Sprintf("route %q queue.backend must be one of: sqlite, memory", rPath))
+				if raw != "sqlite" && raw != "memory" && raw != "postgres" {
+					res.Errors = append(res.Errors, fmt.Sprintf("route %q queue.backend must be one of: sqlite, memory, postgres", rPath))
 				} else {
 					queueBackend = raw
 				}

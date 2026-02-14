@@ -9,6 +9,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 
+- Postgres queue backend (`queue { backend postgres }` / `queue postgres`) with durable queue semantics parity (lease lifecycle, message management, attempts, retention, and batch lease mutation support) plus runtime wiring via `hookaido run --postgres-dsn` (or `HOOKAIDO_POSTGRES_DSN`).
 - Prometheus queue saturation gauges: `hookaido_queue_oldest_queued_age_seconds`, `hookaido_queue_ready_lag_seconds`, and `hookaido_queue_total` on `/metrics` (alongside `hookaido_queue_depth{state}`) for direct lag/age alerting without Admin health JSON scraping.
 - Memory-backend observability on `/metrics`: `hookaido_store_memory_items{state}`, `hookaido_store_memory_retained_bytes{state}`, `hookaido_store_memory_retained_bytes_total`, and `hookaido_store_memory_evictions_total{reason}`.
 - Ingress rejection breakdown counters via `hookaido_ingress_rejected_by_reason_total{reason,status}` now include `memory_pressure` (`status="503"`) for memory-backend pressure rejects.
@@ -28,6 +29,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Changed
 
+- MCP queue tool backend routing now treats non-SQLite backends (`memory`, `postgres`) as Admin-proxy mode; local SQLite access remains only for `queue.backend sqlite`.
 - Worker gRPC scope is now explicitly fixed to pull-worker lease transport (`dequeue`/`ack`/`nack`/`extend`) and documented as out-of-scope for admin/publish/control-plane and MCP lease mutation tools.
 - Memory backend now emits explicit `ErrMemoryPressure` admission rejects when retained (non-active) memory footprint crosses pressure guard thresholds; ingress surfaces these as HTTP `503` with rejection reason `memory_pressure` instead of generic store-unavailable.
 - Admin health diagnostics (`GET /healthz?details=1`) now include ingress `rejected_by_reason` and memory-store runtime diagnostics (`items_by_state`, retained bytes, eviction counters, and memory pressure state) when the memory backend is active.

@@ -72,6 +72,24 @@ func TestHandleRequest_ToolsList(t *testing.T) {
 	}
 }
 
+func TestQueueBackendUsesAdminProxy(t *testing.T) {
+	tests := []struct {
+		backend string
+		want    bool
+	}{
+		{backend: "", want: false},
+		{backend: "sqlite", want: false},
+		{backend: "memory", want: true},
+		{backend: "postgres", want: true},
+		{backend: "mixed", want: false},
+	}
+	for _, tt := range tests {
+		if got := queueBackendUsesAdminProxy(tt.backend); got != tt.want {
+			t.Fatalf("queueBackendUsesAdminProxy(%q)=%v, want %v", tt.backend, got, tt.want)
+		}
+	}
+}
+
 func TestHandleRequest_ToolsListWithMutations(t *testing.T) {
 	s := NewServer(nil, nil, "", "", WithMutationsEnabled(true), WithRole(RoleAdmin), WithPrincipal("test-admin"))
 	resp := s.handleRequest(rpcRequest{
@@ -1563,6 +1581,104 @@ func TestToolAdminHealthMemoryBackendUsesAdminQueueDiagnostics(t *testing.T) {
 	}
 	if total := intFromAny(queueDiag["total"]); total != 3 {
 		t.Fatalf("expected queue.total=3, got %#v", queueDiag["total"])
+	}
+}
+
+func TestToolAdminHealthPostgresBackendUsesAdminQueueDiagnostics(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "Hookaidofile")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+
+	const token = "admintoken"
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/admin/healthz" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"diagnostics": map[string]any{
+					"queue": map[string]any{
+						"ok":    true,
+						"total": 5,
+						"by_state": map[string]any{
+							"queued": 4,
+							"leased": 1,
+						},
+					},
+				},
+			})
+		}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = srv.Serve(ln)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for admin health server shutdown")
+		}
+	})
+
+	cfg := fmt.Sprintf(`admin_api {
+  listen %q
+  prefix "/admin"
+  auth token "raw:%s"
+}
+"/r" {
+  queue { backend "postgres" }
+  deliver "https://example.org" {}
+}
+`, addr, token)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	s := NewServer(nil, nil, cfgPath, "")
+	resp := callTool(t, s, "admin_health", map[string]any{})
+	if resp.IsError {
+		t.Fatalf("unexpected admin_health error: %s", resp.Content[0].Text)
+	}
+	out, ok := resp.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structured content type: %T", resp.StructuredContent)
+	}
+	if okVal, _ := out["ok"].(bool); !okVal {
+		t.Fatalf("expected ok=true, got %#v", out["ok"])
+	}
+	if backend, _ := out["queue_backend"].(string); backend != "postgres" {
+		t.Fatalf("expected queue_backend=postgres, got %#v", out["queue_backend"])
+	}
+	queueDiag, ok := out["queue"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected queue object, got %T", out["queue"])
+	}
+	if source, _ := queueDiag["source"].(string); source != "admin_api" {
+		t.Fatalf("expected queue.source=admin_api, got %#v", queueDiag["source"])
+	}
+	if checked, _ := queueDiag["checked"].(bool); !checked {
+		t.Fatalf("expected queue.checked=true")
+	}
+	if okVal, _ := queueDiag["ok"].(bool); !okVal {
+		t.Fatalf("expected queue.ok=true")
+	}
+	if total := intFromAny(queueDiag["total"]); total != 5 {
+		t.Fatalf("expected queue.total=5, got %#v", queueDiag["total"])
 	}
 }
 

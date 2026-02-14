@@ -37,7 +37,7 @@ Runtime control tools (`instance_start`, `instance_stop`, `instance_reload`) req
 | Flag                         | Default          | Description                                    |
 | ---------------------------- | ---------------- | ---------------------------------------------- |
 | `--config`                   | `./Hookaidofile` | Path to config file                            |
-| `--db`                       | `./hookaido.db`  | Path to SQLite database                        |
+| `--db`                       | `./hookaido.db`  | Path to SQLite database (used when `queue.backend=sqlite`) |
 | `--role`                     | `read`           | Authorization role: `read`, `operate`, `admin` |
 | `--enable-mutations`         | `false`          | Enable mutation tools                          |
 | `--enable-runtime-control`   | `false`          | Enable runtime control tools                   |
@@ -119,6 +119,7 @@ MCP tools adapt to the configured queue backend:
 | -------- | ----------------------------------------------------------- |
 | `sqlite` | Direct SQLite access (no running instance needed for reads) |
 | `memory` | Proxy via configured Admin API (running instance required)  |
+| `postgres` | Proxy via configured Admin API (running instance required) |
 
 In Admin-proxy mode:
 

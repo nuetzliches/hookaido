@@ -197,6 +197,7 @@ curl http://127.0.0.1:2019/healthz?details=1
 | ------------- | --------------------- | ---------------------------------------- |
 | `--config`    | `./Hookaidofile`      | Path to config file                      |
 | `--db`        | `./.data/hookaido.db` | Path to SQLite database                  |
+| `--postgres-dsn` | —                  | PostgreSQL DSN (when `queue.backend` is `postgres`) |
 | `--pid-file`  | —                     | Write PID file (enables `SIGHUP` reload) |
 | `--watch`     | `false`               | Hot-reload on config file changes        |
 | `--log-level` | `info`                | Runtime log level                        |

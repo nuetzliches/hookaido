@@ -150,12 +150,13 @@ All listeners support optional TLS and mTLS. See [Security](security.md) for TLS
 
 ## Queue Backend
 
-Hookaido supports two queue backends:
+Hookaido supports three queue backends:
 
 | Backend            | Durability              | Use Case            |
 | ------------------ | ----------------------- | ------------------- |
 | `sqlite` (default) | Durable (WAL mode)      | Production          |
 | `memory`           | In-process, non-durable | Development/testing |
+| `postgres`         | Durable (external DB)   | Production          |
 
 ```hcl
 # Per-route (runtime uses one backend process-wide)
@@ -165,7 +166,7 @@ Hookaido supports two queue backends:
 }
 ```
 
-> Mixed route backends (some `sqlite`, some `memory`) are rejected at config compile time. The `--db` path is ignored when `memory` is selected.
+> Mixed route backends (for example `sqlite` + `postgres`) are rejected at config compile time. `--db` is only used for `sqlite`. For `postgres`, provide `--postgres-dsn` (or `HOOKAIDO_POSTGRES_DSN`).
 
 ### Backups
 
@@ -182,14 +183,14 @@ cp ./.data/hookaido.db backup.db
 
 Filesystem snapshots (LVM, ZFS, EBS) also work — SQLite WAL is crash-safe.
 
-> Hookaido does not include its own backup/export CLI. Standard SQLite tools are sufficient.
+> Hookaido does not include its own backup/export CLI. Use standard tooling for your backend (SQLite tools for `sqlite`, native PostgreSQL backup tooling for `postgres`).
 
 ## Production Checklist
 
 - [ ] Use `pull` mode for DMZ deployments (outbound-only from internal network)
 - [ ] Set unique, strong `HOOKAIDO_PULL_TOKEN` values
 - [ ] Enable TLS on Pull API and Admin API
-- [ ] Use `sqlite` backend (default) with a persistent `--db` path
+- [ ] Use a durable backend: `sqlite` with persistent `--db`, or `postgres` with `--postgres-dsn`/`HOOKAIDO_POSTGRES_DSN`
 - [ ] Admin API defaults to localhost — expose only over a secure channel if needed
 - [ ] Configure `queue_limits`, `queue_retention`, and `dlq_retention` for your throughput
 - [ ] Enable [observability](observability.md) (metrics + access logs at minimum)

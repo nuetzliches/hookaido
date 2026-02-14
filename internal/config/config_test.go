@@ -1533,6 +1533,43 @@ pull_api { auth token "raw:t" }
 	}
 }
 
+func TestParseFormat_QueueShorthandPostgres(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  queue postgres
+  pull { path "/e" }
+}
+`)
+
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.Routes) != 1 || cfg.Routes[0].Queue == nil {
+		t.Fatalf("expected route queue config, got %#v", cfg.Routes)
+	}
+	if !cfg.Routes[0].Queue.BackendSet {
+		t.Fatalf("expected queue shorthand backend set")
+	}
+	if cfg.Routes[0].Queue.Backend != "postgres" {
+		t.Fatalf("expected queue shorthand backend postgres, got %q", cfg.Routes[0].Queue.Backend)
+	}
+
+	out, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "queue postgres") {
+		t.Fatalf("expected queue shorthand to be preserved, got:\n%s", got)
+	}
+	if strings.Contains(got, "queue {") {
+		t.Fatalf("expected shorthand formatting, got block form:\n%s", got)
+	}
+}
+
 func TestParseFormat_QueueLimitsBlock(t *testing.T) {
 	in := []byte(`
 queue_limits {
@@ -3473,6 +3510,28 @@ pull_api { auth token "raw:t" }
 	}
 }
 
+func TestCompile_QueueBackendPostgres(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  queue { backend "postgres" }
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+	if compiled.Routes[0].QueueBackend != "postgres" {
+		t.Fatalf("queue backend: got %q", compiled.Routes[0].QueueBackend)
+	}
+}
+
 func TestCompile_QueueBackendShorthandMemory(t *testing.T) {
 	in := []byte(`
 pull_api { auth token "raw:t" }
@@ -3491,6 +3550,28 @@ pull_api { auth token "raw:t" }
 		t.Fatalf("compile: %#v", res)
 	}
 	if compiled.Routes[0].QueueBackend != "memory" {
+		t.Fatalf("queue backend: got %q", compiled.Routes[0].QueueBackend)
+	}
+}
+
+func TestCompile_QueueBackendShorthandPostgres(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  queue postgres
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+	if compiled.Routes[0].QueueBackend != "postgres" {
 		t.Fatalf("queue backend: got %q", compiled.Routes[0].QueueBackend)
 	}
 }

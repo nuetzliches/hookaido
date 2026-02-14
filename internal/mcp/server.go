@@ -1343,7 +1343,7 @@ func (s *Server) toolDescriptors() []toolDescriptor {
 		},
 		{
 			Name:        "messages_list",
-			Description: "List queue messages from sqlite backend with optional filters",
+			Description: "List queue messages from the active backend with optional filters",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1363,7 +1363,7 @@ func (s *Server) toolDescriptors() []toolDescriptor {
 		},
 		{
 			Name:        "attempts_list",
-			Description: "List delivery attempts from sqlite backend with optional filters",
+			Description: "List delivery attempts from the active backend with optional filters",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1381,7 +1381,7 @@ func (s *Server) toolDescriptors() []toolDescriptor {
 		},
 		{
 			Name:        "dlq_list",
-			Description: "List dead-letter queue items from sqlite backend",
+			Description: "List dead-letter queue items from the active backend",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -2339,7 +2339,8 @@ func (s *Server) toolAdminHealth(args map[string]any) (any, error) {
 		queueBackend = "sqlite"
 	}
 
-	localDBRequired := queueBackend != "memory"
+	useAdminProxy := queueBackendUsesAdminProxy(queueBackend)
+	localDBRequired := !useAdminProxy
 	localOK := configReadable && (!localDBRequired || (dbExists && dbReadable))
 	localQueue := map[string]any{
 		"backend":                     queueBackend,
@@ -2356,7 +2357,7 @@ func (s *Server) toolAdminHealth(args map[string]any) (any, error) {
 		"trend_signals":               map[string]any{},
 		"error":                       "",
 	}
-	if queueBackend == "memory" {
+	if useAdminProxy {
 		localQueue["source"] = "admin_api"
 		if checked, _ := adminProbe["checked"].(bool); checked {
 			if adminOK, _ := adminProbe["ok"].(bool); adminOK {
@@ -4626,7 +4627,7 @@ func (s *Server) resolveIDMutationPolicyContext() (idMutationPolicyContext, erro
 	if err == nil && res.OK {
 		out.compiled = compiled
 		out.compiledAvailable = true
-		out.useAdminProxy = compiledQueueBackend(compiled) == "memory"
+		out.useAdminProxy = queueBackendUsesAdminProxy(compiledQueueBackend(compiled))
 		return out, nil
 	}
 
@@ -4647,7 +4648,7 @@ func (s *Server) queueToolsUseAdminProxy() (config.Compiled, bool) {
 	if err != nil || !res.OK {
 		return config.Compiled{}, false
 	}
-	return compiled, compiledQueueBackend(compiled) == "memory"
+	return compiled, queueBackendUsesAdminProxy(compiledQueueBackend(compiled))
 }
 
 func (s *Server) validateRouteScopedManagedAuditPolicyForFilterMutation(audit mutationAuditArgs, route string) error {
@@ -5332,6 +5333,15 @@ func (s *Server) resolveTrendSignalConfig() queue.BacklogTrendSignalConfig {
 		return queue.DefaultBacklogTrendSignalConfig()
 	}
 	return queueTrendSignalConfigFromCompiled(compiled.Defaults.TrendSignals)
+}
+
+func queueBackendUsesAdminProxy(backend string) bool {
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "", "sqlite", "mixed":
+		return false
+	default:
+		return true
+	}
 }
 
 func compiledQueueBackend(compiled config.Compiled) string {
@@ -6195,8 +6205,8 @@ func (s *Server) managementRouteHasActiveBacklog(compiled config.Compiled, route
 		return false, false, false, nil
 	}
 
-	switch compiledQueueBackend(compiled) {
-	case "sqlite":
+	switch backend := compiledQueueBackend(compiled); {
+	case backend == "sqlite":
 		store, err := s.openSQLiteStore()
 		if err != nil {
 			return false, false, false, nil
@@ -6207,7 +6217,7 @@ func (s *Server) managementRouteHasActiveBacklog(compiled config.Compiled, route
 			return false, false, true, err
 		}
 		return queued, leased, true, nil
-	case "memory":
+	case queueBackendUsesAdminProxy(backend):
 		return s.managementRouteHasActiveBacklogViaAdmin(compiled, route)
 	default:
 		return false, false, false, nil

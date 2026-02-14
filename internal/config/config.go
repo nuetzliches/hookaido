@@ -452,7 +452,7 @@ type QueueBlock struct {
 	BackendQuoted bool
 	BackendSet    bool
 
-	// shorthand tracks `queue sqlite|memory` style so fmt can preserve compact
+	// shorthand tracks `queue sqlite|memory|postgres` style so fmt can preserve compact
 	// DSL form.
 	shorthand bool
 }

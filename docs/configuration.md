@@ -396,7 +396,7 @@ Each route block defines a webhook endpoint path and its processing pipeline:
   }
 
   # Queue backend
-  queue { backend sqlite }  # or "memory"
+  queue { backend sqlite }  # or "memory" / "postgres"
 
   # Mode: pull OR deliver (not both)
   pull { path /pull/github }
@@ -603,7 +603,7 @@ If any of these change, Hookaido rejects the reload and requires a process resta
 | `defaults.publish_policy.*` (all publish policy fields)                      | Set on admin server at startup          |
 | Deliver targets, URLs, retry, timeout, concurrency, signing                  | Dispatcher goroutine topology           |
 | Egress policy (`defaults.egress.*`) when deliver routes exist                | Baked into dispatcher                   |
-| Queue backend type (`sqlite` ↔ `memory`)                                     | No migration path                       |
+| Queue backend type (`sqlite`/`memory`/`postgres`)                            | No migration path                       |
 | Queue limits / retention / DLQ retention                                     | Set on queue store at startup           |
 | Observability (log sinks, tracing, metrics)                                  | Exporter/sink initialized once          |
 | Adding/removing first pull or last deliver route                             | Creates/destroys server/dispatcher      |

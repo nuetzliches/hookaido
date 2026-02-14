@@ -878,6 +878,17 @@ func TestQueueBackendForCompiled_DefaultSQLite(t *testing.T) {
 	}
 }
 
+func TestQueueBackendForCompiled_Postgres(t *testing.T) {
+	compiled := config.Compiled{
+		Routes: []config.CompiledRoute{
+			{Path: "/x", QueueBackend: "postgres"},
+		},
+	}
+	if got := queueBackendForCompiled(compiled); got != "postgres" {
+		t.Fatalf("queue backend: got %q", got)
+	}
+}
+
 func TestQueueBackendForCompiled_Mixed(t *testing.T) {
 	compiled := config.Compiled{
 		Routes: []config.CompiledRoute{
@@ -887,6 +898,35 @@ func TestQueueBackendForCompiled_Mixed(t *testing.T) {
 	}
 	if got := queueBackendForCompiled(compiled); got != "mixed" {
 		t.Fatalf("queue backend: got %q", got)
+	}
+}
+
+func TestResolvePostgresDSN_FlagPreferred(t *testing.T) {
+	t.Setenv("HOOKAIDO_POSTGRES_DSN", "postgres://env")
+	if got := resolvePostgresDSN("postgres://flag"); got != "postgres://flag" {
+		t.Fatalf("resolve dsn: got %q", got)
+	}
+}
+
+func TestResolvePostgresDSN_EnvFallback(t *testing.T) {
+	t.Setenv("HOOKAIDO_POSTGRES_DSN", "postgres://env")
+	if got := resolvePostgresDSN(""); got != "postgres://env" {
+		t.Fatalf("resolve dsn: got %q", got)
+	}
+}
+
+func TestNewQueueStore_PostgresRequiresDSN(t *testing.T) {
+	compiled := config.Compiled{
+		Routes: []config.CompiledRoute{
+			{Path: "/x", QueueBackend: "postgres"},
+		},
+	}
+	_, backend, _, err := newQueueStore(compiled, filepath.Join(t.TempDir(), "hookaido.db"), "")
+	if backend != "postgres" {
+		t.Fatalf("queue backend: got %q", backend)
+	}
+	if err == nil || !strings.Contains(err.Error(), "empty postgres dsn") {
+		t.Fatalf("expected empty postgres dsn error, got %v", err)
 	}
 }
 

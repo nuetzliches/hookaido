@@ -81,7 +81,7 @@ Per-route:
 - `publish on|off` (optional; defaults `on`; when `off`, Admin/MCP publish mutations reject this route)
 - `publish.direct on|off` (optional; defaults `on`; when `off`, global direct publish path rejects this route)
 - `publish.managed on|off` (optional; defaults `on`; when `off`, endpoint-scoped managed publish path rejects this route)
-- `queue "sqlite|memory"` shorthand or block `queue { backend "sqlite|memory" }` (defaults to SQLite; runtime currently uses one backend process-wide, so mixed route backends are rejected)
+- `queue "sqlite|memory|postgres"` shorthand or block `queue { backend "sqlite|memory|postgres" }` (defaults to SQLite; runtime currently uses one backend process-wide, so mixed route backends are rejected)
 - `pull { path, auth? }` (pull mode; excludes `deliver`)
 - `deliver "https://..." { retry?, timeout?, sign ... }` (push mode; optional in MVP core)
   - signing directives: `sign hmac <secret-ref>` or repeated `sign hmac secret_ref <ID>`, optional `sign signature_header <name>`, optional `sign timestamp_header <name>`, optional `sign secret_selection <newest_valid|oldest_valid>` (requires `sign hmac secret_ref ...`)
@@ -453,7 +453,7 @@ Queue/Admin tools:
 
 Backend note:
 - For `queue.backend sqlite`, MCP queue tools can read/mutate via direct SQLite access.
-- For `queue.backend memory`, MCP queue tools should proxy the configured Admin API endpoints (running instance required).
+- For `queue.backend memory` and `queue.backend postgres`, MCP queue tools should proxy the configured Admin API endpoints (running instance required).
 
 ### Access Model
 - `read` role: inspect-only tools.

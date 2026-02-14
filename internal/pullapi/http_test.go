@@ -91,6 +91,325 @@ func TestPullAPI_DequeueAck(t *testing.T) {
 	}
 }
 
+func TestPullAPI_AckRetryIdempotent(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+	if err := store.Enqueue(queue.Envelope{
+		ID:         "evt_1",
+		Route:      "/webhooks/github",
+		Target:     "pull",
+		ReceivedAt: nowVar,
+		NextRunAt:  nowVar,
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	rrDeq := httptest.NewRecorder()
+	reqDeq := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1}`))
+	srv.ServeHTTP(rrDeq, reqDeq)
+	if rrDeq.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rrDeq.Code)
+	}
+
+	var deq struct {
+		Items []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq.Body.Bytes(), &deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(deq.Items))
+	}
+
+	body := `{"lease_id":"` + deq.Items[0].LeaseID + `"}`
+	rrAck1 := httptest.NewRecorder()
+	srv.ServeHTTP(rrAck1, httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(body)))
+	if rrAck1.Code != http.StatusNoContent {
+		t.Fatalf("ack1 status: got %d body=%s", rrAck1.Code, rrAck1.Body.String())
+	}
+
+	rrAck2 := httptest.NewRecorder()
+	srv.ServeHTTP(rrAck2, httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(body)))
+	if rrAck2.Code != http.StatusNoContent {
+		t.Fatalf("ack retry status: got %d body=%s", rrAck2.Code, rrAck2.Body.String())
+	}
+}
+
+func TestPullAPI_AckBatchIncludesRecentlyCompletedLease(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+		t.Fatalf("enqueue evt_1: %v", err)
+	}
+	if err := store.Enqueue(queue.Envelope{ID: "evt_2", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+		t.Fatalf("enqueue evt_2: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	rrDeq := httptest.NewRecorder()
+	reqDeq := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":2}`))
+	srv.ServeHTTP(rrDeq, reqDeq)
+	if rrDeq.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rrDeq.Code)
+	}
+
+	var deq struct {
+		Items []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq.Body.Bytes(), &deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(deq.Items))
+	}
+
+	rrAckSingle := httptest.NewRecorder()
+	reqAckSingle := httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(`{"lease_id":"`+deq.Items[0].LeaseID+`"}`))
+	srv.ServeHTTP(rrAckSingle, reqAckSingle)
+	if rrAckSingle.Code != http.StatusNoContent {
+		t.Fatalf("single ack status: got %d body=%s", rrAckSingle.Code, rrAckSingle.Body.String())
+	}
+
+	body := `{"lease_ids":["` + deq.Items[0].LeaseID + `","` + deq.Items[1].LeaseID + `"]}`
+	rrAckBatch := httptest.NewRecorder()
+	reqAckBatch := httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(body))
+	srv.ServeHTTP(rrAckBatch, reqAckBatch)
+	if rrAckBatch.Code != http.StatusOK {
+		t.Fatalf("batch ack status: got %d body=%s", rrAckBatch.Code, rrAckBatch.Body.String())
+	}
+
+	var out ackBatchResponse
+	if err := json.Unmarshal(rrAckBatch.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode ack batch: %v", err)
+	}
+	if out.Acked != 2 {
+		t.Fatalf("expected acked=2, got %d", out.Acked)
+	}
+	if len(out.Conflicts) != 0 {
+		t.Fatalf("expected no conflicts, got %#v", out.Conflicts)
+	}
+}
+
+func TestPullAPI_NackRetryIdempotentButAckThenNackStillConflicts(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+	if err := store.Enqueue(queue.Envelope{
+		ID:         "evt_1",
+		Route:      "/webhooks/github",
+		Target:     "pull",
+		ReceivedAt: nowVar,
+		NextRunAt:  nowVar,
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	rrDeq := httptest.NewRecorder()
+	srv.ServeHTTP(rrDeq, httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1}`)))
+	if rrDeq.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rrDeq.Code)
+	}
+
+	var deq struct {
+		Items []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq.Body.Bytes(), &deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(deq.Items))
+	}
+
+	leaseID := deq.Items[0].LeaseID
+	rrNack1 := httptest.NewRecorder()
+	srv.ServeHTTP(rrNack1, httptest.NewRequest(http.MethodPost, "http://example/pull/github/nack", strings.NewReader(`{"lease_id":"`+leaseID+`","delay":"0s"}`)))
+	if rrNack1.Code != http.StatusNoContent {
+		t.Fatalf("nack1 status: got %d body=%s", rrNack1.Code, rrNack1.Body.String())
+	}
+
+	rrNack2 := httptest.NewRecorder()
+	srv.ServeHTTP(rrNack2, httptest.NewRequest(http.MethodPost, "http://example/pull/github/nack", strings.NewReader(`{"lease_id":"`+leaseID+`","delay":"0s"}`)))
+	if rrNack2.Code != http.StatusNoContent {
+		t.Fatalf("nack retry status: got %d body=%s", rrNack2.Code, rrNack2.Body.String())
+	}
+
+	rrAck := httptest.NewRecorder()
+	srv.ServeHTTP(rrAck, httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(`{"lease_id":"`+leaseID+`"}`)))
+	if rrAck.Code != http.StatusConflict {
+		t.Fatalf("ack after nack retries should conflict, got %d body=%s", rrAck.Code, rrAck.Body.String())
+	}
+}
+
+func TestPullAPI_DequeueAckBatch(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar, Payload: []byte(`{"x":1}`)}); err != nil {
+		t.Fatalf("enqueue evt_1: %v", err)
+	}
+	if err := store.Enqueue(queue.Envelope{ID: "evt_2", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar, Payload: []byte(`{"x":2}`)}); err != nil {
+		t.Fatalf("enqueue evt_2: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	rrDeq := httptest.NewRecorder()
+	reqDeq := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":2}`))
+	srv.ServeHTTP(rrDeq, reqDeq)
+	if rrDeq.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rrDeq.Code)
+	}
+
+	var deq struct {
+		Items []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq.Body.Bytes(), &deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(deq.Items))
+	}
+
+	body := `{"lease_ids":["` + deq.Items[0].LeaseID + `","` + deq.Items[1].LeaseID + `"]}`
+	rrAck := httptest.NewRecorder()
+	reqAck := httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(body))
+	srv.ServeHTTP(rrAck, reqAck)
+	if rrAck.Code != http.StatusOK {
+		t.Fatalf("ack batch status: got %d body=%s", rrAck.Code, rrAck.Body.String())
+	}
+
+	var ackOut ackBatchResponse
+	if err := json.Unmarshal(rrAck.Body.Bytes(), &ackOut); err != nil {
+		t.Fatalf("decode ack batch: %v", err)
+	}
+	if ackOut.Acked != 2 {
+		t.Fatalf("expected acked=2, got %d", ackOut.Acked)
+	}
+	if len(ackOut.Conflicts) != 0 {
+		t.Fatalf("expected no conflicts, got %#v", ackOut.Conflicts)
+	}
+
+	rrDeq2 := httptest.NewRecorder()
+	reqDeq2 := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1}`))
+	srv.ServeHTTP(rrDeq2, reqDeq2)
+	if rrDeq2.Code != http.StatusOK {
+		t.Fatalf("dequeue2 status: got %d", rrDeq2.Code)
+	}
+	var deq2 struct {
+		Items []any `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq2.Body.Bytes(), &deq2); err != nil {
+		t.Fatalf("decode dequeue2: %v", err)
+	}
+	if len(deq2.Items) != 0 {
+		t.Fatalf("expected empty queue after batch ack, got %d items", len(deq2.Items))
+	}
+}
+
+func TestPullAPI_AckBatchPartialConflict(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	rrDeq := httptest.NewRecorder()
+	reqDeq := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1}`))
+	srv.ServeHTTP(rrDeq, reqDeq)
+	if rrDeq.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rrDeq.Code)
+	}
+
+	var deq struct {
+		Items []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq.Body.Bytes(), &deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(deq.Items))
+	}
+
+	body := `{"lease_ids":["` + deq.Items[0].LeaseID + `","missing"]}`
+	rrAck := httptest.NewRecorder()
+	reqAck := httptest.NewRequest(http.MethodPost, "http://example/pull/github/ack", strings.NewReader(body))
+	srv.ServeHTTP(rrAck, reqAck)
+	if rrAck.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rrAck.Code, rrAck.Body.String())
+	}
+
+	var ackOut ackBatchResponse
+	if err := json.Unmarshal(rrAck.Body.Bytes(), &ackOut); err != nil {
+		t.Fatalf("decode ack batch: %v", err)
+	}
+	if ackOut.Acked != 1 {
+		t.Fatalf("expected acked=1, got %d", ackOut.Acked)
+	}
+	if ackOut.Code != pullErrLeaseConflict {
+		t.Fatalf("expected code=%q, got %q", pullErrLeaseConflict, ackOut.Code)
+	}
+	if strings.TrimSpace(ackOut.Detail) == "" {
+		t.Fatalf("expected non-empty detail")
+	}
+	if len(ackOut.Conflicts) != 1 {
+		t.Fatalf("expected one conflict, got %#v", ackOut.Conflicts)
+	}
+	if ackOut.Conflicts[0].LeaseID != "missing" || ackOut.Conflicts[0].Reason != "lease_not_found" {
+		t.Fatalf("unexpected conflict: %#v", ackOut.Conflicts[0])
+	}
+}
+
 func TestPullAPI_ObserverCallbacks(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
@@ -213,6 +532,195 @@ func TestPullAPI_ObserverAckExpiredConflict(t *testing.T) {
 	}
 	if !observed.leaseExpired {
 		t.Fatalf("observe ack should mark leaseExpired=true")
+	}
+}
+
+func TestPullAPI_AckBatchRejectsMixedLeaseIDForms(t *testing.T) {
+	store := &stubStore{}
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/x/ack", strings.NewReader(`{"lease_id":"l1","lease_ids":["l2"]}`))
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	errResp := decodePullError(t, rr)
+	if errResp.Code != pullErrInvalidBody {
+		t.Fatalf("expected error code %q, got %q", pullErrInvalidBody, errResp.Code)
+	}
+}
+
+func TestPullAPI_AckBatchRejectsTooLarge(t *testing.T) {
+	store := &stubStore{}
+	srv := NewServer(store)
+	srv.MaxLeaseBatch = 2
+	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/x/ack", strings.NewReader(`{"lease_ids":["l1","l2","l3"]}`))
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	errResp := decodePullError(t, rr)
+	if errResp.Code != pullErrInvalidBody {
+		t.Fatalf("expected error code %q, got %q", pullErrInvalidBody, errResp.Code)
+	}
+}
+
+func TestPullAPI_NackBatchDelay(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+		t.Fatalf("enqueue evt_1: %v", err)
+	}
+	if err := store.Enqueue(queue.Envelope{ID: "evt_2", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+		t.Fatalf("enqueue evt_2: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	rrDeq := httptest.NewRecorder()
+	reqDeq := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":2,"lease_ttl":"30s"}`))
+	srv.ServeHTTP(rrDeq, reqDeq)
+	if rrDeq.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rrDeq.Code)
+	}
+
+	var deq struct {
+		Items []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq.Body.Bytes(), &deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(deq.Items))
+	}
+
+	rrNack := httptest.NewRecorder()
+	reqNack := httptest.NewRequest(http.MethodPost, "http://example/pull/github/nack", strings.NewReader(`{"lease_ids":["`+deq.Items[0].LeaseID+`","`+deq.Items[1].LeaseID+`"],"delay":"5s"}`))
+	srv.ServeHTTP(rrNack, reqNack)
+	if rrNack.Code != http.StatusOK {
+		t.Fatalf("nack batch status: got %d body=%s", rrNack.Code, rrNack.Body.String())
+	}
+	var nackOut nackBatchResponse
+	if err := json.Unmarshal(rrNack.Body.Bytes(), &nackOut); err != nil {
+		t.Fatalf("decode nack batch: %v", err)
+	}
+	if nackOut.Succeeded != 2 {
+		t.Fatalf("expected succeeded=2, got %d", nackOut.Succeeded)
+	}
+	if len(nackOut.Conflicts) != 0 {
+		t.Fatalf("expected no conflicts, got %#v", nackOut.Conflicts)
+	}
+
+	rrDeq2 := httptest.NewRecorder()
+	reqDeq2 := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1}`))
+	srv.ServeHTTP(rrDeq2, reqDeq2)
+	if rrDeq2.Code != http.StatusOK {
+		t.Fatalf("dequeue2 status: got %d", rrDeq2.Code)
+	}
+	var deq2 struct {
+		Items []any `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq2.Body.Bytes(), &deq2); err != nil {
+		t.Fatalf("decode dequeue2: %v", err)
+	}
+	if len(deq2.Items) != 0 {
+		t.Fatalf("expected no ready items before delay elapsed, got %d", len(deq2.Items))
+	}
+
+	nowVar = nowVar.Add(5 * time.Second)
+	rrDeq3 := httptest.NewRecorder()
+	reqDeq3 := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":2,"lease_ttl":"30s"}`))
+	srv.ServeHTTP(rrDeq3, reqDeq3)
+	if rrDeq3.Code != http.StatusOK {
+		t.Fatalf("dequeue3 status: got %d", rrDeq3.Code)
+	}
+	var deq3 struct {
+		Items []any `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq3.Body.Bytes(), &deq3); err != nil {
+		t.Fatalf("decode dequeue3: %v", err)
+	}
+	if len(deq3.Items) != 2 {
+		t.Fatalf("expected 2 items after delay, got %d", len(deq3.Items))
+	}
+}
+
+func TestPullAPI_NackBatchDeadPartialConflict(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+
+	if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/webhooks/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+		t.Fatalf("enqueue evt_1: %v", err)
+	}
+
+	srv := NewServer(store)
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	rrDeq := httptest.NewRecorder()
+	reqDeq := httptest.NewRequest(http.MethodPost, "http://example/pull/github/dequeue", strings.NewReader(`{"batch":1,"lease_ttl":"30s"}`))
+	srv.ServeHTTP(rrDeq, reqDeq)
+	if rrDeq.Code != http.StatusOK {
+		t.Fatalf("dequeue status: got %d", rrDeq.Code)
+	}
+	var deq struct {
+		Items []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rrDeq.Body.Bytes(), &deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(deq.Items))
+	}
+
+	rrNack := httptest.NewRecorder()
+	reqNack := httptest.NewRequest(http.MethodPost, "http://example/pull/github/nack", strings.NewReader(`{"lease_ids":["`+deq.Items[0].LeaseID+`","missing"],"dead":true,"reason":"no_retry"}`))
+	srv.ServeHTTP(rrNack, reqNack)
+	if rrNack.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rrNack.Code, rrNack.Body.String())
+	}
+	var nackOut nackBatchResponse
+	if err := json.Unmarshal(rrNack.Body.Bytes(), &nackOut); err != nil {
+		t.Fatalf("decode nack batch: %v", err)
+	}
+	if nackOut.Code != pullErrLeaseConflict {
+		t.Fatalf("expected code=%q, got %q", pullErrLeaseConflict, nackOut.Code)
+	}
+	if nackOut.Succeeded != 1 {
+		t.Fatalf("expected succeeded=1, got %d", nackOut.Succeeded)
+	}
+	if len(nackOut.Conflicts) != 1 || nackOut.Conflicts[0].LeaseID != "missing" {
+		t.Fatalf("unexpected conflicts: %#v", nackOut.Conflicts)
+	}
+
+	dead, err := store.ListDead(queue.DeadListRequest{Route: "/webhooks/github", Limit: 10})
+	if err != nil {
+		t.Fatalf("list dead: %v", err)
+	}
+	if len(dead.Items) != 1 {
+		t.Fatalf("expected one dead item, got %d", len(dead.Items))
 	}
 }
 

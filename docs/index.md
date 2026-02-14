@@ -66,6 +66,8 @@ graph LR
 | [Delivery](delivery.md) | Push retries, timeouts, concurrency, and signing |
 | [Security](security.md) | Secret refs, TLS/mTLS, replay protection, SSRF policy |
 | [Observability](observability.md) | Logs, metrics, tracing, and diagnostics |
+| [Adaptive Backpressure Tuning](adaptive-backpressure.md) | Production threshold tuning profiles and decision matrix |
+| [Performance Baselines](performance.md) | Reproducible Pull benchmark workflow and benchstat comparison |
 | [Management Model](management-model.md) | Application and endpoint mapping semantics |
 | [MCP Integration](mcp.md) | Tooling model, roles, and runtime controls |
 | [Docs Platform Decision](documentation-platform.md) | Why docs currently stay on MkDocs Material |

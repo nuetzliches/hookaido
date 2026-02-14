@@ -219,6 +219,148 @@ func TestSQLiteStore_MarkDead(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_LeaseBatchMethods(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+
+	for _, id := range []string{"evt_1", "evt_2", "evt_3"} {
+		if err := s.Enqueue(Envelope{ID: id, Route: "/pull/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+
+	deq, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 2, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(deq.Items) != 2 {
+		t.Fatalf("expected 2 dequeued items, got %d", len(deq.Items))
+	}
+
+	ackRes, err := s.AckBatch([]string{deq.Items[0].LeaseID, "missing", deq.Items[1].LeaseID})
+	if err != nil {
+		t.Fatalf("ack batch: %v", err)
+	}
+	if ackRes.Succeeded != 2 {
+		t.Fatalf("expected 2 successful acks, got %d", ackRes.Succeeded)
+	}
+	if len(ackRes.Conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %#v", ackRes.Conflicts)
+	}
+	if ackRes.Conflicts[0].LeaseID != "missing" || ackRes.Conflicts[0].Expired {
+		t.Fatalf("unexpected conflict: %#v", ackRes.Conflicts[0])
+	}
+
+	deq2, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue2: %v", err)
+	}
+	if len(deq2.Items) != 1 {
+		t.Fatalf("expected 1 dequeued item, got %d", len(deq2.Items))
+	}
+
+	nackRes, err := s.NackBatch([]string{deq2.Items[0].LeaseID}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nack batch: %v", err)
+	}
+	if nackRes.Succeeded != 1 || len(nackRes.Conflicts) != 0 {
+		t.Fatalf("unexpected nack batch result: %#v", nackRes)
+	}
+
+	deq3, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1})
+	if err != nil {
+		t.Fatalf("dequeue3: %v", err)
+	}
+	if len(deq3.Items) != 0 {
+		t.Fatalf("expected no items before nack delay elapsed, got %d", len(deq3.Items))
+	}
+
+	nowVar = nowVar.Add(5 * time.Second)
+	deq4, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue4: %v", err)
+	}
+	if len(deq4.Items) != 1 {
+		t.Fatalf("expected 1 dequeued item after delay, got %d", len(deq4.Items))
+	}
+
+	deadRes, err := s.MarkDeadBatch([]string{deq4.Items[0].LeaseID, "missing_dead"}, "no_retry")
+	if err != nil {
+		t.Fatalf("mark dead batch: %v", err)
+	}
+	if deadRes.Succeeded != 1 {
+		t.Fatalf("expected 1 successful dead mark, got %d", deadRes.Succeeded)
+	}
+	if len(deadRes.Conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %#v", deadRes.Conflicts)
+	}
+	if deadRes.Conflicts[0].LeaseID != "missing_dead" || deadRes.Conflicts[0].Expired {
+		t.Fatalf("unexpected conflict: %#v", deadRes.Conflicts[0])
+	}
+
+	var state string
+	var leaseIDDB *string
+	var deadReason sql.NullString
+	if err := s.db.QueryRow(`SELECT state, lease_id, dead_reason FROM queue_items WHERE id = ?;`, deq4.Items[0].ID).Scan(&state, &leaseIDDB, &deadReason); err != nil {
+		t.Fatalf("query dead item: %v", err)
+	}
+	if state != string(StateDead) {
+		t.Fatalf("state=%q, want %q", state, StateDead)
+	}
+	if leaseIDDB != nil {
+		t.Fatalf("expected lease_id NULL, got %q", *leaseIDDB)
+	}
+	if !deadReason.Valid || deadReason.String != "no_retry" {
+		t.Fatalf("dead_reason=%q, want %q", deadReason.String, "no_retry")
+	}
+}
+
+func TestSQLiteStore_AckBatchExpiredRequeues(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+
+	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	deq, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: time.Second})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(deq.Items) != 1 {
+		t.Fatalf("expected 1 dequeued item, got %d", len(deq.Items))
+	}
+	leaseID := deq.Items[0].LeaseID
+
+	nowVar = nowVar.Add(2 * time.Second)
+	res, err := s.AckBatch([]string{leaseID})
+	if err != nil {
+		t.Fatalf("ack batch: %v", err)
+	}
+	if res.Succeeded != 0 {
+		t.Fatalf("expected 0 successful acks, got %d", res.Succeeded)
+	}
+	if len(res.Conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %#v", res.Conflicts)
+	}
+	if res.Conflicts[0].LeaseID != leaseID || !res.Conflicts[0].Expired {
+		t.Fatalf("unexpected conflict: %#v", res.Conflicts[0])
+	}
+
+	deq2, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: time.Second})
+	if err != nil {
+		t.Fatalf("dequeue2: %v", err)
+	}
+	if len(deq2.Items) != 1 {
+		t.Fatalf("expected requeued item, got %d", len(deq2.Items))
+	}
+	if deq2.Items[0].Attempt != 2 {
+		t.Fatalf("expected attempt=2 after expired batch ack, got %d", deq2.Items[0].Attempt)
+	}
+}
+
 func TestSQLiteStore_ListDead(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now

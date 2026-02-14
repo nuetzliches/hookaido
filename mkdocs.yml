@@ -66,6 +66,8 @@ nav:
   - Operations:
       - Security: security.md
       - Observability: observability.md
+      - Adaptive Backpressure Tuning: adaptive-backpressure.md
+      - Performance Baselines: performance.md
   - Integrations:
       - MCP Integration: mcp.md
   - Project:

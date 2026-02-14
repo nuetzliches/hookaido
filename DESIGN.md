@@ -167,6 +167,7 @@ Persisted, replayable envelope:
 - `nack` requeues (optionally with delay). With `dead: true`, it moves the item to the DLQ.
 - `extend` extends lease TTL.
 - Invalid/expired lease operations return 409.
+- Recent duplicate retries of a previously successful `ack`/`nack` are treated as idempotent success.
 
 ### Queue Retention & Pruning
 - Controlled by `queue_retention { max_age, prune_interval }`.
@@ -191,6 +192,7 @@ Persisted, replayable envelope:
 
 ### Delivery Attempt Store
 - Push dispatcher records each delivery attempt (`acked`, `retry`, `dead`) with timestamp and result metadata.
+- `deliver_concurrency` is a shared per-route budget across route targets; for multi-target routes, dispatcher workers dequeue from the route queue and apply the matching target profile by `target`, allowing idle-target capacity to drain active-target backlog.
 - Attempt fields: `id`, `event_id`, `route`, `target`, `attempt`, `status_code`, `error`, `outcome`, `dead_reason`, `created_at`.
 - SQLite persists attempts in `delivery_attempts`; in-memory backend keeps attempts for runtime diagnostics/tests.
 
@@ -215,16 +217,32 @@ Endpoints:
 - `POST {endpoint}/nack`
 - `POST {endpoint}/extend`
 
+`ack` request forms:
+```json
+{ "lease_id": "lease_..." }
+```
+```json
+{ "lease_ids": ["lease_a", "lease_b"] }
+```
+Notes:
+- `ack` accepts either `lease_id` or `lease_ids` (not both).
+- `lease_ids` is deduplicated server-side and capped at 100 entries per request.
+- Batch-ack returns `200` with `{ "acked", "conflicts?" }` and uses `409` (`code=lease_conflict`) when one or more leases are invalid/expired.
+- Duplicate retries of already successful `ack` operations may be counted as successful idempotent no-ops.
+
 `nack` request (dead-letter supported):
 ```json
 { "lease_id": "lease_...", "delay": "5s", "dead": true, "reason": "no_retry" }
 ```
 Notes:
 - `dead: true` moves the item to the DLQ and ignores `delay`.
+- `nack` also accepts batch form via `lease_ids` (same dedupe + 100-entry cap as `ack`).
+- Batch-nack returns `200` with `{ "succeeded", "conflicts?" }` and uses `409` (`code=lease_conflict`) when one or more leases are invalid/expired.
+- Duplicate retries of already successful `nack`/`dead` operations may be counted as successful idempotent no-ops.
 
 Status codes (MVP):
 - 200 (dequeue; may return `items: []`)
-- 204 (ack/nack/extend)
+- 204 (single-lease ack/nack/extend)
 - 400 (invalid JSON body; unknown fields or trailing JSON documents are rejected)
 - 401 (auth)
 - 404 (pull endpoint or operation not found)

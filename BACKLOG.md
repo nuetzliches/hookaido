@@ -12,6 +12,9 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## P1 - Medium Priority (v1.x)
 
+- [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
+- [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
+- [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).
 - [x] **~~Management model runtime wiring~~** — All Admin API management fields wired in `run.go` (moved to Completed).
 - [x] **~~Config `validate --format json`~~** — Parse/file errors now respect `--format` flag; 7 CLI tests added (moved to Completed).
 - [x] **~~Egress policy enforcement~~** — Full test coverage added: deny-before-allow ordering, CIDR-deny-overrides-allow, subdomain wildcards, deny-only mode, empty policy, non-HTTP scheme, redirect blocked/followed/hop-recheck, HTTPS-only delivery denial (moved to Completed).
@@ -37,6 +40,9 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## Completed (move here when done)
 
+- [x] **Drain fairness under saturation** — Completed saturation tuning across push drain paths: route-shared workers with target-aware dequeue micro-batching (`single-target` up to 4, `multi-target` up to 2), single-target lease-mutation batching with fallback safety, and reproducible push benchmarks with reject-reason and tail-latency (`p95_ms`/`p99_ms`) guardrails.
+- [x] **Mixed-workload tail latency playbook** — Added reproducible mixed ingress+drain benchmark profile in `internal/pullapi/bench_test.go` (`BenchmarkMixedIngressDrain`) with `p95_ms`/`p99_ms` reporting and Makefile targets `bench-pull-mixed-baseline`, `bench-pull-mixed`, `bench-pull-mixed-compare`.
+- [x] **Adaptive backpressure production tuning guide** — Added dedicated operations guide `docs/adaptive-backpressure.md` with recommended starting profiles (`balanced`, `latency_first`, `throughput_first`), a metrics-first decision matrix, and guardrails for dashboard/version compatibility.
 - [x] **CII Best Practices badge** — OpenSSF Best Practices badge published at <https://www.bestpractices.dev/projects/11921>; `README.md` badge/link and docs references updated. Ongoing evidence/maintenance notes live in `docs/ossf-best-practices.md`.
 - [x] **Documentation UX refresh** — Refreshed docs information architecture in `mkdocs.yml` (grouped navigation), rebuilt `docs/index.md` with a landing hero + task-oriented quick paths, added command-palette style search shortcut (`Ctrl+K`) via `docs/assets/javascripts/command-palette.js`, added docs UX styling in `docs/assets/stylesheets/extra.css`, and documented docs-stack evaluation/decision in `docs/documentation-platform.md` (keep MkDocs Material for current roadmap window).
 - [x] **CII badge readiness docs** — Added `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`, `GOVERNANCE.md`, and `.github/CODEOWNERS`; linked governance/security docs from `README.md` and `docs/index.md` to prepare badge evidence links.
@@ -74,4 +80,3 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 - [x] **VS Code Extension** — TextMate grammar for full DSL syntax highlighting (top-level blocks, route paths, directives, auth keywords, channel types, placeholders, durations, built-in constants). 18 snippets for common blocks. File association for `Hookaidofile`, `*.hookaido`, `*.hkd`. Located in `editors/vscode/`.
 - [x] **Score hardening pass (round 2)** — Ingress body-too-large 413 + body-read-error 400 tests, egress DNS resolver error test, memory store Extend edge cases (unknown lease, expired lease, zero-duration noop), pull API dequeue-store-error 503 + unknown-operation 404 tests.
 - [x] **Score hardening pass (round 3)** — Pull API Ack/Nack/MarkDead store-error + lease-expired paths (6 tests), config secrets validation edge cases (5 subtests), HTTP deliverer signing-header-missing error (4 subtests), SQLite Extend zero/negative noop test.
-

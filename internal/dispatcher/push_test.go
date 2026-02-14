@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -382,9 +383,13 @@ func (s *drainableStore) Dequeue(req queue.DequeueRequest) (queue.DequeueRespons
 		time.Sleep(req.MaxWait)
 		return queue.DequeueResponse{}, nil
 	}
+	target := req.Target
+	if target == "" {
+		target = "https://target"
+	}
 	return queue.DequeueResponse{
 		Items: []queue.Envelope{
-			{ID: "evt-1", Route: req.Route, Target: req.Target, LeaseID: "lease-1", Attempt: 1, Payload: []byte(`{}`)},
+			{ID: "evt-1", Route: req.Route, Target: target, LeaseID: "lease-1", Attempt: 1, Payload: []byte(`{}`)},
 		},
 	}, nil
 }
@@ -455,5 +460,754 @@ func TestDrain_NilStopCh(t *testing.T) {
 	ok := d.Drain(time.Second)
 	if !ok {
 		t.Fatal("expected Drain to return true for unstarted dispatcher")
+	}
+}
+
+type stopRequeueStore struct {
+	stubPushStore
+	mu        sync.Mutex
+	dequeued  bool
+	onDequeue func()
+}
+
+func (s *stopRequeueStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dequeued {
+		time.Sleep(req.MaxWait)
+		return queue.DequeueResponse{}, nil
+	}
+	s.dequeued = true
+	if s.onDequeue != nil {
+		s.onDequeue()
+	}
+	target := req.Target
+	if target == "" {
+		target = "https://known-target"
+	}
+	return queue.DequeueResponse{
+		Items: []queue.Envelope{
+			{
+				ID:      "evt-stop",
+				Route:   req.Route,
+				Target:  target,
+				LeaseID: "lease-stop",
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+		},
+	}, nil
+}
+
+type missingTargetStore struct {
+	stubPushStore
+	mu       sync.Mutex
+	dequeued bool
+}
+
+func (s *missingTargetStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dequeued {
+		time.Sleep(req.MaxWait)
+		return queue.DequeueResponse{}, nil
+	}
+	s.dequeued = true
+	return queue.DequeueResponse{
+		Items: []queue.Envelope{
+			{
+				ID:      "evt-missing-target",
+				Route:   req.Route,
+				Target:  "https://unknown-target",
+				LeaseID: "lease-missing-target",
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+		},
+	}, nil
+}
+
+func TestRunRoute_StopBeforeDeliveryRequeuesLeasedItem(t *testing.T) {
+	d := PushDispatcher{
+		Deliverer: staticDeliverer{res: Result{StatusCode: 200}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		stopCh:    make(chan struct{}),
+	}
+	store := &stopRequeueStore{
+		onDequeue: func() {
+			close(d.stopCh)
+		},
+	}
+	d.Store = store
+	d.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		d.runRoute(
+			d.Logger,
+			"/test",
+			map[string]TargetConfig{
+				"https://known-target": {URL: "https://known-target", Timeout: 5 * time.Second},
+			},
+			20*time.Millisecond,
+			30*time.Second,
+			1,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRoute did not stop after stop signal")
+	}
+
+	if store.nackLeaseID != "lease-stop" {
+		t.Fatalf("expected stop-time requeue via nack for lease-stop, got %q", store.nackLeaseID)
+	}
+	if store.nackDelay != 0 {
+		t.Fatalf("expected stop-time nack delay=0, got %s", store.nackDelay)
+	}
+}
+
+type batchLeaseMutationStore struct {
+	stubPushStore
+	mu            sync.Mutex
+	items         []queue.Envelope
+	ackCalls      int
+	ackBatchCalls int
+	ackBatchIDs   []string
+	ackBatchErr   error
+}
+
+func (s *batchLeaseMutationStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.items) == 0 {
+		time.Sleep(req.MaxWait)
+		return queue.DequeueResponse{}, nil
+	}
+	n := req.Batch
+	if n <= 0 || n > len(s.items) {
+		n = len(s.items)
+	}
+	out := make([]queue.Envelope, n)
+	copy(out, s.items[:n])
+	s.items = s.items[n:]
+	return queue.DequeueResponse{Items: out}, nil
+}
+
+func (s *batchLeaseMutationStore) Ack(leaseID string) error {
+	s.mu.Lock()
+	s.ackCalls++
+	s.mu.Unlock()
+	return s.stubPushStore.Ack(leaseID)
+}
+
+func (s *batchLeaseMutationStore) AckBatch(leaseIDs []string) (queue.LeaseBatchResult, error) {
+	s.mu.Lock()
+	s.ackBatchCalls++
+	s.ackBatchIDs = append(s.ackBatchIDs, leaseIDs...)
+	err := s.ackBatchErr
+	s.mu.Unlock()
+	if err != nil {
+		return queue.LeaseBatchResult{}, err
+	}
+	return queue.LeaseBatchResult{Succeeded: len(leaseIDs)}, nil
+}
+
+func (s *batchLeaseMutationStore) NackBatch(_ []string, _ time.Duration) (queue.LeaseBatchResult, error) {
+	return queue.LeaseBatchResult{}, nil
+}
+
+func (s *batchLeaseMutationStore) MarkDeadBatch(_ []string, _ string) (queue.LeaseBatchResult, error) {
+	return queue.LeaseBatchResult{}, nil
+}
+
+func (s *batchLeaseMutationStore) snapshot() (ackCalls int, ackBatchCalls int, ackBatchIDs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ackBatchIDs = append(ackBatchIDs, s.ackBatchIDs...)
+	return s.ackCalls, s.ackBatchCalls, ackBatchIDs
+}
+
+func TestRunRoute_UsesAckBatchWhenStoreSupportsLeaseBatch(t *testing.T) {
+	store := &batchLeaseMutationStore{
+		items: []queue.Envelope{
+			{
+				ID:      "evt-1",
+				Route:   "/test",
+				Target:  "https://known-target",
+				LeaseID: "lease-1",
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+			{
+				ID:      "evt-2",
+				Route:   "/test",
+				Target:  "https://known-target",
+				LeaseID: "lease-2",
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+		},
+	}
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: staticDeliverer{res: Result{StatusCode: 200}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		stopCh:    make(chan struct{}),
+	}
+	d.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		d.runRoute(
+			d.Logger,
+			"/test",
+			map[string]TargetConfig{
+				"https://known-target": {URL: "https://known-target", Timeout: 5 * time.Second},
+			},
+			20*time.Millisecond,
+			30*time.Second,
+			2,
+		)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, ackBatchCalls, _ := store.snapshot()
+		if ackBatchCalls > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	ackCalls, ackBatchCalls, ackBatchIDs := store.snapshot()
+	if ackBatchCalls != 1 {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("expected one AckBatch call, got %d", ackBatchCalls)
+	}
+	if ackCalls != 0 {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("expected zero single Ack calls, got %d", ackCalls)
+	}
+	if len(ackBatchIDs) != 2 || ackBatchIDs[0] != "lease-1" || ackBatchIDs[1] != "lease-2" {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("unexpected AckBatch lease IDs: %#v", ackBatchIDs)
+	}
+
+	close(d.stopCh)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRoute did not stop")
+	}
+}
+
+func TestRunRoute_AckBatchFallbackUsesSingleAckOnBatchError(t *testing.T) {
+	store := &batchLeaseMutationStore{
+		ackBatchErr: errors.New("ack batch failed"),
+		items: []queue.Envelope{
+			{
+				ID:      "evt-1",
+				Route:   "/test",
+				Target:  "https://known-target",
+				LeaseID: "lease-1",
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+		},
+	}
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: staticDeliverer{res: Result{StatusCode: 200}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		stopCh:    make(chan struct{}),
+	}
+	d.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		d.runRoute(
+			d.Logger,
+			"/test",
+			map[string]TargetConfig{
+				"https://known-target": {URL: "https://known-target", Timeout: 5 * time.Second},
+			},
+			20*time.Millisecond,
+			30*time.Second,
+			2,
+		)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ackCalls, _, _ := store.snapshot()
+		if ackCalls > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	ackCalls, ackBatchCalls, _ := store.snapshot()
+	if ackBatchCalls != 1 {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("expected one AckBatch call, got %d", ackBatchCalls)
+	}
+	if ackCalls != 1 {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("expected fallback single Ack call count=1, got %d", ackCalls)
+	}
+
+	close(d.stopCh)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRoute did not stop")
+	}
+}
+
+func TestRunRoute_MultiTargetSkipsAckBatchMutations(t *testing.T) {
+	store := &batchLeaseMutationStore{
+		items: []queue.Envelope{
+			{
+				ID:      "evt-1",
+				Route:   "/test",
+				Target:  "https://target-a",
+				LeaseID: "lease-1",
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+			{
+				ID:      "evt-2",
+				Route:   "/test",
+				Target:  "https://target-b",
+				LeaseID: "lease-2",
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+		},
+	}
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: staticDeliverer{res: Result{StatusCode: 200}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		stopCh:    make(chan struct{}),
+	}
+	d.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		d.runRoute(
+			d.Logger,
+			"/test",
+			map[string]TargetConfig{
+				"https://target-a": {URL: "https://target-a", Timeout: 5 * time.Second},
+				"https://target-b": {URL: "https://target-b", Timeout: 5 * time.Second},
+			},
+			20*time.Millisecond,
+			30*time.Second,
+			2,
+		)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ackCalls, _, _ := store.snapshot()
+		if ackCalls >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	ackCalls, ackBatchCalls, _ := store.snapshot()
+	if ackBatchCalls != 0 {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("expected no AckBatch calls for multi-target route, got %d", ackBatchCalls)
+	}
+	if ackCalls != 2 {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("expected two single Ack calls, got %d", ackCalls)
+	}
+
+	close(d.stopCh)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRoute did not stop")
+	}
+}
+
+func TestRunRoute_MissingTargetNacksWithBackoff(t *testing.T) {
+	store := &missingTargetStore{}
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: staticDeliverer{res: Result{StatusCode: 200}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		stopCh:    make(chan struct{}),
+	}
+	d.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		d.runRoute(
+			d.Logger,
+			"/test",
+			map[string]TargetConfig{
+				"https://known-target": {URL: "https://known-target", Timeout: 5 * time.Second},
+			},
+			20*time.Millisecond,
+			30*time.Second,
+			1,
+		)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if store.nackLeaseID == "lease-missing-target" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if store.nackLeaseID != "lease-missing-target" {
+		close(d.stopCh)
+		<-done
+		t.Fatal("expected missing target lease to be nacked")
+	}
+	if store.nackDelay != time.Second {
+		close(d.stopCh)
+		<-done
+		t.Fatalf("expected missing target nack delay=1s, got %s", store.nackDelay)
+	}
+
+	close(d.stopCh)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRoute did not stop")
+	}
+}
+
+func TestTargetConfigByURL(t *testing.T) {
+	targets := []TargetConfig{
+		{URL: "https://a", Timeout: 5 * time.Second},
+		{URL: "https://b", Timeout: 7 * time.Second},
+	}
+	byURL := targetConfigByURL(targets)
+	if len(byURL) != 2 {
+		t.Fatalf("target map len=%d, want 2", len(byURL))
+	}
+	if byURL["https://a"].Timeout != 5*time.Second {
+		t.Fatalf("target a timeout=%s, want 5s", byURL["https://a"].Timeout)
+	}
+	if byURL["https://b"].Timeout != 7*time.Second {
+		t.Fatalf("target b timeout=%s, want 7s", byURL["https://b"].Timeout)
+	}
+}
+
+func TestRouteLeaseTTL(t *testing.T) {
+	targets := []TargetConfig{
+		{URL: "https://fast", Timeout: 2 * time.Second},
+		{URL: "https://slow", Timeout: 9 * time.Second},
+	}
+	if got := routeLeaseTTL(targets, 30*time.Second); got != 39*time.Second {
+		t.Fatalf("routeLeaseTTL=%s, want 39s", got)
+	}
+
+	if got := routeLeaseTTL([]TargetConfig{{URL: "https://default"}}, 5*time.Second); got != 30*time.Second {
+		t.Fatalf("routeLeaseTTL default=%s, want 30s floor", got)
+	}
+}
+
+func TestRouteDequeueBatch(t *testing.T) {
+	cases := []struct {
+		name        string
+		concurrency int
+		targetCount int
+		want        int
+	}{
+		{name: "zero defaults to one", concurrency: 0, targetCount: 1, want: 1},
+		{name: "single worker", concurrency: 1, targetCount: 1, want: 1},
+		{name: "two workers", concurrency: 2, targetCount: 1, want: 2},
+		{name: "three workers", concurrency: 3, targetCount: 1, want: 3},
+		{name: "capped at four", concurrency: 8, targetCount: 1, want: 4},
+		{name: "multi target caps dequeue at two", concurrency: 8, targetCount: 2, want: 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := routeDequeueBatch(tc.concurrency, tc.targetCount); got != tc.want {
+				t.Fatalf("routeDequeueBatch(%d,%d)=%d, want %d", tc.concurrency, tc.targetCount, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRouteMutationBatch(t *testing.T) {
+	cases := []struct {
+		name         string
+		dequeueBatch int
+		want         int
+	}{
+		{name: "single", dequeueBatch: 1, want: 1},
+		{name: "two", dequeueBatch: 2, want: 2},
+		{name: "three maps to two", dequeueBatch: 3, want: 2},
+		{name: "four maps to two", dequeueBatch: 4, want: 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := routeMutationBatch(tc.dequeueBatch); got != tc.want {
+				t.Fatalf("routeMutationBatch(%d)=%d, want %d", tc.dequeueBatch, got, tc.want)
+			}
+		})
+	}
+}
+
+type concurrencyProbeStore struct {
+	stubPushStore
+	mu    sync.Mutex
+	next  int
+	total int
+}
+
+func (s *concurrencyProbeStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	s.mu.Lock()
+	if s.next >= s.total {
+		s.mu.Unlock()
+		time.Sleep(req.MaxWait)
+		return queue.DequeueResponse{}, nil
+	}
+	id := s.next
+	s.next++
+	s.mu.Unlock()
+
+	leaseID := "lease-" + strconv.Itoa(id)
+	eventID := "evt-" + strconv.Itoa(id)
+	target := req.Target
+	if target == "" {
+		target = "https://target"
+	}
+	return queue.DequeueResponse{
+		Items: []queue.Envelope{
+			{
+				ID:      eventID,
+				Route:   req.Route,
+				Target:  target,
+				LeaseID: leaseID,
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+		},
+	}, nil
+}
+
+type gatingDeliverer struct {
+	gate        <-chan struct{}
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
+}
+
+func (d *gatingDeliverer) Deliver(ctx context.Context, _ Delivery) Result {
+	inFlight := d.inFlight.Add(1)
+	for {
+		prev := d.maxInFlight.Load()
+		if inFlight <= prev {
+			break
+		}
+		if d.maxInFlight.CompareAndSwap(prev, inFlight) {
+			break
+		}
+	}
+	defer d.inFlight.Add(-1)
+
+	select {
+	case <-d.gate:
+		return Result{StatusCode: http.StatusNoContent}
+	case <-ctx.Done():
+		return Result{Err: ctx.Err()}
+	}
+}
+
+func TestDispatcher_StartSingleTargetUsesConfiguredConcurrency(t *testing.T) {
+	const routeConcurrency = 4
+
+	store := &concurrencyProbeStore{total: routeConcurrency * 2}
+	gate := make(chan struct{})
+	var gateClose sync.Once
+	releaseGate := func() {
+		gateClose.Do(func() { close(gate) })
+	}
+	deliverer := &gatingDeliverer{gate: gate}
+
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: deliverer,
+		Routes: []RouteConfig{
+			{
+				Route: "/test",
+				Targets: []TargetConfig{
+					{
+						URL:     "https://target",
+						Timeout: 5 * time.Second,
+						Retry: RetryConfig{
+							Max: 1,
+						},
+					},
+				},
+				Concurrency: routeConcurrency,
+			},
+		},
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxWait: 10 * time.Millisecond,
+	}
+
+	d.Start()
+	defer releaseGate()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if int(deliverer.maxInFlight.Load()) >= routeConcurrency {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	gotMax := int(deliverer.maxInFlight.Load())
+	if gotMax < routeConcurrency {
+		releaseGate()
+		_ = d.Drain(100 * time.Millisecond)
+		t.Fatalf("max in-flight deliveries=%d, want at least %d", gotMax, routeConcurrency)
+	}
+
+	// Unblock all in-flight deliveries and drain workers.
+	releaseGate()
+	if ok := d.Drain(2 * time.Second); !ok {
+		t.Fatal("expected dispatcher drain to complete")
+	}
+}
+
+type multiTargetProbeStore struct {
+	stubPushStore
+	mu        sync.Mutex
+	hotTarget string
+	next      int
+	total     int
+}
+
+func (s *multiTargetProbeStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	s.mu.Lock()
+	if s.next >= s.total {
+		s.mu.Unlock()
+		time.Sleep(req.MaxWait)
+		return queue.DequeueResponse{}, nil
+	}
+
+	// Optional target filtering is supported by the stub, but runRoute dequeues route-wide.
+	if req.Target != "" && req.Target != s.hotTarget {
+		s.mu.Unlock()
+		time.Sleep(req.MaxWait)
+		return queue.DequeueResponse{}, nil
+	}
+
+	id := s.next
+	s.next++
+	s.mu.Unlock()
+
+	leaseID := "lease-hot-" + strconv.Itoa(id)
+	eventID := "evt-hot-" + strconv.Itoa(id)
+	return queue.DequeueResponse{
+		Items: []queue.Envelope{
+			{
+				ID:      eventID,
+				Route:   req.Route,
+				Target:  s.hotTarget,
+				LeaseID: leaseID,
+				Attempt: 1,
+				Payload: []byte(`{}`),
+			},
+		},
+	}, nil
+}
+
+func TestDispatcher_StartMultiTargetSharesWorkersAcrossTargets(t *testing.T) {
+	const routeConcurrency = 4
+
+	hotTarget := "https://hot-target"
+	coldTarget := "https://cold-target"
+
+	store := &multiTargetProbeStore{
+		hotTarget: hotTarget,
+		total:     routeConcurrency * 3,
+	}
+	gate := make(chan struct{})
+	var gateClose sync.Once
+	releaseGate := func() {
+		gateClose.Do(func() { close(gate) })
+	}
+	deliverer := &gatingDeliverer{gate: gate}
+
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: deliverer,
+		Routes: []RouteConfig{
+			{
+				Route: "/test",
+				Targets: []TargetConfig{
+					{
+						URL:     hotTarget,
+						Timeout: 5 * time.Second,
+						Retry: RetryConfig{
+							Max: 1,
+						},
+					},
+					{
+						URL:     coldTarget,
+						Timeout: 5 * time.Second,
+						Retry: RetryConfig{
+							Max: 1,
+						},
+					},
+				},
+				Concurrency: routeConcurrency,
+			},
+		},
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxWait: 10 * time.Millisecond,
+	}
+
+	d.Start()
+	defer releaseGate()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if int(deliverer.maxInFlight.Load()) >= routeConcurrency {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	gotMax := int(deliverer.maxInFlight.Load())
+	if gotMax < routeConcurrency {
+		releaseGate()
+		_ = d.Drain(100 * time.Millisecond)
+		t.Fatalf("max in-flight deliveries=%d, want at least %d", gotMax, routeConcurrency)
+	}
+
+	releaseGate()
+	if ok := d.Drain(2 * time.Second); !ok {
+		t.Fatal("expected dispatcher drain to complete")
 	}
 }

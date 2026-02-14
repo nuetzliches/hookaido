@@ -157,6 +157,8 @@ Queue tool backend behavior:
 - When compiled `queue_backend` is `sqlite`, MCP queue tools use direct SQLite access.
 - When compiled `queue_backend` is `memory`, MCP queue tools proxy the configured Admin API endpoints.
 - Memory backend proxy mode requires a running Hookaido instance that serves the Admin API.
+- Pull worker operations remain Pull API-only; MCP does not expose dequeue/ack/nack/extend endpoints (including Pull API batch ack/nack via `lease_ids`).
+- Coverage decision: Pull API lease-retry idempotency (`ack`/`nack` duplicate success window) remains Pull runtime behavior only; no MCP tool surface changes required.
 - In proxy mode, queue read (`GET`) calls use bounded retries for transient failures (`408/429/5xx` and transport errors).
 - Proxy errors map common Admin statuses (`400/401/403/404/409/429/503`) to explicit MCP error messages and include structured response metadata when available (`code`, `item_index`, `detail`).
 - Mutation tools that accept audit metadata enforce Admin-aligned limits: `reason` max `512` chars, `actor` max `256`, `request_id` max `256`.

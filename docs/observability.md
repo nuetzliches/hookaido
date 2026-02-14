@@ -198,6 +198,13 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_tracing_init_failures_total` | counter | Tracing initialization failures |
 | `hookaido_tracing_export_errors_total` | counter | Tracing export errors           |
 
+**Compatibility/version metrics:**
+
+| Metric                                 | Type  | Description                                             |
+| -------------------------------------- | ----- | ------------------------------------------------------- |
+| `hookaido_build_info{version=...}`     | gauge | Process version label for dashboard/version gating      |
+| `hookaido_metrics_schema_info{schema=...}` | gauge | Metrics schema version label for compatibility guards |
+
 ## Tracing
 
 OpenTelemetry OTLP/HTTP traces for request-level observability. HTTP servers (ingress, Pull API, Admin API) and the outbound push dispatcher client are instrumented.
@@ -307,6 +314,26 @@ To validate improvements in your environment, compare before/after load runs usi
 - `hookaido_store_sqlite_busy_total` and `hookaido_store_sqlite_retry_total` growth rate
 
 See [Admin API](admin-api.md) for details.
+
+## Adaptive Backpressure Tuning
+
+Use the dedicated production runbook in [Adaptive Backpressure Tuning](adaptive-backpressure.md).
+
+Key principle:
+- `defaults.adaptive_backpressure` should react before hard `queue_limits.max_depth` pressure, not after.
+
+Use these series together:
+- `hookaido_ingress_adaptive_backpressure_total{reason}`
+- `hookaido_ingress_rejected_by_reason_total{reason,status}`
+- ingress latency p95/p99 from HTTP telemetry
+
+## Dashboard Compatibility Notes
+
+When dashboards span mixed Hookaido versions (for example `v1.1.x` and `v1.2.x`), treat missing metrics as "not emitted" rather than zero:
+
+- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.2.0"} == 1` (or `hookaido_build_info` version labels).
+- In PromQL, prefer compatibility-safe expressions (for example `metric OR on() vector(0)`) where appropriate.
+- Document minimum supported Hookaido version per dashboard bundle to avoid false "all good" signals from absent series.
 
 ## Audit Logging
 

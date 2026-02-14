@@ -175,6 +175,25 @@ type AttemptListResponse struct {
 	Items []DeliveryAttempt
 }
 
+type LeaseBatchConflict struct {
+	LeaseID string
+	Expired bool
+}
+
+type LeaseBatchResult struct {
+	Succeeded int
+	Conflicts []LeaseBatchConflict
+}
+
+// LeaseBatchStore is an optional extension for batched lease operations.
+// Implementations should process the whole batch in one store transaction
+// where possible and return per-lease conflicts for not-found/expired leases.
+type LeaseBatchStore interface {
+	AckBatch(leaseIDs []string) (LeaseBatchResult, error)
+	NackBatch(leaseIDs []string, delay time.Duration) (LeaseBatchResult, error)
+	MarkDeadBatch(leaseIDs []string, reason string) (LeaseBatchResult, error)
+}
+
 type BacklogTrendSample struct {
 	CapturedAt time.Time
 	Queued     int

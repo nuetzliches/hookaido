@@ -121,7 +121,42 @@ Acknowledges successful processing. The message is permanently removed from the 
 }
 ```
 
-**Response:** `204 No Content`
+Batch form (single HTTP roundtrip for multiple leases):
+
+```json
+{
+  "lease_ids": ["lease_xyz789", "lease_xyz790"]
+}
+```
+
+- Use either `lease_id` or `lease_ids`, not both.
+- `lease_ids` is deduplicated server-side and bounded to 100 items per request.
+
+**Responses:**
+
+- Single-lease form: `204 No Content`
+- Batch form success: `200 OK`
+
+```json
+{
+  "acked": 2
+}
+```
+
+- Batch form with invalid/expired leases: `409 Conflict`
+
+```json
+{
+  "code": "lease_conflict",
+  "detail": "one or more leases are invalid or expired",
+  "acked": 1,
+  "conflicts": [
+    { "lease_id": "lease_xyz790", "reason": "lease_not_found" }
+  ]
+}
+```
+
+- Duplicate `ack` retries for a recently completed lease are treated as idempotent success (`204` for single, counted as success in batch).
 
 ### `POST {endpoint}/nack`
 
@@ -147,7 +182,45 @@ Rejects a message, putting it back into the queue for reprocessing.
 
 - When `dead: true`, the `delay` is ignored and the message moves to the DLQ immediately.
 
-**Response:** `204 No Content`
+Batch form:
+
+```json
+{
+  "lease_ids": ["lease_xyz789", "lease_xyz790"],
+  "delay": "5s",
+  "dead": false
+}
+```
+
+- Use either `lease_id` or `lease_ids`, not both.
+- `lease_ids` is deduplicated server-side and bounded to 100 items per request.
+- `dead: true` works with batch form as well.
+
+**Responses:**
+
+- Single-lease form: `204 No Content`
+- Batch form success: `200 OK`
+
+```json
+{
+  "succeeded": 2
+}
+```
+
+- Batch form with invalid/expired leases: `409 Conflict`
+
+```json
+{
+  "code": "lease_conflict",
+  "detail": "one or more leases are invalid or expired",
+  "succeeded": 1,
+  "conflicts": [
+    { "lease_id": "lease_xyz790", "reason": "lease_not_found" }
+  ]
+}
+```
+
+- Duplicate `nack`/`dead` retries for a recently completed lease are treated as idempotent success (`204` for single, counted as success in batch).
 
 ### `POST {endpoint}/extend`
 
@@ -174,7 +247,7 @@ Messages use a lease-based visibility model:
 4. Use `extend` to renew the lease if processing takes longer than expected.
 5. `nack` explicitly requeues (with optional delay) or dead-letters the message.
 
-**Invalid/expired lease operations return `409 Conflict`.**
+**Invalid/expired lease operations return `409 Conflict`.** Recent duplicate retries of an already successful `ack`/`nack` operation may be accepted as idempotent success.
 
 ## Error Responses
 
@@ -192,7 +265,7 @@ All non-2xx responses return structured JSON:
 | `400`  | `invalid_body`   | Malformed JSON, unknown fields, or trailing documents |
 | `401`  | `unauthorized`   | Missing or invalid bearer token                       |
 | `403`  | `forbidden`      | Token not in allowlist for this route                 |
-| `409`  | `lease_expired`  | Lease ID is invalid or has expired                    |
+| `409`  | `lease_conflict` | Lease ID is invalid or has expired                    |
 | `429`  | `rate_limited`   | Rate limit exceeded                                   |
 | `503`  | `queue_overload` | Queue backend is unavailable                          |
 

@@ -30,6 +30,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 - [x] **~~Documentation UX refresh~~** — Moved to Completed.
 - [ ] **Optional gRPC worker API (Phase 2)** — Add an opt-in gRPC surface for internal worker flows (`dequeue`, `ack`, `nack`, `extend`) with auth parity (mTLS/token), while keeping HTTP Pull/Admin APIs as the default and preserving current runtime semantics.
   - [x] Draft worker transport contract (`internal/workerapi/proto/workerapi.proto`) aligned with Pull API operation semantics.
+  - [x] Extracted transport-neutral Pull operations in `internal/pullapi/ops.go` and switched HTTP handlers to use them (shared semantics base for gRPC adapter).
   - [ ] Add opt-in runtime listener/config wiring with mTLS/token auth parity.
   - [ ] Implement gRPC handlers via shared pull/queue operation layer (no semantic drift).
   - [ ] Add integration + E2E coverage (dequeue/ack/nack/extend, conflicts, auth, replay/idempotent retry parity).

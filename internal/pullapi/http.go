@@ -144,14 +144,6 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 		return
 	}
 
-	batch := req.Batch
-	if batch <= 0 {
-		batch = 1
-	}
-	if s.MaxBatch > 0 && batch > s.MaxBatch {
-		batch = s.MaxBatch
-	}
-
 	maxWait, ok := parseDuration(req.MaxWait)
 	if !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "max_wait must be a valid duration")
@@ -175,25 +167,21 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 		}
 		leaseTTL = d
 	}
-	if s.MaxLeaseTTL > 0 && leaseTTL > s.MaxLeaseTTL {
-		leaseTTL = s.MaxLeaseTTL
-	}
 
-	resp, err := s.Store.Dequeue(queue.DequeueRequest{
-		Route:    route,
-		Target:   s.Target,
-		Batch:    batch,
-		MaxWait:  maxWait,
-		LeaseTTL: leaseTTL,
+	outcome, opErr := s.Dequeue(route, DequeueParams{
+		Batch:       req.Batch,
+		MaxWait:     maxWait,
+		HasMaxWait:  req.MaxWait != "",
+		LeaseTTL:    leaseTTL,
+		HasLeaseTTL: req.LeaseTTL != "",
 	})
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, pullErrStoreUnavailable, "dequeue is temporarily unavailable")
-		s.observeDequeue(route, http.StatusServiceUnavailable, nil)
+	if opErr != nil {
+		writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 		return
 	}
 
-	out := dequeueResponse{Items: make([]dequeueItem, 0, len(resp.Items))}
-	for _, it := range resp.Items {
+	out := dequeueResponse{Items: make([]dequeueItem, 0, len(outcome.Items))}
+	for _, it := range outcome.Items {
 		out.Items = append(out.Items, dequeueItem{
 			ID:         it.ID,
 			LeaseID:    it.LeaseID,
@@ -210,7 +198,6 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(out)
-	s.observeDequeue(route, http.StatusOK, resp.Items)
 }
 
 type leaseRequest struct {
@@ -255,113 +242,26 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request, route string)
 		return
 	}
 	if !isBatch {
-		s.handleAckSingle(w, route, leaseIDs[0])
-		return
-	}
-	s.handleAckBatch(w, route, leaseIDs)
-}
-
-func (s *Server) handleAckSingle(w http.ResponseWriter, route string, leaseID string) {
-	if s.isRecentlyCompletedLease(leaseID, recentLeaseOpAck) {
+		if opErr := s.AckSingle(route, leaseIDs[0]); opErr != nil {
+			writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
-		s.observeAck(route, http.StatusNoContent, leaseID, false)
 		return
 	}
 
-	if err := s.Store.Ack(leaseID); err != nil {
-		if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
-			writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
-			s.observeAck(route, http.StatusConflict, leaseID, errors.Is(err, queue.ErrLeaseExpired))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, pullErrInternal, "ack failed")
-		s.observeAck(route, http.StatusInternalServerError, leaseID, false)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-	s.observeAck(route, http.StatusNoContent, leaseID, false)
-	s.rememberCompletedLease(leaseID, recentLeaseOpAck)
-}
-
-func (s *Server) handleAckBatch(w http.ResponseWriter, route string, leaseIDs []string) {
-	pendingLeaseIDs, completedLeaseIDs := s.partitionRecentlyCompletedLeases(leaseIDs, recentLeaseOpAck)
-	for _, leaseID := range completedLeaseIDs {
-		s.observeAck(route, http.StatusNoContent, leaseID, false)
-	}
-
-	ackedFromCompleted := len(completedLeaseIDs)
-	if len(pendingLeaseIDs) == 0 {
-		writeJSON(w, http.StatusOK, ackBatchResponse{Acked: ackedFromCompleted})
-		return
-	}
-
-	if batchStore, ok := s.Store.(queue.LeaseBatchStore); ok {
-		res, err := batchStore.AckBatch(pendingLeaseIDs)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, pullErrInternal, "ack failed")
-			s.observeAck(route, http.StatusInternalServerError, "", false)
-			return
-		}
-
-		observeBatchAck(s, route, pendingLeaseIDs, res)
-		for _, leaseID := range s.successfulLeaseIDs(pendingLeaseIDs, res.Conflicts) {
-			s.rememberCompletedLease(leaseID, recentLeaseOpAck)
-		}
-
-		status := http.StatusOK
-		out := ackBatchResponse{
-			Acked:     ackedFromCompleted + res.Succeeded,
-			Conflicts: mapLeaseBatchConflicts(res.Conflicts),
-		}
-		if len(res.Conflicts) > 0 {
-			status = http.StatusConflict
-			out.Code = pullErrLeaseConflict
-			out.Detail = "one or more leases are invalid or expired"
-		}
-		writeJSON(w, status, out)
-		return
-	}
-
-	acked := 0
-	conflicts := make([]ackBatchConflict, 0)
-
-	for _, leaseID := range pendingLeaseIDs {
-		err := s.Store.Ack(leaseID)
-		if err == nil {
-			acked++
-			s.observeAck(route, http.StatusNoContent, leaseID, false)
-			s.rememberCompletedLease(leaseID, recentLeaseOpAck)
-			continue
-		}
-		if errors.Is(err, queue.ErrLeaseExpired) {
-			conflicts = append(conflicts, ackBatchConflict{
-				LeaseID: leaseID,
-				Reason:  "lease_expired",
-			})
-			s.observeAck(route, http.StatusConflict, leaseID, true)
-			continue
-		}
-		if errors.Is(err, queue.ErrLeaseNotFound) {
-			conflicts = append(conflicts, ackBatchConflict{
-				LeaseID: leaseID,
-				Reason:  "lease_not_found",
-			})
-			s.observeAck(route, http.StatusConflict, leaseID, false)
-			continue
-		}
-
-		writeError(w, http.StatusInternalServerError, pullErrInternal, "ack failed")
-		s.observeAck(route, http.StatusInternalServerError, leaseID, false)
+	outcome, opErr := s.AckBatch(route, leaseIDs)
+	if opErr != nil {
+		writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 		return
 	}
 
 	status := http.StatusOK
 	out := ackBatchResponse{
-		Acked:     ackedFromCompleted + acked,
-		Conflicts: conflicts,
+		Acked:     outcome.Succeeded,
+		Conflicts: mapLeaseBatchConflicts(outcome.Conflicts),
 	}
-	if len(conflicts) > 0 {
+	if len(outcome.Conflicts) > 0 {
 		status = http.StatusConflict
 		out.Code = pullErrLeaseConflict
 		out.Detail = "one or more leases are invalid or expired"
@@ -383,60 +283,20 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, route string
 		return
 	}
 	if !isBatch {
-		s.handleNackSingle(w, route, req, leaseIDs[0])
-		return
-	}
-	s.handleNackBatch(w, route, req, leaseIDs)
-}
-
-func (s *Server) handleNackSingle(w http.ResponseWriter, route string, req leaseRequest, leaseID string) {
-	if s.isRecentlyCompletedLease(leaseID, recentLeaseOpNack) {
-		w.WriteHeader(http.StatusNoContent)
-		s.observeNack(route, http.StatusNoContent, leaseID, false)
-		return
-	}
-
-	if req.Dead {
-		if err := s.Store.MarkDead(leaseID, req.Reason); err != nil {
-			if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
-				writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
-				s.observeNack(route, http.StatusConflict, leaseID, errors.Is(err, queue.ErrLeaseExpired))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, pullErrInternal, "mark dead failed")
-			s.observeNack(route, http.StatusInternalServerError, leaseID, false)
+		delay, ok := parseDuration(req.Delay)
+		if !req.Dead && !ok {
+			writeError(w, http.StatusBadRequest, pullErrInvalidBody, "delay must be a valid duration")
+			s.observeNack(route, http.StatusBadRequest, leaseIDs[0], false)
+			return
+		}
+		if opErr := s.NackSingle(route, leaseIDs[0], req.Dead, req.Reason, delay); opErr != nil {
+			writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-		s.observeNack(route, http.StatusNoContent, leaseID, false)
-		s.rememberCompletedLease(leaseID, recentLeaseOpNack)
 		return
 	}
 
-	delay, ok := parseDuration(req.Delay)
-	if !ok {
-		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "delay must be a valid duration")
-		s.observeNack(route, http.StatusBadRequest, leaseID, false)
-		return
-	}
-
-	if err := s.Store.Nack(leaseID, delay); err != nil {
-		if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
-			writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
-			s.observeNack(route, http.StatusConflict, leaseID, errors.Is(err, queue.ErrLeaseExpired))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, pullErrInternal, "nack failed")
-		s.observeNack(route, http.StatusInternalServerError, leaseID, false)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-	s.observeNack(route, http.StatusNoContent, leaseID, false)
-	s.rememberCompletedLease(leaseID, recentLeaseOpNack)
-}
-
-func (s *Server) handleNackBatch(w http.ResponseWriter, route string, req leaseRequest, leaseIDs []string) {
 	delay, ok := parseDuration(req.Delay)
 	if !req.Dead && !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "delay must be a valid duration")
@@ -444,104 +304,18 @@ func (s *Server) handleNackBatch(w http.ResponseWriter, route string, req leaseR
 		return
 	}
 
-	pendingLeaseIDs, completedLeaseIDs := s.partitionRecentlyCompletedLeases(leaseIDs, recentLeaseOpNack)
-	for _, leaseID := range completedLeaseIDs {
-		s.observeNack(route, http.StatusNoContent, leaseID, false)
-	}
-
-	succeededFromCompleted := len(completedLeaseIDs)
-	if len(pendingLeaseIDs) == 0 {
-		writeJSON(w, http.StatusOK, nackBatchResponse{Succeeded: succeededFromCompleted})
-		return
-	}
-
-	if batchStore, ok := s.Store.(queue.LeaseBatchStore); ok {
-		var (
-			res queue.LeaseBatchResult
-			err error
-		)
-		if req.Dead {
-			res, err = batchStore.MarkDeadBatch(pendingLeaseIDs, req.Reason)
-		} else {
-			res, err = batchStore.NackBatch(pendingLeaseIDs, delay)
-		}
-		if err != nil {
-			if req.Dead {
-				writeError(w, http.StatusInternalServerError, pullErrInternal, "mark dead failed")
-			} else {
-				writeError(w, http.StatusInternalServerError, pullErrInternal, "nack failed")
-			}
-			s.observeNack(route, http.StatusInternalServerError, "", false)
-			return
-		}
-
-		observeBatchNack(s, route, pendingLeaseIDs, res)
-		for _, leaseID := range s.successfulLeaseIDs(pendingLeaseIDs, res.Conflicts) {
-			s.rememberCompletedLease(leaseID, recentLeaseOpNack)
-		}
-
-		status := http.StatusOK
-		out := nackBatchResponse{
-			Succeeded: succeededFromCompleted + res.Succeeded,
-			Conflicts: mapLeaseBatchConflicts(res.Conflicts),
-		}
-		if len(res.Conflicts) > 0 {
-			status = http.StatusConflict
-			out.Code = pullErrLeaseConflict
-			out.Detail = "one or more leases are invalid or expired"
-		}
-		writeJSON(w, status, out)
-		return
-	}
-
-	succeeded := 0
-	conflicts := make([]ackBatchConflict, 0)
-
-	for _, leaseID := range pendingLeaseIDs {
-		var err error
-		if req.Dead {
-			err = s.Store.MarkDead(leaseID, req.Reason)
-		} else {
-			err = s.Store.Nack(leaseID, delay)
-		}
-		if err == nil {
-			succeeded++
-			s.observeNack(route, http.StatusNoContent, leaseID, false)
-			s.rememberCompletedLease(leaseID, recentLeaseOpNack)
-			continue
-		}
-		if errors.Is(err, queue.ErrLeaseExpired) {
-			conflicts = append(conflicts, ackBatchConflict{
-				LeaseID: leaseID,
-				Reason:  "lease_expired",
-			})
-			s.observeNack(route, http.StatusConflict, leaseID, true)
-			continue
-		}
-		if errors.Is(err, queue.ErrLeaseNotFound) {
-			conflicts = append(conflicts, ackBatchConflict{
-				LeaseID: leaseID,
-				Reason:  "lease_not_found",
-			})
-			s.observeNack(route, http.StatusConflict, leaseID, false)
-			continue
-		}
-
-		if req.Dead {
-			writeError(w, http.StatusInternalServerError, pullErrInternal, "mark dead failed")
-		} else {
-			writeError(w, http.StatusInternalServerError, pullErrInternal, "nack failed")
-		}
-		s.observeNack(route, http.StatusInternalServerError, leaseID, false)
+	outcome, opErr := s.NackBatch(route, leaseIDs, req.Dead, req.Reason, delay)
+	if opErr != nil {
+		writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 		return
 	}
 
 	status := http.StatusOK
 	out := nackBatchResponse{
-		Succeeded: succeededFromCompleted + succeeded,
-		Conflicts: conflicts,
+		Succeeded: outcome.Succeeded,
+		Conflicts: mapLeaseBatchConflicts(outcome.Conflicts),
 	}
-	if len(conflicts) > 0 {
+	if len(outcome.Conflicts) > 0 {
 		status = http.StatusConflict
 		out.Code = pullErrLeaseConflict
 		out.Detail = "one or more leases are invalid or expired"
@@ -616,19 +390,12 @@ func (s *Server) handleExtend(w http.ResponseWriter, r *http.Request, route stri
 		return
 	}
 
-	if err := s.Store.Extend(req.LeaseID, extendBy); err != nil {
-		if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
-			writeError(w, http.StatusConflict, pullErrLeaseConflict, "lease is invalid or expired")
-			s.observeExtend(route, http.StatusConflict, req.LeaseID, extendBy, errors.Is(err, queue.ErrLeaseExpired))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, pullErrInternal, "extend failed")
-		s.observeExtend(route, http.StatusInternalServerError, req.LeaseID, extendBy, false)
+	if opErr := s.Extend(route, req.LeaseID, extendBy); opErr != nil {
+		writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-	s.observeExtend(route, http.StatusNoContent, req.LeaseID, extendBy, false)
 }
 
 func (s *Server) resolveRoute(endpoint string) (string, bool) {

@@ -12,6 +12,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## P1 - Medium Priority (v1.x)
 
+- [ ] **Store observability backend-agnostic metrics (#38)** — In progress: unify store runtime metric vocabulary with backend/operation labels (`hookaido_store_operation_seconds`, `hookaido_store_operation_total`, `hookaido_store_errors_total`) while keeping backend-specific compatibility series.
 - [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
 - [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
 - [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).

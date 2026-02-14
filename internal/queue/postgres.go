@@ -30,6 +30,24 @@ type PostgresStore struct {
 	deliveredRetentionMaxAge time.Duration
 	dlqRetentionMaxAge       time.Duration
 	dlqMaxDepth              int
+
+	metrics *postgresRuntimeMetrics
+}
+
+type postgresRuntimeMetrics struct {
+	mu sync.Mutex
+
+	operationDuration map[string]sqliteHistogram
+	operationTotal    map[string]int64
+	errorsTotal       map[string]map[string]int64
+}
+
+func newPostgresRuntimeMetrics() *postgresRuntimeMetrics {
+	return &postgresRuntimeMetrics{
+		operationDuration: make(map[string]sqliteHistogram),
+		operationTotal:    make(map[string]int64),
+		errorsTotal:       make(map[string]map[string]int64),
+	}
 }
 
 var _ Store = (*PostgresStore)(nil)
@@ -179,6 +197,7 @@ func NewPostgresStore(dsn string, opts ...PostgresOption) (*PostgresStore, error
 		nowFn:        time.Now,
 		pollInterval: 25 * time.Millisecond,
 		dropPolicy:   "reject",
+		metrics:      newPostgresRuntimeMetrics(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -205,72 +224,73 @@ func (s *PostgresStore) init() error {
 }
 
 func (s *PostgresStore) Enqueue(env Envelope) error {
-	if s == nil || s.db == nil {
-		return errors.New("postgres store is closed")
-	}
-	now := s.now()
-	if err := s.maybePrune(now); err != nil {
-		return err
-	}
+	return s.runStoreOperation("enqueue", func() error {
+		if s == nil || s.db == nil {
+			return errors.New("postgres store is closed")
+		}
+		now := s.now()
+		if err := s.maybePrune(now); err != nil {
+			return err
+		}
 
-	if env.ID == "" {
-		env.ID = newHexID("evt_")
-	}
-	if env.Route == "" {
-		return errors.New("route is required")
-	}
-	if env.Target == "" {
-		return errors.New("target is required")
-	}
-	if env.ReceivedAt.IsZero() {
-		env.ReceivedAt = now
-	}
-	env.ReceivedAt = env.ReceivedAt.UTC()
-	if env.NextRunAt.IsZero() {
-		env.NextRunAt = now
-	}
-	env.NextRunAt = env.NextRunAt.UTC()
-	if env.State == "" {
-		env.State = StateQueued
-	}
-	if env.Attempt < 0 {
-		env.Attempt = 0
-	}
-	if env.SchemaVersion == 0 {
-		env.SchemaVersion = 1
-	}
+		if env.ID == "" {
+			env.ID = newHexID("evt_")
+		}
+		if env.Route == "" {
+			return errors.New("route is required")
+		}
+		if env.Target == "" {
+			return errors.New("target is required")
+		}
+		if env.ReceivedAt.IsZero() {
+			env.ReceivedAt = now
+		}
+		env.ReceivedAt = env.ReceivedAt.UTC()
+		if env.NextRunAt.IsZero() {
+			env.NextRunAt = now
+		}
+		env.NextRunAt = env.NextRunAt.UTC()
+		if env.State == "" {
+			env.State = StateQueued
+		}
+		if env.Attempt < 0 {
+			env.Attempt = 0
+		}
+		if env.SchemaVersion == 0 {
+			env.SchemaVersion = 1
+		}
 
-	headersJSON, err := encodeStringMapJSON(env.Headers)
-	if err != nil {
-		return err
-	}
-	traceJSON, err := encodeStringMapJSON(env.Trace)
-	if err != nil {
-		return err
-	}
-
-	if s.maxDepth > 0 {
-		active, err := s.activeCount()
+		headersJSON, err := encodeStringMapJSON(env.Headers)
 		if err != nil {
 			return err
 		}
-		if active >= s.maxDepth {
-			switch s.dropPolicy {
-			case "drop_oldest":
-				dropped, err := s.dropOldestQueued()
-				if err != nil {
-					return err
-				}
-				if !dropped {
+		traceJSON, err := encodeStringMapJSON(env.Trace)
+		if err != nil {
+			return err
+		}
+
+		if s.maxDepth > 0 {
+			active, err := s.activeCount()
+			if err != nil {
+				return err
+			}
+			if active >= s.maxDepth {
+				switch s.dropPolicy {
+				case "drop_oldest":
+					dropped, err := s.dropOldestQueued()
+					if err != nil {
+						return err
+					}
+					if !dropped {
+						return ErrQueueFull
+					}
+				default:
 					return ErrQueueFull
 				}
-			default:
-				return ErrQueueFull
 			}
 		}
-	}
 
-	_, err = s.db.ExecContext(context.Background(), `
+		_, err = s.db.ExecContext(context.Background(), `
 INSERT INTO queue_items (
   id, route, target, state, received_at, attempt, next_run_at,
   payload, headers_json, trace_json, dead_reason, schema_version, lease_id, lease_until
@@ -279,78 +299,81 @@ INSERT INTO queue_items (
   $8, $9, $10, $11, $12, $13, $14
 )
 `,
-		env.ID,
-		env.Route,
-		env.Target,
-		string(env.State),
-		env.ReceivedAt,
-		env.Attempt,
-		env.NextRunAt,
-		env.Payload,
-		headersJSON,
-		traceJSON,
-		strings.TrimSpace(env.DeadReason),
-		env.SchemaVersion,
-		nullIfEmpty(strings.TrimSpace(env.LeaseID)),
-		nullTime(env.LeaseUntil),
-	)
-	if err != nil {
-		return mapPostgresInsertError(err)
-	}
-	return nil
+			env.ID,
+			env.Route,
+			env.Target,
+			string(env.State),
+			env.ReceivedAt,
+			env.Attempt,
+			env.NextRunAt,
+			env.Payload,
+			headersJSON,
+			traceJSON,
+			strings.TrimSpace(env.DeadReason),
+			env.SchemaVersion,
+			nullIfEmpty(strings.TrimSpace(env.LeaseID)),
+			nullTime(env.LeaseUntil),
+		)
+		if err != nil {
+			return mapPostgresInsertError(err)
+		}
+		return nil
+	})
 }
 
 func (s *PostgresStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
-	if s == nil || s.db == nil {
-		return DequeueResponse{}, errors.New("postgres store is closed")
-	}
+	return runPostgresStoreOperationResult(s, "dequeue", func() (DequeueResponse, error) {
+		if s == nil || s.db == nil {
+			return DequeueResponse{}, errors.New("postgres store is closed")
+		}
 
-	pruneNow := req.Now
-	if pruneNow.IsZero() {
-		pruneNow = s.now()
-	}
-	if err := s.maybePrune(pruneNow); err != nil {
-		return DequeueResponse{}, err
-	}
-
-	batch := req.Batch
-	if batch <= 0 {
-		batch = 1
-	}
-	if batch > postgresMaxDequeueBatch {
-		batch = postgresMaxDequeueBatch
-	}
-
-	leaseTTL := req.LeaseTTL
-	if leaseTTL <= 0 {
-		leaseTTL = 30 * time.Second
-	}
-
-	maxWait := req.MaxWait
-	if maxWait < 0 {
-		maxWait = 0
-	}
-
-	deadline := time.Now().Add(maxWait)
-	for {
-		resp, err := s.dequeueOnce(req, batch, leaseTTL)
-		if err != nil {
+		pruneNow := req.Now
+		if pruneNow.IsZero() {
+			pruneNow = s.now()
+		}
+		if err := s.maybePrune(pruneNow); err != nil {
 			return DequeueResponse{}, err
 		}
-		if len(resp.Items) > 0 || maxWait == 0 {
-			return resp, nil
+
+		batch := req.Batch
+		if batch <= 0 {
+			batch = 1
+		}
+		if batch > postgresMaxDequeueBatch {
+			batch = postgresMaxDequeueBatch
 		}
 
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return DequeueResponse{}, nil
+		leaseTTL := req.LeaseTTL
+		if leaseTTL <= 0 {
+			leaseTTL = 30 * time.Second
 		}
-		sleep := remaining
-		if s.pollInterval > 0 && sleep > s.pollInterval {
-			sleep = s.pollInterval
+
+		maxWait := req.MaxWait
+		if maxWait < 0 {
+			maxWait = 0
 		}
-		time.Sleep(sleep)
-	}
+
+		deadline := time.Now().Add(maxWait)
+		for {
+			resp, err := s.dequeueOnce(req, batch, leaseTTL)
+			if err != nil {
+				return DequeueResponse{}, err
+			}
+			if len(resp.Items) > 0 || maxWait == 0 {
+				return resp, nil
+			}
+
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return DequeueResponse{}, nil
+			}
+			sleep := remaining
+			if s.pollInterval > 0 && sleep > s.pollInterval {
+				sleep = s.pollInterval
+			}
+			time.Sleep(sleep)
+		}
+	})
 }
 
 func (s *PostgresStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.Duration) (DequeueResponse, error) {
@@ -486,32 +509,34 @@ WHERE id = $4
 }
 
 func (s *PostgresStore) Ack(leaseID string) error {
-	now := s.now().UTC()
-	return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
-		if s.deliveredRetentionMaxAge > 0 {
-			_, err := tx.ExecContext(ctx, `
+	return s.runStoreOperation("ack", func() error {
+		now := s.now().UTC()
+		return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
+			if s.deliveredRetentionMaxAge > 0 {
+				_, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
 WHERE id = $3
   AND state = $4
 `,
-				string(StateDelivered),
-				now,
-				itemID,
-				string(StateLeased),
-			)
-			return err
-		}
+					string(StateDelivered),
+					now,
+					itemID,
+					string(StateLeased),
+				)
+				return err
+			}
 
-		_, err := tx.ExecContext(ctx, `
+			_, err := tx.ExecContext(ctx, `
 DELETE FROM queue_items
 WHERE id = $1
   AND state = $2
 `,
-			itemID,
-			string(StateLeased),
-		)
-		return err
+				itemID,
+				string(StateLeased),
+			)
+			return err
+		})
 	})
 }
 
@@ -547,23 +572,25 @@ func (s *PostgresStore) AckBatch(leaseIDs []string) (LeaseBatchResult, error) {
 }
 
 func (s *PostgresStore) Nack(leaseID string, delay time.Duration) error {
-	if delay < 0 {
-		delay = 0
-	}
-	now := s.now().UTC()
-	return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
-		_, err := tx.ExecContext(ctx, `
+	return s.runStoreOperation("nack", func() error {
+		if delay < 0 {
+			delay = 0
+		}
+		now := s.now().UTC()
+		return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
+			_, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
 WHERE id = $3
   AND state = $4
 `,
-			string(StateQueued),
-			now.Add(delay).UTC(),
-			itemID,
-			string(StateLeased),
-		)
-		return err
+				string(StateQueued),
+				now.Add(delay).UTC(),
+				itemID,
+				string(StateLeased),
+			)
+			return err
+		})
 	})
 }
 
@@ -599,42 +626,46 @@ func (s *PostgresStore) NackBatch(leaseIDs []string, delay time.Duration) (Lease
 }
 
 func (s *PostgresStore) Extend(leaseID string, extendBy time.Duration) error {
-	if extendBy <= 0 {
-		return nil
-	}
-	now := s.now().UTC()
-	return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, leaseUntil time.Time) error {
-		updated := leaseUntil.Add(extendBy).UTC()
-		_, err := tx.ExecContext(ctx, `
+	return s.runStoreOperation("extend", func() error {
+		if extendBy <= 0 {
+			return nil
+		}
+		now := s.now().UTC()
+		return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, leaseUntil time.Time) error {
+			updated := leaseUntil.Add(extendBy).UTC()
+			_, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET lease_until = $1, next_run_at = $1
 WHERE id = $2
   AND state = $3
 `,
-			updated,
-			itemID,
-			string(StateLeased),
-		)
-		return err
+				updated,
+				itemID,
+				string(StateLeased),
+			)
+			return err
+		})
 	})
 }
 
 func (s *PostgresStore) MarkDead(leaseID string, reason string) error {
-	now := s.now().UTC()
-	return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
-		_, err := tx.ExecContext(ctx, `
+	return s.runStoreOperation("mark_dead", func() error {
+		now := s.now().UTC()
+		return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
+			_, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = $3
 WHERE id = $4
   AND state = $5
 `,
-			string(StateDead),
-			now,
-			strings.TrimSpace(reason),
-			itemID,
-			string(StateLeased),
-		)
-		return err
+				string(StateDead),
+				now,
+				strings.TrimSpace(reason),
+				itemID,
+				string(StateLeased),
+			)
+			return err
+		})
 	})
 }
 
@@ -670,30 +701,31 @@ func (s *PostgresStore) MarkDeadBatch(leaseIDs []string, reason string) (LeaseBa
 }
 
 func (s *PostgresStore) ListDead(req DeadListRequest) (DeadListResponse, error) {
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > postgresMaxListLimit {
-		limit = postgresMaxListLimit
-	}
+	return runPostgresStoreOperationResult(s, "list_dead", func() (DeadListResponse, error) {
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 100
+		}
+		if limit > postgresMaxListLimit {
+			limit = postgresMaxListLimit
+		}
 
-	args := make([]any, 0, 4)
-	var where []string
-	where = append(where, "state = $1")
-	args = append(args, string(StateDead))
-	if req.Route != "" {
-		where = append(where, fmt.Sprintf("route = $%d", len(args)+1))
-		args = append(args, req.Route)
-	}
-	if !req.Before.IsZero() {
-		where = append(where, fmt.Sprintf("received_at < $%d", len(args)+1))
-		args = append(args, req.Before.UTC())
-	}
-	args = append(args, limit)
-	limitIdx := len(args)
+		args := make([]any, 0, 4)
+		var where []string
+		where = append(where, "state = $1")
+		args = append(args, string(StateDead))
+		if req.Route != "" {
+			where = append(where, fmt.Sprintf("route = $%d", len(args)+1))
+			args = append(args, req.Route)
+		}
+		if !req.Before.IsZero() {
+			where = append(where, fmt.Sprintf("received_at < $%d", len(args)+1))
+			args = append(args, req.Before.UTC())
+		}
+		args = append(args, limit)
+		limitIdx := len(args)
 
-	query := `
+		query := `
 SELECT id, route, target, state, received_at, attempt, next_run_at,
        payload, headers_json, trace_json, dead_reason, schema_version, lease_id, lease_until
 FROM queue_items
@@ -701,333 +733,348 @@ WHERE ` + strings.Join(where, " AND ") + `
 ORDER BY received_at DESC, id DESC
 LIMIT $` + fmt.Sprintf("%d", limitIdx)
 
-	rows, err := s.db.QueryContext(context.Background(), query, args...)
-	if err != nil {
-		return DeadListResponse{}, err
-	}
-	defer rows.Close()
-
-	items := make([]Envelope, 0, clampSliceCap(limit, postgresMaxListLimit))
-	for rows.Next() {
-		item, err := scanQueueItem(rows)
+		rows, err := s.db.QueryContext(context.Background(), query, args...)
 		if err != nil {
 			return DeadListResponse{}, err
 		}
-		if !req.IncludePayload {
-			item.Payload = nil
-		}
-		if !req.IncludeHeaders {
-			item.Headers = nil
-		}
-		if !req.IncludeTrace {
-			item.Trace = nil
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return DeadListResponse{}, err
-	}
+		defer rows.Close()
 
-	return DeadListResponse{Items: items}, nil
+		items := make([]Envelope, 0, clampSliceCap(limit, postgresMaxListLimit))
+		for rows.Next() {
+			item, err := scanQueueItem(rows)
+			if err != nil {
+				return DeadListResponse{}, err
+			}
+			if !req.IncludePayload {
+				item.Payload = nil
+			}
+			if !req.IncludeHeaders {
+				item.Headers = nil
+			}
+			if !req.IncludeTrace {
+				item.Trace = nil
+			}
+			items = append(items, item)
+		}
+		if err := rows.Err(); err != nil {
+			return DeadListResponse{}, err
+		}
+
+		return DeadListResponse{Items: items}, nil
+	})
 }
 
 func (s *PostgresStore) RequeueDead(req DeadRequeueRequest) (DeadRequeueResponse, error) {
-	ids := normalizeUniqueIDs(req.IDs)
-	if len(ids) == 0 {
-		return DeadRequeueResponse{}, nil
-	}
-
-	now := s.now().UTC()
-	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeadRequeueResponse{}, err
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
+	return runPostgresStoreOperationResult(s, "requeue_dead", func() (DeadRequeueResponse, error) {
+		ids := normalizeUniqueIDs(req.IDs)
+		if len(ids) == 0 {
+			return DeadRequeueResponse{}, nil
 		}
-		_ = tx.Rollback()
-	}()
 
-	requeued := 0
-	for _, id := range ids {
-		res, err := tx.ExecContext(ctx, `
+		now := s.now().UTC()
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return DeadRequeueResponse{}, err
+		}
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			_ = tx.Rollback()
+		}()
+
+		requeued := 0
+		for _, id := range ids {
+			res, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
 WHERE id = $3
   AND state = $4
 `,
-			string(StateQueued),
-			now,
-			id,
-			string(StateDead),
-		)
-		if err != nil {
+				string(StateQueued),
+				now,
+				id,
+				string(StateDead),
+			)
+			if err != nil {
+				return DeadRequeueResponse{}, err
+			}
+			n, _ := res.RowsAffected()
+			requeued += int(n)
+		}
+
+		if err := tx.Commit(); err != nil {
 			return DeadRequeueResponse{}, err
 		}
-		n, _ := res.RowsAffected()
-		requeued += int(n)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return DeadRequeueResponse{}, err
-	}
-	committed = true
-	return DeadRequeueResponse{Requeued: requeued}, nil
+		committed = true
+		return DeadRequeueResponse{Requeued: requeued}, nil
+	})
 }
 
 func (s *PostgresStore) DeleteDead(req DeadDeleteRequest) (DeadDeleteResponse, error) {
-	ids := normalizeUniqueIDs(req.IDs)
-	if len(ids) == 0 {
-		return DeadDeleteResponse{}, nil
-	}
-
-	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeadDeleteResponse{}, err
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
+	return runPostgresStoreOperationResult(s, "delete_dead", func() (DeadDeleteResponse, error) {
+		ids := normalizeUniqueIDs(req.IDs)
+		if len(ids) == 0 {
+			return DeadDeleteResponse{}, nil
 		}
-		_ = tx.Rollback()
-	}()
 
-	deleted := 0
-	for _, id := range ids {
-		res, err := tx.ExecContext(ctx, `
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return DeadDeleteResponse{}, err
+		}
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			_ = tx.Rollback()
+		}()
+
+		deleted := 0
+		for _, id := range ids {
+			res, err := tx.ExecContext(ctx, `
 DELETE FROM queue_items
 WHERE id = $1
   AND state = $2
 `,
-			id,
-			string(StateDead),
-		)
-		if err != nil {
+				id,
+				string(StateDead),
+			)
+			if err != nil {
+				return DeadDeleteResponse{}, err
+			}
+			n, _ := res.RowsAffected()
+			deleted += int(n)
+		}
+
+		if err := tx.Commit(); err != nil {
 			return DeadDeleteResponse{}, err
 		}
-		n, _ := res.RowsAffected()
-		deleted += int(n)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return DeadDeleteResponse{}, err
-	}
-	committed = true
-	return DeadDeleteResponse{Deleted: deleted}, nil
+		committed = true
+		return DeadDeleteResponse{Deleted: deleted}, nil
+	})
 }
 
 func (s *PostgresStore) ListMessages(req MessageListRequest) (MessageListResponse, error) {
-	if s == nil || s.db == nil {
-		return MessageListResponse{}, errors.New("postgres store is closed")
-	}
-	if err := s.maybePrune(s.now()); err != nil {
-		return MessageListResponse{}, err
-	}
+	return runPostgresStoreOperationResult(s, "list_messages", func() (MessageListResponse, error) {
+		if s == nil || s.db == nil {
+			return MessageListResponse{}, errors.New("postgres store is closed")
+		}
+		if err := s.maybePrune(s.now()); err != nil {
+			return MessageListResponse{}, err
+		}
 
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > postgresMaxListLimit {
-		limit = postgresMaxListLimit
-	}
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 100
+		}
+		if limit > postgresMaxListLimit {
+			limit = postgresMaxListLimit
+		}
 
-	order := strings.ToLower(strings.TrimSpace(req.Order))
-	orderByReceived := "DESC"
-	orderByID := "DESC"
-	switch order {
-	case "", MessageOrderDesc:
-	case MessageOrderAsc:
-		orderByReceived = "ASC"
-		orderByID = "ASC"
-	default:
-		return MessageListResponse{}, fmt.Errorf("invalid message order %q", req.Order)
-	}
+		order := strings.ToLower(strings.TrimSpace(req.Order))
+		orderByReceived := "DESC"
+		orderByID := "DESC"
+		switch order {
+		case "", MessageOrderDesc:
+		case MessageOrderAsc:
+			orderByReceived = "ASC"
+			orderByID = "ASC"
+		default:
+			return MessageListResponse{}, fmt.Errorf("invalid message order %q", req.Order)
+		}
 
-	query := `
+		query := `
 SELECT id, route, target, state, received_at, attempt, next_run_at,
        payload, headers_json, trace_json, dead_reason, schema_version, lease_id, lease_until
 FROM queue_items
 WHERE 1 = 1
 `
-	args := make([]any, 0, 8)
-	if req.Route != "" {
-		query += fmt.Sprintf(" AND route = $%d", len(args)+1)
-		args = append(args, req.Route)
-	}
-	if req.Target != "" {
-		query += fmt.Sprintf(" AND target = $%d", len(args)+1)
-		args = append(args, req.Target)
-	}
-	if req.State != "" {
-		query += fmt.Sprintf(" AND state = $%d", len(args)+1)
-		args = append(args, string(req.State))
-	}
-	if !req.Before.IsZero() {
-		query += fmt.Sprintf(" AND received_at < $%d", len(args)+1)
-		args = append(args, req.Before.UTC())
-	}
+		args := make([]any, 0, 8)
+		if req.Route != "" {
+			query += fmt.Sprintf(" AND route = $%d", len(args)+1)
+			args = append(args, req.Route)
+		}
+		if req.Target != "" {
+			query += fmt.Sprintf(" AND target = $%d", len(args)+1)
+			args = append(args, req.Target)
+		}
+		if req.State != "" {
+			query += fmt.Sprintf(" AND state = $%d", len(args)+1)
+			args = append(args, string(req.State))
+		}
+		if !req.Before.IsZero() {
+			query += fmt.Sprintf(" AND received_at < $%d", len(args)+1)
+			args = append(args, req.Before.UTC())
+		}
 
-	args = append(args, limit)
-	query += fmt.Sprintf(" ORDER BY received_at %s, id %s LIMIT $%d", orderByReceived, orderByID, len(args))
+		args = append(args, limit)
+		query += fmt.Sprintf(" ORDER BY received_at %s, id %s LIMIT $%d", orderByReceived, orderByID, len(args))
 
-	rows, err := s.db.QueryContext(context.Background(), query, args...)
-	if err != nil {
-		return MessageListResponse{}, err
-	}
-	defer rows.Close()
-
-	items := make([]Envelope, 0, clampSliceCap(limit, postgresMaxListLimit))
-	for rows.Next() {
-		item, err := scanQueueItem(rows)
+		rows, err := s.db.QueryContext(context.Background(), query, args...)
 		if err != nil {
 			return MessageListResponse{}, err
 		}
-		if !req.IncludePayload {
-			item.Payload = nil
-		}
-		if !req.IncludeHeaders {
-			item.Headers = nil
-		}
-		if !req.IncludeTrace {
-			item.Trace = nil
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return MessageListResponse{}, err
-	}
+		defer rows.Close()
 
-	return MessageListResponse{Items: items}, nil
+		items := make([]Envelope, 0, clampSliceCap(limit, postgresMaxListLimit))
+		for rows.Next() {
+			item, err := scanQueueItem(rows)
+			if err != nil {
+				return MessageListResponse{}, err
+			}
+			if !req.IncludePayload {
+				item.Payload = nil
+			}
+			if !req.IncludeHeaders {
+				item.Headers = nil
+			}
+			if !req.IncludeTrace {
+				item.Trace = nil
+			}
+			items = append(items, item)
+		}
+		if err := rows.Err(); err != nil {
+			return MessageListResponse{}, err
+		}
+
+		return MessageListResponse{Items: items}, nil
+	})
 }
 
 func (s *PostgresStore) LookupMessages(req MessageLookupRequest) (MessageLookupResponse, error) {
-	ids := normalizeUniqueIDs(req.IDs)
-	if len(ids) == 0 {
-		return MessageLookupResponse{}, nil
-	}
+	return runPostgresStoreOperationResult(s, "lookup_messages", func() (MessageLookupResponse, error) {
+		ids := normalizeUniqueIDs(req.IDs)
+		if len(ids) == 0 {
+			return MessageLookupResponse{}, nil
+		}
 
-	rows, err := s.db.QueryContext(context.Background(), `
+		rows, err := s.db.QueryContext(context.Background(), `
 SELECT id, route, state
 FROM queue_items
 WHERE id = ANY($1)
 `,
-		ids,
-	)
-	if err != nil {
-		return MessageLookupResponse{}, err
-	}
-	defer rows.Close()
-
-	byID := make(map[string]MessageLookupItem, len(ids))
-	for rows.Next() {
-		var item MessageLookupItem
-		var state string
-		if err := rows.Scan(&item.ID, &item.Route, &state); err != nil {
+			ids,
+		)
+		if err != nil {
 			return MessageLookupResponse{}, err
 		}
-		item.State = State(state)
-		byID[item.ID] = item
-	}
-	if err := rows.Err(); err != nil {
-		return MessageLookupResponse{}, err
-	}
+		defer rows.Close()
 
-	items := make([]MessageLookupItem, 0, len(ids))
-	for _, id := range ids {
-		item, ok := byID[id]
-		if !ok {
-			continue
+		byID := make(map[string]MessageLookupItem, len(ids))
+		for rows.Next() {
+			var item MessageLookupItem
+			var state string
+			if err := rows.Scan(&item.ID, &item.Route, &state); err != nil {
+				return MessageLookupResponse{}, err
+			}
+			item.State = State(state)
+			byID[item.ID] = item
 		}
-		items = append(items, item)
-	}
-	return MessageLookupResponse{Items: items}, nil
+		if err := rows.Err(); err != nil {
+			return MessageLookupResponse{}, err
+		}
+
+		items := make([]MessageLookupItem, 0, len(ids))
+		for _, id := range ids {
+			item, ok := byID[id]
+			if !ok {
+				continue
+			}
+			items = append(items, item)
+		}
+		return MessageLookupResponse{Items: items}, nil
+	})
 }
 
 func (s *PostgresStore) CancelMessages(req MessageCancelRequest) (MessageCancelResponse, error) {
-	ids := normalizeUniqueIDs(req.IDs)
-	if len(ids) == 0 {
-		return MessageCancelResponse{}, nil
-	}
+	return runPostgresStoreOperationResult(s, "cancel_messages", func() (MessageCancelResponse, error) {
+		ids := normalizeUniqueIDs(req.IDs)
+		if len(ids) == 0 {
+			return MessageCancelResponse{}, nil
+		}
 
-	res, err := s.db.ExecContext(context.Background(), `
+		res, err := s.db.ExecContext(context.Background(), `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
 WHERE state = ANY($3)
   AND id = ANY($4)
 `,
-		string(StateCanceled),
-		s.now().UTC(),
-		[]string{string(StateQueued), string(StateLeased), string(StateDead)},
-		ids,
-	)
-	if err != nil {
-		return MessageCancelResponse{}, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return MessageCancelResponse{}, err
-	}
-	return MessageCancelResponse{Canceled: int(n), Matched: int(n)}, nil
+			string(StateCanceled),
+			s.now().UTC(),
+			[]string{string(StateQueued), string(StateLeased), string(StateDead)},
+			ids,
+		)
+		if err != nil {
+			return MessageCancelResponse{}, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return MessageCancelResponse{}, err
+		}
+		return MessageCancelResponse{Canceled: int(n), Matched: int(n)}, nil
+	})
 }
 
 func (s *PostgresStore) RequeueMessages(req MessageRequeueRequest) (MessageRequeueResponse, error) {
-	ids := normalizeUniqueIDs(req.IDs)
-	if len(ids) == 0 {
-		return MessageRequeueResponse{}, nil
-	}
+	return runPostgresStoreOperationResult(s, "requeue_messages", func() (MessageRequeueResponse, error) {
+		ids := normalizeUniqueIDs(req.IDs)
+		if len(ids) == 0 {
+			return MessageRequeueResponse{}, nil
+		}
 
-	res, err := s.db.ExecContext(context.Background(), `
+		res, err := s.db.ExecContext(context.Background(), `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
 WHERE state = ANY($3)
   AND id = ANY($4)
 `,
-		string(StateQueued),
-		s.now().UTC(),
-		[]string{string(StateDead), string(StateCanceled)},
-		ids,
-	)
-	if err != nil {
-		return MessageRequeueResponse{}, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return MessageRequeueResponse{}, err
-	}
-	return MessageRequeueResponse{Requeued: int(n), Matched: int(n)}, nil
+			string(StateQueued),
+			s.now().UTC(),
+			[]string{string(StateDead), string(StateCanceled)},
+			ids,
+		)
+		if err != nil {
+			return MessageRequeueResponse{}, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return MessageRequeueResponse{}, err
+		}
+		return MessageRequeueResponse{Requeued: int(n), Matched: int(n)}, nil
+	})
 }
 
 func (s *PostgresStore) ResumeMessages(req MessageResumeRequest) (MessageResumeResponse, error) {
-	ids := normalizeUniqueIDs(req.IDs)
-	if len(ids) == 0 {
-		return MessageResumeResponse{}, nil
-	}
+	return runPostgresStoreOperationResult(s, "resume_messages", func() (MessageResumeResponse, error) {
+		ids := normalizeUniqueIDs(req.IDs)
+		if len(ids) == 0 {
+			return MessageResumeResponse{}, nil
+		}
 
-	res, err := s.db.ExecContext(context.Background(), `
+		res, err := s.db.ExecContext(context.Background(), `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
 WHERE state = $3
   AND id = ANY($4)
 `,
-		string(StateQueued),
-		s.now().UTC(),
-		string(StateCanceled),
-		ids,
-	)
-	if err != nil {
-		return MessageResumeResponse{}, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return MessageResumeResponse{}, err
-	}
-	return MessageResumeResponse{Resumed: int(n), Matched: int(n)}, nil
+			string(StateQueued),
+			s.now().UTC(),
+			string(StateCanceled),
+			ids,
+		)
+		if err != nil {
+			return MessageResumeResponse{}, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return MessageResumeResponse{}, err
+		}
+		return MessageResumeResponse{Resumed: int(n), Matched: int(n)}, nil
+	})
 }
 
 func (s *PostgresStore) CancelMessagesByFilter(req MessageManageFilterRequest) (MessageCancelResponse, error) {
@@ -1109,84 +1156,85 @@ func (s *PostgresStore) ResumeMessagesByFilter(req MessageManageFilterRequest) (
 }
 
 func (s *PostgresStore) Stats() (Stats, error) {
-	stats := Stats{
-		ByState: map[State]int{
-			StateQueued:    0,
-			StateLeased:    0,
-			StateDead:      0,
-			StateDelivered: 0,
-			StateCanceled:  0,
-		},
-		TopQueued: make([]BacklogBucket, 0),
-	}
+	return runPostgresStoreOperationResult(s, "stats", func() (Stats, error) {
+		stats := Stats{
+			ByState: map[State]int{
+				StateQueued:    0,
+				StateLeased:    0,
+				StateDead:      0,
+				StateDelivered: 0,
+				StateCanceled:  0,
+			},
+			TopQueued: make([]BacklogBucket, 0),
+		}
 
-	rows, err := s.db.QueryContext(context.Background(), `
+		rows, err := s.db.QueryContext(context.Background(), `
 SELECT state, COUNT(*)
 FROM queue_items
 GROUP BY state
 `)
-	if err != nil {
-		return Stats{}, err
-	}
-	defer rows.Close()
-
-	total := 0
-	for rows.Next() {
-		var (
-			state string
-			count int
-		)
-		if err := rows.Scan(&state, &count); err != nil {
+		if err != nil {
 			return Stats{}, err
 		}
-		st := State(state)
-		stats.ByState[st] = count
-		total += count
-	}
-	if err := rows.Err(); err != nil {
-		return Stats{}, err
-	}
-	stats.Total = total
+		defer rows.Close()
 
-	now := s.now().UTC()
+		total := 0
+		for rows.Next() {
+			var (
+				state string
+				count int
+			)
+			if err := rows.Scan(&state, &count); err != nil {
+				return Stats{}, err
+			}
+			st := State(state)
+			stats.ByState[st] = count
+			total += count
+		}
+		if err := rows.Err(); err != nil {
+			return Stats{}, err
+		}
+		stats.Total = total
 
-	var oldestQueued sql.NullTime
-	if err := s.db.QueryRowContext(context.Background(), `
+		now := s.now().UTC()
+
+		var oldestQueued sql.NullTime
+		if err := s.db.QueryRowContext(context.Background(), `
 SELECT MIN(received_at)
 FROM queue_items
 WHERE state = $1
 `,
-		string(StateQueued),
-	).Scan(&oldestQueued); err != nil {
-		return Stats{}, err
-	}
-	if oldestQueued.Valid {
-		stats.OldestQueuedReceivedAt = oldestQueued.Time.UTC()
-		stats.OldestQueuedAge = now.Sub(stats.OldestQueuedReceivedAt)
-		if stats.OldestQueuedAge < 0 {
-			stats.OldestQueuedAge = 0
+			string(StateQueued),
+		).Scan(&oldestQueued); err != nil {
+			return Stats{}, err
 		}
-	}
+		if oldestQueued.Valid {
+			stats.OldestQueuedReceivedAt = oldestQueued.Time.UTC()
+			stats.OldestQueuedAge = now.Sub(stats.OldestQueuedReceivedAt)
+			if stats.OldestQueuedAge < 0 {
+				stats.OldestQueuedAge = 0
+			}
+		}
 
-	var earliestReady sql.NullTime
-	if err := s.db.QueryRowContext(context.Background(), `
+		var earliestReady sql.NullTime
+		if err := s.db.QueryRowContext(context.Background(), `
 SELECT MIN(next_run_at)
 FROM queue_items
 WHERE state = $1
 `,
-		string(StateQueued),
-	).Scan(&earliestReady); err != nil {
-		return Stats{}, err
-	}
-	if earliestReady.Valid {
-		stats.EarliestQueuedNextRun = earliestReady.Time.UTC()
-		stats.ReadyLag = now.Sub(stats.EarliestQueuedNextRun)
-		if stats.ReadyLag < 0 {
-			stats.ReadyLag = 0
+			string(StateQueued),
+		).Scan(&earliestReady); err != nil {
+			return Stats{}, err
 		}
-	}
+		if earliestReady.Valid {
+			stats.EarliestQueuedNextRun = earliestReady.Time.UTC()
+			stats.ReadyLag = now.Sub(stats.EarliestQueuedNextRun)
+			if stats.ReadyLag < 0 {
+				stats.ReadyLag = 0
+			}
+		}
 
-	topRows, err := s.db.QueryContext(context.Background(), `
+		topRows, err := s.db.QueryContext(context.Background(), `
 SELECT route, target, COUNT(*)
 FROM queue_items
 WHERE state = $1
@@ -1194,161 +1242,303 @@ GROUP BY route, target
 ORDER BY COUNT(*) DESC, route ASC, target ASC
 LIMIT $2
 `,
-		string(StateQueued),
-		statsTopBacklogLimit,
-	)
-	if err != nil {
-		return Stats{}, err
-	}
-	defer topRows.Close()
-
-	for topRows.Next() {
-		var b BacklogBucket
-		if err := topRows.Scan(&b.Route, &b.Target, &b.Queued); err != nil {
+			string(StateQueued),
+			statsTopBacklogLimit,
+		)
+		if err != nil {
 			return Stats{}, err
 		}
-		stats.TopQueued = append(stats.TopQueued, b)
-	}
-	if err := topRows.Err(); err != nil {
-		return Stats{}, err
-	}
+		defer topRows.Close()
 
-	return stats, nil
+		for topRows.Next() {
+			var b BacklogBucket
+			if err := topRows.Scan(&b.Route, &b.Target, &b.Queued); err != nil {
+				return Stats{}, err
+			}
+			stats.TopQueued = append(stats.TopQueued, b)
+		}
+		if err := topRows.Err(); err != nil {
+			return Stats{}, err
+		}
+
+		return stats, nil
+	})
 }
 
 func (s *PostgresStore) RecordAttempt(attempt DeliveryAttempt) error {
-	if strings.TrimSpace(attempt.ID) == "" {
-		attempt.ID = newHexID("att_")
-	}
-	if attempt.CreatedAt.IsZero() {
-		attempt.CreatedAt = s.now()
-	}
-	attempt.CreatedAt = attempt.CreatedAt.UTC()
-	attempt.Error = strings.TrimSpace(attempt.Error)
-	attempt.DeadReason = strings.TrimSpace(attempt.DeadReason)
+	return s.runStoreOperation("record_attempt", func() error {
+		if strings.TrimSpace(attempt.ID) == "" {
+			attempt.ID = newHexID("att_")
+		}
+		if attempt.CreatedAt.IsZero() {
+			attempt.CreatedAt = s.now()
+		}
+		attempt.CreatedAt = attempt.CreatedAt.UTC()
+		attempt.Error = strings.TrimSpace(attempt.Error)
+		attempt.DeadReason = strings.TrimSpace(attempt.DeadReason)
 
-	if attempt.Outcome == "" {
-		attempt.Outcome = AttemptOutcomeRetry
-	}
+		if attempt.Outcome == "" {
+			attempt.Outcome = AttemptOutcomeRetry
+		}
 
-	_, err := s.db.ExecContext(context.Background(), `
+		_, err := s.db.ExecContext(context.Background(), `
 INSERT INTO delivery_attempts (
   id, event_id, route, target, attempt, status_code, error, outcome, dead_reason, created_at
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 )
 `,
-		attempt.ID,
-		attempt.EventID,
-		attempt.Route,
-		attempt.Target,
-		attempt.Attempt,
-		nullInt(attempt.StatusCode),
-		nullIfEmpty(attempt.Error),
-		string(attempt.Outcome),
-		nullIfEmpty(attempt.DeadReason),
-		attempt.CreatedAt,
-	)
-	if err != nil {
-		return mapPostgresInsertError(err)
-	}
-	return nil
+			attempt.ID,
+			attempt.EventID,
+			attempt.Route,
+			attempt.Target,
+			attempt.Attempt,
+			nullInt(attempt.StatusCode),
+			nullIfEmpty(attempt.Error),
+			string(attempt.Outcome),
+			nullIfEmpty(attempt.DeadReason),
+			attempt.CreatedAt,
+		)
+		if err != nil {
+			return mapPostgresInsertError(err)
+		}
+		return nil
+	})
 }
 
 func (s *PostgresStore) ListAttempts(req AttemptListRequest) (AttemptListResponse, error) {
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > postgresMaxListLimit {
-		limit = postgresMaxListLimit
-	}
+	return runPostgresStoreOperationResult(s, "list_attempts", func() (AttemptListResponse, error) {
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 100
+		}
+		if limit > postgresMaxListLimit {
+			limit = postgresMaxListLimit
+		}
 
-	query := `
+		query := `
 SELECT id, event_id, route, target, attempt, status_code, error, outcome, dead_reason, created_at
 FROM delivery_attempts
 `
-	args := make([]any, 0, 8)
-	where := make([]string, 0, 6)
+		args := make([]any, 0, 8)
+		where := make([]string, 0, 6)
 
-	if req.Route != "" {
-		args = append(args, req.Route)
-		where = append(where, fmt.Sprintf("route = $%d", len(args)))
-	}
-	if req.Target != "" {
-		args = append(args, req.Target)
-		where = append(where, fmt.Sprintf("target = $%d", len(args)))
-	}
-	if req.EventID != "" {
-		args = append(args, req.EventID)
-		where = append(where, fmt.Sprintf("event_id = $%d", len(args)))
-	}
-	if req.Outcome != "" {
-		args = append(args, string(req.Outcome))
-		where = append(where, fmt.Sprintf("outcome = $%d", len(args)))
-	}
-	if !req.Before.IsZero() {
-		args = append(args, req.Before.UTC())
-		where = append(where, fmt.Sprintf("created_at < $%d", len(args)))
-	}
-	if len(where) > 0 {
-		query += " WHERE " + strings.Join(where, " AND ")
-	}
+		if req.Route != "" {
+			args = append(args, req.Route)
+			where = append(where, fmt.Sprintf("route = $%d", len(args)))
+		}
+		if req.Target != "" {
+			args = append(args, req.Target)
+			where = append(where, fmt.Sprintf("target = $%d", len(args)))
+		}
+		if req.EventID != "" {
+			args = append(args, req.EventID)
+			where = append(where, fmt.Sprintf("event_id = $%d", len(args)))
+		}
+		if req.Outcome != "" {
+			args = append(args, string(req.Outcome))
+			where = append(where, fmt.Sprintf("outcome = $%d", len(args)))
+		}
+		if !req.Before.IsZero() {
+			args = append(args, req.Before.UTC())
+			where = append(where, fmt.Sprintf("created_at < $%d", len(args)))
+		}
+		if len(where) > 0 {
+			query += " WHERE " + strings.Join(where, " AND ")
+		}
 
-	args = append(args, limit)
-	query += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args))
+		args = append(args, limit)
+		query += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args))
 
-	rows, err := s.db.QueryContext(context.Background(), query, args...)
-	if err != nil {
-		return AttemptListResponse{}, err
-	}
-	defer rows.Close()
-
-	items := make([]DeliveryAttempt, 0, clampSliceCap(limit, postgresMaxListLimit))
-	for rows.Next() {
-		var (
-			attempt    DeliveryAttempt
-			statusCode sql.NullInt64
-			errText    sql.NullString
-			outcome    string
-			deadReason sql.NullString
-		)
-		if err := rows.Scan(
-			&attempt.ID,
-			&attempt.EventID,
-			&attempt.Route,
-			&attempt.Target,
-			&attempt.Attempt,
-			&statusCode,
-			&errText,
-			&outcome,
-			&deadReason,
-			&attempt.CreatedAt,
-		); err != nil {
+		rows, err := s.db.QueryContext(context.Background(), query, args...)
+		if err != nil {
 			return AttemptListResponse{}, err
 		}
-		if statusCode.Valid {
-			attempt.StatusCode = int(statusCode.Int64)
-		}
-		if errText.Valid {
-			attempt.Error = errText.String
-		}
-		attempt.Outcome = AttemptOutcome(outcome)
-		if deadReason.Valid {
-			attempt.DeadReason = deadReason.String
-		}
-		attempt.CreatedAt = attempt.CreatedAt.UTC()
-		items = append(items, attempt)
-	}
-	if err := rows.Err(); err != nil {
-		return AttemptListResponse{}, err
-	}
+		defer rows.Close()
 
-	return AttemptListResponse{Items: items}, nil
+		items := make([]DeliveryAttempt, 0, clampSliceCap(limit, postgresMaxListLimit))
+		for rows.Next() {
+			var (
+				attempt    DeliveryAttempt
+				statusCode sql.NullInt64
+				errText    sql.NullString
+				outcome    string
+				deadReason sql.NullString
+			)
+			if err := rows.Scan(
+				&attempt.ID,
+				&attempt.EventID,
+				&attempt.Route,
+				&attempt.Target,
+				&attempt.Attempt,
+				&statusCode,
+				&errText,
+				&outcome,
+				&deadReason,
+				&attempt.CreatedAt,
+			); err != nil {
+				return AttemptListResponse{}, err
+			}
+			if statusCode.Valid {
+				attempt.StatusCode = int(statusCode.Int64)
+			}
+			if errText.Valid {
+				attempt.Error = errText.String
+			}
+			attempt.Outcome = AttemptOutcome(outcome)
+			if deadReason.Valid {
+				attempt.DeadReason = deadReason.String
+			}
+			attempt.CreatedAt = attempt.CreatedAt.UTC()
+			items = append(items, attempt)
+		}
+		if err := rows.Err(); err != nil {
+			return AttemptListResponse{}, err
+		}
+
+		return AttemptListResponse{Items: items}, nil
+	})
 }
 
 func (s *PostgresStore) RuntimeMetrics() StoreRuntimeMetrics {
-	return StoreRuntimeMetrics{Backend: "postgres"}
+	out := StoreRuntimeMetrics{Backend: "postgres"}
+	if s == nil || s.metrics == nil {
+		return out
+	}
+
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+
+	out.Common.OperationDurationSeconds = make([]StoreOperationDurationRuntimeMetric, 0, len(s.metrics.operationDuration))
+	for operation, duration := range s.metrics.operationDuration {
+		out.Common.OperationDurationSeconds = append(
+			out.Common.OperationDurationSeconds,
+			StoreOperationDurationRuntimeMetric{
+				Operation:       operation,
+				DurationSeconds: duration.snapshot(),
+			},
+		)
+	}
+
+	out.Common.OperationTotal = make([]StoreOperationCounterRuntimeMetric, 0, len(s.metrics.operationTotal))
+	for operation, total := range s.metrics.operationTotal {
+		out.Common.OperationTotal = append(
+			out.Common.OperationTotal,
+			StoreOperationCounterRuntimeMetric{
+				Operation: operation,
+				Total:     total,
+			},
+		)
+	}
+
+	for operation, byKind := range s.metrics.errorsTotal {
+		for kind, total := range byKind {
+			out.Common.ErrorsTotal = append(
+				out.Common.ErrorsTotal,
+				StoreOperationErrorRuntimeMetric{
+					Operation: operation,
+					Kind:      kind,
+					Total:     total,
+				},
+			)
+		}
+	}
+
+	return out
+}
+
+func (s *PostgresStore) runStoreOperation(operation string, fn func() error) error {
+	startedAt := time.Now()
+	err := fn()
+	s.observeStoreOperation(operation, startedAt, err)
+	return err
+}
+
+func (s *PostgresStore) observeStoreOperation(operation string, startedAt time.Time, err error) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		return
+	}
+
+	seconds := 0.0
+	if !startedAt.IsZero() {
+		seconds = time.Since(startedAt).Seconds()
+		if seconds < 0 {
+			seconds = 0
+		}
+	}
+
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+
+	hist := s.metrics.operationDuration[operation]
+	if hist.counts == nil {
+		hist = newSQLiteHistogram(sqliteDurationHistogramBounds)
+	}
+	hist.observe(seconds)
+	s.metrics.operationDuration[operation] = hist
+
+	s.metrics.operationTotal[operation]++
+
+	if err == nil {
+		return
+	}
+
+	kind := postgresMetricErrorKind(err)
+	if kind == "" {
+		return
+	}
+	if s.metrics.errorsTotal[operation] == nil {
+		s.metrics.errorsTotal[operation] = make(map[string]int64)
+	}
+	s.metrics.errorsTotal[operation][kind]++
+}
+
+func postgresMetricErrorKind(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrQueueFull):
+		return "queue_full"
+	case errors.Is(err, ErrEnvelopeExists):
+		return "duplicate"
+	case errors.Is(err, ErrLeaseNotFound):
+		return "lease_not_found"
+	case errors.Is(err, ErrLeaseExpired):
+		return "lease_expired"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "40001":
+			return "serialization_failure"
+		case "40P01":
+			return "deadlock"
+		case "23505":
+			return "unique_violation"
+		default:
+			return "pg_" + pgErr.Code
+		}
+	}
+
+	return "other"
+}
+
+func runPostgresStoreOperationResult[T any](s *PostgresStore, operation string, fn func() (T, error)) (T, error) {
+	startedAt := time.Now()
+	out, err := fn()
+	if s != nil {
+		s.observeStoreOperation(operation, startedAt, err)
+	}
+	return out, err
 }
 
 func (s *PostgresStore) withLease(leaseID string, now time.Time, fn func(ctx context.Context, tx *sql.Tx, itemID string, leaseUntil time.Time) error) error {

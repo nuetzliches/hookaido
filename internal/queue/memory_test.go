@@ -1386,6 +1386,23 @@ func TestMemoryStore_RuntimeMetrics(t *testing.T) {
 	if rm.Memory.EvictionsTotalByReason[memoryEvictionReasonDropOldest] != 1 {
 		t.Fatalf("expected drop_oldest eviction count=1, got %d", rm.Memory.EvictionsTotalByReason[memoryEvictionReasonDropOldest])
 	}
+	totalByOperation := make(map[string]int64, len(rm.Common.OperationTotal))
+	for _, metric := range rm.Common.OperationTotal {
+		totalByOperation[metric.Operation] = metric.Total
+	}
+	if totalByOperation["evict"] != 1 {
+		t.Fatalf("expected evict total=1, got %d", totalByOperation["evict"])
+	}
+	if totalByOperation["enqueue_reject"] != 0 {
+		t.Fatalf("expected enqueue_reject total=0, got %d", totalByOperation["enqueue_reject"])
+	}
+	errorsByOperationAndKind := make(map[string]int64, len(rm.Common.ErrorsTotal))
+	for _, metric := range rm.Common.ErrorsTotal {
+		errorsByOperationAndKind[metric.Operation+":"+metric.Kind] = metric.Total
+	}
+	if errorsByOperationAndKind["enqueue:memory_pressure"] != 0 {
+		t.Fatalf("expected enqueue:memory_pressure errors=0, got %d", errorsByOperationAndKind["enqueue:memory_pressure"])
+	}
 }
 
 func TestMemoryStore_MemoryPressureRejectsEnqueue(t *testing.T) {
@@ -1412,6 +1429,20 @@ func TestMemoryStore_MemoryPressureRejectsEnqueue(t *testing.T) {
 	}
 	if rm.Memory.Pressure.RejectTotal != 1 {
 		t.Fatalf("expected reject_total=1, got %d", rm.Memory.Pressure.RejectTotal)
+	}
+	totalByOperation := make(map[string]int64, len(rm.Common.OperationTotal))
+	for _, metric := range rm.Common.OperationTotal {
+		totalByOperation[metric.Operation] = metric.Total
+	}
+	if totalByOperation["enqueue_reject"] != 1 {
+		t.Fatalf("expected enqueue_reject total=1, got %d", totalByOperation["enqueue_reject"])
+	}
+	errorsByOperationAndKind := make(map[string]int64, len(rm.Common.ErrorsTotal))
+	for _, metric := range rm.Common.ErrorsTotal {
+		errorsByOperationAndKind[metric.Operation+":"+metric.Kind] = metric.Total
+	}
+	if errorsByOperationAndKind["enqueue:memory_pressure"] != 1 {
+		t.Fatalf("expected enqueue:memory_pressure errors=1, got %d", errorsByOperationAndKind["enqueue:memory_pressure"])
 	}
 }
 

@@ -268,6 +268,28 @@ type HistogramSnapshot struct {
 	Sum     float64
 }
 
+type StoreOperationDurationRuntimeMetric struct {
+	Operation       string
+	DurationSeconds HistogramSnapshot
+}
+
+type StoreOperationCounterRuntimeMetric struct {
+	Operation string
+	Total     int64
+}
+
+type StoreOperationErrorRuntimeMetric struct {
+	Operation string
+	Kind      string
+	Total     int64
+}
+
+type StoreCommonRuntimeMetrics struct {
+	OperationDurationSeconds []StoreOperationDurationRuntimeMetric
+	OperationTotal           []StoreOperationCounterRuntimeMetric
+	ErrorsTotal              []StoreOperationErrorRuntimeMetric
+}
+
 type SQLiteRuntimeMetrics struct {
 	WriteDurationSeconds      HistogramSnapshot
 	DequeueDurationSeconds    HistogramSnapshot
@@ -300,6 +322,7 @@ type MemoryRuntimeMetrics struct {
 
 type StoreRuntimeMetrics struct {
 	Backend string
+	Common  StoreCommonRuntimeMetrics
 	SQLite  *SQLiteRuntimeMetrics
 	Memory  *MemoryRuntimeMetrics
 }

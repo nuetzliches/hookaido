@@ -14,7 +14,7 @@ import (
 	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
-const metricsSchemaVersion = "1.2.0"
+const metricsSchemaVersion = "1.3.0"
 
 type runtimeMetrics struct {
 	tracingEnabled                             atomic.Int64
@@ -1133,6 +1133,56 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 
 			if provider, ok := queueStore.(queue.RuntimeMetricsProvider); ok {
 				runtime := provider.RuntimeMetrics()
+				if len(runtime.Common.OperationDurationSeconds) > 0 {
+					durations := append([]queue.StoreOperationDurationRuntimeMetric(nil), runtime.Common.OperationDurationSeconds...)
+					sort.Slice(durations, func(i, j int) bool {
+						return durations[i].Operation < durations[j].Operation
+					})
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_operation_seconds Store operation duration in seconds by backend and operation.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_operation_seconds histogram\n")
+					for _, metric := range durations {
+						labels := fmt.Sprintf("backend=%q,operation=%q", runtime.Backend, metric.Operation)
+						writePrometheusHistogramSeries(w, "hookaido_store_operation_seconds", metric.DurationSeconds, labels)
+					}
+				}
+				if len(runtime.Common.OperationTotal) > 0 {
+					counters := append([]queue.StoreOperationCounterRuntimeMetric(nil), runtime.Common.OperationTotal...)
+					sort.Slice(counters, func(i, j int) bool {
+						return counters[i].Operation < counters[j].Operation
+					})
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_operation_total Total number of store operations by backend and operation.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_operation_total counter\n")
+					for _, metric := range counters {
+						_, _ = fmt.Fprintf(
+							w,
+							"hookaido_store_operation_total{backend=%q,operation=%q} %d\n",
+							runtime.Backend,
+							metric.Operation,
+							metric.Total,
+						)
+					}
+				}
+				if len(runtime.Common.ErrorsTotal) > 0 {
+					errorsTotal := append([]queue.StoreOperationErrorRuntimeMetric(nil), runtime.Common.ErrorsTotal...)
+					sort.Slice(errorsTotal, func(i, j int) bool {
+						if errorsTotal[i].Operation == errorsTotal[j].Operation {
+							return errorsTotal[i].Kind < errorsTotal[j].Kind
+						}
+						return errorsTotal[i].Operation < errorsTotal[j].Operation
+					})
+					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_errors_total Total number of store operation errors by backend, operation, and kind.\n")
+					_, _ = fmt.Fprintf(w, "# TYPE hookaido_store_errors_total counter\n")
+					for _, metric := range errorsTotal {
+						_, _ = fmt.Fprintf(
+							w,
+							"hookaido_store_errors_total{backend=%q,operation=%q,kind=%q} %d\n",
+							runtime.Backend,
+							metric.Operation,
+							metric.Kind,
+							metric.Total,
+						)
+					}
+				}
 				if runtime.Memory != nil {
 					memoryMetrics := runtime.Memory
 					_, _ = fmt.Fprintf(w, "# HELP hookaido_store_memory_items Current number of in-memory store items by state.\n")
@@ -1207,11 +1257,24 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 func writePrometheusHistogram(w http.ResponseWriter, name string, help string, snapshot queue.HistogramSnapshot) {
 	_, _ = fmt.Fprintf(w, "# HELP %s %s\n", name, help)
 	_, _ = fmt.Fprintf(w, "# TYPE %s histogram\n", name)
+	writePrometheusHistogramSeries(w, name, snapshot, "")
+}
+
+func writePrometheusHistogramSeries(w http.ResponseWriter, name string, snapshot queue.HistogramSnapshot, labels string) {
 	for _, bucket := range snapshot.Buckets {
-		_, _ = fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", name, prometheusLe(bucket.Le), bucket.Count)
+		if labels == "" {
+			_, _ = fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", name, prometheusLe(bucket.Le), bucket.Count)
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", name, labels, prometheusLe(bucket.Le), bucket.Count)
 	}
-	_, _ = fmt.Fprintf(w, "%s_sum %.9f\n", name, snapshot.Sum)
-	_, _ = fmt.Fprintf(w, "%s_count %d\n", name, snapshot.Count)
+	if labels == "" {
+		_, _ = fmt.Fprintf(w, "%s_sum %.9f\n", name, snapshot.Sum)
+		_, _ = fmt.Fprintf(w, "%s_count %d\n", name, snapshot.Count)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s_sum{%s} %.9f\n", name, labels, snapshot.Sum)
+	_, _ = fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, snapshot.Count)
 }
 
 func prometheusLe(v float64) string {

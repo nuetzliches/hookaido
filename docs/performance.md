@@ -15,6 +15,7 @@ Current benchmarks cover:
 - mixed ingress + pull drain profile with latency percentiles (`p95_ms`, `p99_ms`)
 - mixed ingress + push drain saturation profile with ingress reject and delivery counts
 - mixed ingress + push skewed-target saturation profile (fast + slow target) for cross-target drain fairness checks
+- adaptive backpressure A/B runtime harness (`off` vs `on`) for mixed-focused saturation analysis (with optional pull reference), final metrics/health artifacts, and side-by-side comparison tables including Pull ACK conflict ratio
 
 Each benchmark runs against both queue backends:
 
@@ -25,6 +26,7 @@ Benchmarks are implemented in:
 
 - `internal/pullapi/bench_test.go`
 - `internal/dispatcher/bench_test.go`
+- `scripts/adaptive-ab.sh` (runtime A/B harness, non-`go test`)
 
 ## Reproducible Runbook
 
@@ -181,6 +183,74 @@ This writes:
 - `deliveries_fast`
 - `deliveries_slow`
 
+### Adaptive Backpressure A/B Runtime Check (Issues #53/#54/#55)
+
+For explicit `adaptive_backpressure.enabled=off` vs `on` runs (same load profile):
+
+```bash
+make adaptive-ab
+```
+
+`make adaptive-ab` defaults to the currently open validation scope (`mixed`).
+
+Scenario-specific runs:
+
+```bash
+make adaptive-ab-pull
+make adaptive-ab-mixed
+make adaptive-ab-all
+make adaptive-ab-mixed-saturation
+```
+
+`make adaptive-ab-all` executes:
+
+- `pull-off`, `pull-on` (reference profile)
+- `mixed-off`, `mixed-on` (remaining decision profile)
+
+`make adaptive-ab-mixed-saturation` is a calibrated high-pressure profile for issue validation (`#53/#54/#55`):
+
+- duration: `30s` per mode
+- ingress workers: `256`
+- mixed drain workers: `8`
+- dequeue batch: `5`
+- queue max depth: `2000`
+
+Use it when baseline `make adaptive-ab` does not reach sustained pressure on your host.
+
+Decision note: these runs are intended for relative same-host A/B evidence and tuning guidance. They are not a standalone basis for global default policy across heterogeneous production hardware.
+
+Artifacts are written under:
+
+- `./.artifacts/adaptive-ab/<run-id>/<scenario>-<mode>/`
+
+Each run directory includes:
+
+- `final-metrics.txt`
+- `final-health.json`
+- `monitor-output.log`
+- `run-meta.json` (binary hash/version, git revision, runtime profile)
+- `summary.env` and `summary.json`
+
+Comparison tables are generated as:
+
+- `./.artifacts/adaptive-ab/<run-id>/comparison-pull.md`
+- `./.artifacts/adaptive-ab/<run-id>/comparison-mixed.md`
+- `./.artifacts/adaptive-ab/<run-id>/comparison.md`
+
+The comparison table includes:
+
+- `hookaido_ingress_adaptive_backpressure_applied_total`
+- `hookaido_ingress_rejected_by_reason_total{reason="adaptive_backpressure",status="503"}`
+- `hookaido_ingress_rejected_by_reason_total{reason="queue_full",status="503"}`
+- `hookaido_queue_ready_lag_seconds`
+- `hookaido_queue_oldest_queued_age_seconds`
+- ingress `p95_ms` / `p99_ms`
+- accepted request rate (requests/sec)
+- `hookaido_pull_acked_total` (sum across routes)
+- `hookaido_pull_ack_conflict_total` (sum across routes)
+- `hookaido_pull_nack_conflict_total` (sum across routes)
+- `pull_ack_conflict_ratio_percent` (`ack_conflict / acked * 100`)
+
 ## Reproducibility Defaults
 
 The Make targets enforce:
@@ -193,6 +263,7 @@ The Make targets enforce:
 - `GOMAXPROCS=4` and `-cpu 4` for the mixed ingress+drain profile
 - `GOMAXPROCS=4` and `-cpu 4` for the push saturation profile
 - `GOMAXPROCS=4` and `-cpu 4` for the push skewed-target profile
+- adaptive A/B harness defaults: `duration=120s`, `ingress_workers=16`, `mixed_drain_workers=8`, `dequeue_batch=15`, `queue_max_depth=50000`
 
 This reduces host variance and gives stable median trends across runs.
 
@@ -204,9 +275,13 @@ This reduces host variance and gives stable median trends across runs.
 - For mixed profile runs, track `p95_ms`/`p99_ms` first, then check `ingress_rejects` and `drain_errors` to interpret latency shifts.
 - For push saturation runs, track `p95_ms`/`p99_ms` and `ingress_rejects_queue_full` first, then compare `deliveries`.
 - For push skewed-target runs, track `p95_ms`/`p99_ms`, `deliveries_slow`, and `ingress_rejects_queue_full`; improving slow-target drain without growing queue-full rejects or tail latency indicates better cross-target fairness.
+- For adaptive A/B runs, first confirm `adaptive_applied_total=0` in `off`, then compare `queue_full` delta and latency/rate trade-offs in `on`.
+- For mixed A/B (`#55`), track `pull_ack_conflict_ratio_percent` alongside ingress metrics; large conflict-ratio regressions can hide behind stable ingress acceptance.
+- Keep policy decisions tied to workload SLOs: same-host gains do not imply cross-environment default changes.
 
 ## Notes
 
 - Benchmark artifacts are written under `./.bench/` and ignored by git.
+- Adaptive A/B artifacts are written under `./.artifacts/adaptive-ab/` and ignored by git.
 - `bench-pull-compare` uses a pinned `benchstat` module version in `Makefile` to avoid tool drift.
 - For production threshold tuning of adaptive ingress pressure, use [Adaptive Backpressure Tuning](adaptive-backpressure.md).

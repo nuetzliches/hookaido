@@ -19,6 +19,33 @@ Enable metrics and collect:
 
 Also capture ingress request latency percentiles from your HTTP telemetry (`p95`, `p99`).
 
+## v1.5 Decision (2026-02-14)
+
+Project decision for v1.5:
+
+- Runtime default remains `defaults.adaptive_backpressure.enabled off`.
+- This is intentional: adaptive pressure is a workload/SLO policy lever, not a universal safe default.
+- Recommended opt-in starting profile for enterprise mixed workloads:
+
+```hcl
+defaults {
+  adaptive_backpressure {
+    enabled on
+    min_total 400
+    queued_percent 88
+    ready_lag 45s
+    oldest_queued_age 90s
+    sustained_growth on
+  }
+}
+```
+
+Rationale:
+
+- Mixed A/B saturation runs show adaptive mode can shift rejects away from hard `queue_full` and improve lag/age behavior.
+- The same runs can also shift tail latency/throughput, so rollout must be SLO-driven.
+- Single-host benchmark hardware is suitable for relative same-host A/B comparisons, but not as a universal default reference across environments.
+
 ## Starting Profiles
 
 Pick one profile and adjust from there.
@@ -80,6 +107,10 @@ If `reason="sustained_growth"` dominates during normal bursts:
 ## Benchmark Alignment
 
 Use Pull benchmarks (`make bench-pull*`, `make bench-pull-mixed*`) to compare internal queue/drain optimization slices.
+
+For reproducible adaptive `off` vs `on` saturation evidence (mixed by default, optional pull reference; with final metrics/health artifacts and comparison tables), use `make adaptive-ab`.
+If your host does not reach sustained pressure with defaults, use `make adaptive-ab-mixed-saturation`.
+For mixed contention tracking (`#55`), include `hookaido_pull_ack_conflict_total / hookaido_pull_acked_total` trend checks in the same A/B slice.
 
 Use production-like ingress load tests for threshold tuning decisions. The benchmark suite is best for relative runtime regressions/improvements, while threshold tuning depends on workload shape and SLO targets.
 

@@ -865,8 +865,6 @@ func TestE2E_PushSaturationNoDeadGrowth(t *testing.T) {
 		}
 		return nil
 	}
-	ing := httptest.NewServer(ingSrv)
-	defer ing.Close()
 
 	var deadAttempts atomic.Int64
 	pd := &dispatcher.PushDispatcher{
@@ -906,13 +904,11 @@ func TestE2E_PushSaturationNoDeadGrowth(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			body := []byte(`{"i":` + itoa(i) + `}`)
-			resp, err := http.Post(ing.URL+route, "application/json", bytes.NewReader(body))
-			if err != nil {
-				t.Errorf("POST %d: %v", i, err)
-				return
-			}
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusAccepted {
+			req := httptest.NewRequest(http.MethodPost, "http://example"+route, bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			ingSrv.ServeHTTP(rr, req)
+			if rr.Code != http.StatusAccepted {
 				rejected.Add(1)
 			}
 		}(i)

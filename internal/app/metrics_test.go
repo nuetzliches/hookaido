@@ -49,6 +49,8 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 		"hookaido_delivery_acked_total 0",
 		"hookaido_delivery_retry_total 0",
 		"hookaido_delivery_dead_total 0",
+		`hookaido_delivery_dead_by_reason_total{reason="max_retries"} 0`,
+		`hookaido_delivery_dead_by_reason_total{reason="unspecified"} 0`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
@@ -195,6 +197,7 @@ func TestMetricsHandler_DeliveryCounters(t *testing.T) {
 	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
 	m.observeDeliveryAttempt(queue.AttemptOutcomeRetry)
 	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
+	m.observeDeliveryDeadReason("max_retries")
 
 	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
 	rr := httptest.NewRecorder()
@@ -206,6 +209,8 @@ func TestMetricsHandler_DeliveryCounters(t *testing.T) {
 		"hookaido_delivery_acked_total 2",
 		"hookaido_delivery_retry_total 1",
 		"hookaido_delivery_dead_total 1",
+		`hookaido_delivery_dead_by_reason_total{reason="max_retries"} 1`,
+		`hookaido_delivery_dead_by_reason_total{reason="policy_denied"} 0`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
@@ -551,6 +556,7 @@ func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	m.observeIngressReject(http.StatusServiceUnavailable, "memory_pressure")
 	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
 	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
+	m.observeDeliveryDeadReason("policy_denied")
 
 	diag := m.healthDiagnostics()
 
@@ -594,6 +600,16 @@ func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	}
 	if got := intFromAny(delivery["dead_total"]); got != 1 {
 		t.Fatalf("delivery dead_total=%d, want 1", got)
+	}
+	deadByReason, ok := delivery["dead_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected delivery dead_by_reason diagnostics, got %T", delivery["dead_by_reason"])
+	}
+	if got := intFromAny(deadByReason["policy_denied"]); got != 1 {
+		t.Fatalf("delivery dead_by_reason.policy_denied=%d, want 1", got)
+	}
+	if got := intFromAny(deadByReason["max_retries"]); got != 0 {
+		t.Fatalf("delivery dead_by_reason.max_retries=%d, want 0", got)
 	}
 }
 

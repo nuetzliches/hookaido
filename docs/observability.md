@@ -140,6 +140,7 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_delivery_acked_total`    | counter | Deliveries acknowledged (2xx)  |
 | `hookaido_delivery_retry_total`    | counter | Deliveries scheduled for retry |
 | `hookaido_delivery_dead_total`     | counter | Deliveries moved to DLQ        |
+| `hookaido_delivery_dead_by_reason_total{reason}` | counter | DLQ transitions by normalized reason (`max_retries`, `no_retry`, `policy_denied`, `unspecified`, `other`) |
 
 **Pull metrics:**
 
@@ -299,6 +300,7 @@ The Admin API health endpoint (`GET /healthz?details=1`) aggregates observabilit
 - Backlog trend signals with operator action playbooks
 - Tracing counters (init failures, export errors)
 - Ingress adaptive-backpressure diagnostics (`adaptive_backpressure_applied_total`, `adaptive_backpressure_by_reason`) and rejection reason counters (`rejected_by_reason`, including `memory_pressure`)
+- Delivery diagnostics include dead-letter reason breakdown (`dead_by_reason`) for DLQ growth attribution
 - Memory-store diagnostics (when backend is `memory`): `items_by_state`, retained bytes, eviction counters, and `memory_pressure` status/limits/reject counters
 - Top route/target backlog buckets
 - Queue diagnostics are cached (short TTL) and served stale-while-refresh under heavy load to keep control-plane endpoints responsive.

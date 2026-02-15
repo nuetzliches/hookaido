@@ -62,6 +62,7 @@ type PushDispatcher struct {
 	MaxWait        time.Duration
 	LeaseSlack     time.Duration
 	ObserveAttempt func(outcome queue.AttemptOutcome)
+	ObserveDead    func(reason string)
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -550,6 +551,9 @@ func (d *PushDispatcher) applyLeaseAction(logger *slog.Logger, action leaseActio
 func (d *PushDispatcher) recordAttempt(logger *slog.Logger, attempt queue.DeliveryAttempt) {
 	if d.ObserveAttempt != nil {
 		d.ObserveAttempt(attempt.Outcome)
+	}
+	if d.ObserveDead != nil && attempt.Outcome == queue.AttemptOutcomeDead {
+		d.ObserveDead(attempt.DeadReason)
 	}
 	if err := d.Store.RecordAttempt(attempt); err != nil {
 		logger.Warn("dispatcher_record_attempt_failed",

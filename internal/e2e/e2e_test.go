@@ -843,3 +843,136 @@ func TestE2E_PushDeliveryAttemptObservation(t *testing.T) {
 		t.Fatalf("acked: got %d, want 1", got)
 	}
 }
+
+func TestE2E_PushSaturationNoDeadGrowth(t *testing.T) {
+	const totalRequests = 300
+	const route = "/hooks/saturation"
+
+	var delivered atomic.Int64
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		delivered.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetSrv.Close()
+
+	store := newTestStore()
+
+	ingSrv := ingressServer(store, route)
+	ingSrv.TargetsFor = func(r string) []string {
+		if r == route {
+			return []string{targetSrv.URL}
+		}
+		return nil
+	}
+	ing := httptest.NewServer(ingSrv)
+	defer ing.Close()
+
+	var deadAttempts atomic.Int64
+	pd := &dispatcher.PushDispatcher{
+		Store:     store,
+		Deliverer: dispatcher.NewHTTPDeliverer(targetSrv.Client(), dispatcher.EgressPolicy{}),
+		Routes: []dispatcher.RouteConfig{
+			{
+				Route: route,
+				Targets: []dispatcher.TargetConfig{{
+					URL:     targetSrv.URL,
+					Timeout: 2 * time.Second,
+					Retry: dispatcher.RetryConfig{
+						Max:    3,
+						Base:   25 * time.Millisecond,
+						Cap:    250 * time.Millisecond,
+						Jitter: 0,
+					},
+				}},
+				Concurrency: 8,
+			},
+		},
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxWait: 100 * time.Millisecond,
+		ObserveAttempt: func(outcome queue.AttemptOutcome) {
+			if outcome == queue.AttemptOutcomeDead {
+				deadAttempts.Add(1)
+			}
+		},
+	}
+	pd.Start()
+	defer pd.Drain(10 * time.Second)
+
+	var rejected atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(totalRequests)
+	for i := range totalRequests {
+		go func(i int) {
+			defer wg.Done()
+			body := []byte(`{"i":` + itoa(i) + `}`)
+			resp, err := http.Post(ing.URL+route, "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Errorf("POST %d: %v", i, err)
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusAccepted {
+				rejected.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if got := rejected.Load(); got != 0 {
+		t.Fatalf("ingress rejected requests: got %d, want 0", got)
+	}
+
+	deadline := time.After(15 * time.Second)
+	for {
+		stats, err := store.Stats()
+		if err != nil {
+			t.Fatalf("stats: %v", err)
+		}
+		if stats.ByState[queue.StateQueued] == 0 && stats.ByState[queue.StateLeased] == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("dispatcher did not drain queue in time; states=%v", stats.ByState)
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	if got := deadAttempts.Load(); got != 0 {
+		t.Fatalf("dead attempts observed: got %d, want 0", got)
+	}
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("final stats: %v", err)
+	}
+	if got := stats.ByState[queue.StateDead]; got != 0 {
+		t.Fatalf("dead queue items: got %d, want 0", got)
+	}
+
+	deadList, err := store.ListDead(queue.DeadListRequest{Route: route, Limit: 10})
+	if err != nil {
+		t.Fatalf("list dead: %v", err)
+	}
+	if len(deadList.Items) != 0 {
+		t.Fatalf("dead list items: got %d, want 0", len(deadList.Items))
+	}
+
+	deadAttemptList, err := store.ListAttempts(queue.AttemptListRequest{
+		Route:   route,
+		Outcome: queue.AttemptOutcomeDead,
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("list dead attempts: %v", err)
+	}
+	if len(deadAttemptList.Items) != 0 {
+		t.Fatalf("dead attempts list items: got %d, want 0", len(deadAttemptList.Items))
+	}
+
+	if got := delivered.Load(); got != totalRequests {
+		t.Fatalf("delivered count: got %d, want %d", got, totalRequests)
+	}
+}

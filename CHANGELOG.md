@@ -57,6 +57,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ### Fixed
 
 - Memory backend retention safety: with `delivered_retention` enabled, `queue_limits.max_depth` now also caps `queued + leased + delivered` items so sustained pull/ack traffic cannot grow delivered retention unbounded in RAM.
+- Push retry exhaustion semantics now align with docs: `deliver.retry.max` is treated as maximum retry attempts (not total attempts), so `max 1` allows one retry before `max_retries` dead-lettering.
 
 ## [1.1.0] - 2026-02-12
 

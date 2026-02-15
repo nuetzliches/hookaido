@@ -122,6 +122,36 @@ func TestHandleDelivery_RetryNacks(t *testing.T) {
 	}
 }
 
+func TestHandleDelivery_MaxOneAllowsSingleRetry(t *testing.T) {
+	store := &stubPushStore{}
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: staticDeliverer{res: Result{StatusCode: http.StatusBadGateway}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 1}
+	target := TargetConfig{
+		URL:     "https://x",
+		Timeout: time.Second,
+		Retry:   RetryConfig{Max: 1, Base: 2 * time.Second, Cap: 10 * time.Second, Jitter: 0},
+	}
+	d.handleDelivery(d.Logger, env, target)
+
+	if store.nackLeaseID != "lease_1" {
+		t.Fatalf("nack lease=%q, want lease_1", store.nackLeaseID)
+	}
+	if store.markDeadLeaseID != "" {
+		t.Fatalf("unexpected mark dead call: %#v", store)
+	}
+	if len(store.attempts) != 1 {
+		t.Fatalf("expected 1 attempt, got %d", len(store.attempts))
+	}
+	if got := store.attempts[0]; got.Outcome != queue.AttemptOutcomeRetry {
+		t.Fatalf("unexpected attempt record: %#v", got)
+	}
+}
+
 func TestHandleDelivery_MaxRetryMarksDead(t *testing.T) {
 	store := &stubPushStore{}
 	d := PushDispatcher{
@@ -130,7 +160,7 @@ func TestHandleDelivery_MaxRetryMarksDead(t *testing.T) {
 		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
 
-	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 3}
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 4}
 	target := TargetConfig{
 		URL:     "https://x",
 		Timeout: time.Second,
@@ -204,7 +234,7 @@ func TestHandleDelivery_ObserveDeadReason(t *testing.T) {
 		},
 	}
 
-	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 3}
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 4}
 	target := TargetConfig{
 		URL:     "https://x",
 		Timeout: time.Second,
@@ -373,7 +403,7 @@ func TestHandleDelivery_LeaseExpiredToleratedOnMarkDead(t *testing.T) {
 		Deliverer: staticDeliverer{res: Result{StatusCode: 502}},
 		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
-	env := queue.Envelope{ID: "e1", Route: "/test", Target: "https://t", LeaseID: "l1", Attempt: 3, Payload: []byte(`{}`)}
+	env := queue.Envelope{ID: "e1", Route: "/test", Target: "https://t", LeaseID: "l1", Attempt: 4, Payload: []byte(`{}`)}
 	target := TargetConfig{URL: "https://t", Timeout: 5 * time.Second, Retry: RetryConfig{Max: 3}}
 	d.handleDelivery(d.Logger, env, target)
 	if store.markDeadLeaseID != "l1" {

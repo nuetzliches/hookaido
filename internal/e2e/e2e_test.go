@@ -227,13 +227,13 @@ func TestE2E_IngressPushRoundTrip(t *testing.T) {
 }
 
 func TestE2E_PushDLQLifecycle(t *testing.T) {
-	// Target fails for the first call → Retry.Max=1 means immediate DLQ →
+	// Target fails for the first two calls -> Retry.Max=1 means one retry, then DLQ ->
 	// requeue → new dispatcher with high Max → target succeeds → delivered.
 	var deliveryCount atomic.Int32
 
 	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := deliveryCount.Add(1)
-		if n <= 1 { // only first delivery fails
+		if n <= 2 { // first two deliveries fail
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -243,8 +243,8 @@ func TestE2E_PushDLQLifecycle(t *testing.T) {
 
 	store := newTestStore()
 
-	// Dispatcher with Retry.Max=1: first attempt (Attempt=1) fails,
-	// 1 < 1 is false → immediately marks dead.
+	// Dispatcher with Retry.Max=1: first attempt fails and is retried once.
+	// Second failed attempt exhausts retries and moves to dead.
 	pd := &dispatcher.PushDispatcher{
 		Store:     store,
 		Deliverer: dispatcher.NewHTTPDeliverer(targetSrv.Client(), dispatcher.EgressPolicy{}),
@@ -343,12 +343,13 @@ func TestE2E_PushDLQLifecycle(t *testing.T) {
 	pd2.Start()
 	defer pd2.Drain(5 * time.Second)
 
-	// Target returns 200 for n >= 2 → next delivery should succeed
+	// Target returns 200 for n >= 3 -> next delivery should succeed.
+	beforeRequeueDeliveries := deliveryCount.Load()
 	deadline = time.After(10 * time.Second)
-	for deliveryCount.Load() <= 1 {
+	for deliveryCount.Load() <= beforeRequeueDeliveries {
 		select {
 		case <-deadline:
-			t.Fatalf("requeued message not re-delivered within 10s (deliveryCount=%d)", deliveryCount.Load())
+			t.Fatalf("requeued message not re-delivered within 10s (deliveryCount=%d, before=%d)", deliveryCount.Load(), beforeRequeueDeliveries)
 		default:
 			time.Sleep(50 * time.Millisecond)
 		}

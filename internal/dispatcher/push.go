@@ -156,7 +156,12 @@ func routeMutationBatch(dequeueBatch int) int {
 	if dequeueBatch <= 1 {
 		return 1
 	}
-	return 2
+	// Single-target routes can safely apply lease mutations in the same batch
+	// size as dequeue (bounded by routeDequeueBatch) to cut store roundtrips.
+	if dequeueBatch > 4 {
+		return 4
+	}
+	return dequeueBatch
 }
 
 type leaseActionKind int

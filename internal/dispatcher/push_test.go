@@ -995,8 +995,9 @@ func TestRouteMutationBatch(t *testing.T) {
 	}{
 		{name: "single", dequeueBatch: 1, want: 1},
 		{name: "two", dequeueBatch: 2, want: 2},
-		{name: "three maps to two", dequeueBatch: 3, want: 2},
-		{name: "four maps to two", dequeueBatch: 4, want: 2},
+		{name: "three", dequeueBatch: 3, want: 3},
+		{name: "four", dequeueBatch: 4, want: 4},
+		{name: "cap at four", dequeueBatch: 8, want: 4},
 	}
 
 	for _, tc := range cases {

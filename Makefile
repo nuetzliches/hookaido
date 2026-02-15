@@ -31,6 +31,7 @@ PUSH_SKEWED_BASELINE := $(BENCH_DIR)/push-skewed-baseline.txt
 PUSH_SKEWED_COMPARE := $(BENCH_DIR)/push-skewed-compare.txt
 BENCHSTAT_CMD := golang.org/x/perf/cmd/benchstat@v0.0.0-20260211190930-8161c38c6cdc
 ADAPTIVE_AB_SCRIPT := scripts/adaptive-ab.sh
+ADAPTIVE_GUARDRAIL_SCRIPT := scripts/adaptive-guardrail.sh
 ADAPTIVE_AB_ROOT := .artifacts/adaptive-ab
 ADAPTIVE_AB_BACKEND ?= sqlite
 ADAPTIVE_AB_DURATION ?= 120
@@ -43,8 +44,12 @@ ADAPTIVE_AB_MIXED_SAT_INGRESS_WORKERS ?= 256
 ADAPTIVE_AB_MIXED_SAT_DRAIN_WORKERS ?= 8
 ADAPTIVE_AB_MIXED_SAT_DEQUEUE_BATCH ?= 5
 ADAPTIVE_AB_MIXED_SAT_QUEUE_MAX_DEPTH ?= 2000
+ADAPTIVE_ACK_CONFLICT_MAX_RATIO ?= 5.0
+ADAPTIVE_ACK_CONFLICT_MIN_ACKED ?= 100
+ADAPTIVE_ROUTE_ACK_CONFLICT_MAX_RATIO ?= 5.0
+ADAPTIVE_ROUTE_ACK_CONFLICT_MIN_ACKED ?= 50
 
-.PHONY: build test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation release-check dist dist-signed dist-verify
+.PHONY: build test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation adaptive-ab-guardrail-check adaptive-ab-mixed-guardrail release-check dist dist-signed dist-verify
 
 build:
 	@mkdir -p "$(BINDIR)"
@@ -216,6 +221,36 @@ adaptive-ab-mixed-saturation:
 		--mixed-drain-workers "$(ADAPTIVE_AB_MIXED_SAT_DRAIN_WORKERS)" \
 		--dequeue-batch "$(ADAPTIVE_AB_MIXED_SAT_DEQUEUE_BATCH)" \
 		--queue-max-depth "$(ADAPTIVE_AB_MIXED_SAT_QUEUE_MAX_DEPTH)"
+
+adaptive-ab-guardrail-check:
+	@test -n "$(RUN_ROOT)" || (echo "RUN_ROOT is required, e.g. make adaptive-ab-guardrail-check RUN_ROOT=.artifacts/adaptive-ab/<run-id>" && exit 1)
+	"$(ADAPTIVE_GUARDRAIL_SCRIPT)" \
+		--run-root "$(RUN_ROOT)" \
+		--scenario mixed \
+		--max-ack-conflict-ratio "$(ADAPTIVE_ACK_CONFLICT_MAX_RATIO)" \
+		--min-acked-total "$(ADAPTIVE_ACK_CONFLICT_MIN_ACKED)" \
+		--max-route-ack-conflict-ratio "$(ADAPTIVE_ROUTE_ACK_CONFLICT_MAX_RATIO)" \
+		--min-route-acked-total "$(ADAPTIVE_ROUTE_ACK_CONFLICT_MIN_ACKED)"
+
+adaptive-ab-mixed-guardrail:
+	@RUN_ID="$$(date -u +%Y%m%d-%H%M%S)"; \
+	"$(ADAPTIVE_AB_SCRIPT)" \
+		--scenario mixed \
+		--output-root "$(ADAPTIVE_AB_ROOT)" \
+		--backend "$(ADAPTIVE_AB_BACKEND)" \
+		--duration-seconds "$(ADAPTIVE_AB_MIXED_SAT_DURATION)" \
+		--ingress-workers "$(ADAPTIVE_AB_MIXED_SAT_INGRESS_WORKERS)" \
+		--mixed-drain-workers "$(ADAPTIVE_AB_MIXED_SAT_DRAIN_WORKERS)" \
+		--dequeue-batch "$(ADAPTIVE_AB_MIXED_SAT_DEQUEUE_BATCH)" \
+		--queue-max-depth "$(ADAPTIVE_AB_MIXED_SAT_QUEUE_MAX_DEPTH)" \
+		--run-id "$$RUN_ID"; \
+	"$(ADAPTIVE_GUARDRAIL_SCRIPT)" \
+		--run-root "$(ADAPTIVE_AB_ROOT)/$$RUN_ID" \
+		--scenario mixed \
+		--max-ack-conflict-ratio "$(ADAPTIVE_ACK_CONFLICT_MAX_RATIO)" \
+		--min-acked-total "$(ADAPTIVE_ACK_CONFLICT_MIN_ACKED)" \
+		--max-route-ack-conflict-ratio "$(ADAPTIVE_ROUTE_ACK_CONFLICT_MAX_RATIO)" \
+		--min-route-acked-total "$(ADAPTIVE_ROUTE_ACK_CONFLICT_MIN_ACKED)"
 
 release-check: check build
 

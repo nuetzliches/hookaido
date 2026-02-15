@@ -12,7 +12,6 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## P1 - Medium Priority (v1.x)
 
-- [ ] **Mixed Pull ACK conflict guardrail (#55)** — Keep mixed-workload guardrail on `pull_ack_conflict_total / pull_acked_total` (with per-route drill-down) and use it as acceptance criteria for contention/fairness tuning/regression detection.
 - [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
 - [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
 - [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).
@@ -40,6 +39,7 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## Completed (move here when done)
 
+- [x] **Mixed Pull ACK conflict guardrail (#55)** — Added reproducible guardrail validation via `scripts/adaptive-guardrail.sh` + Make targets (`adaptive-ab-guardrail-check`, `adaptive-ab-mixed-guardrail`) with acceptance thresholds on `pull_ack_conflict_ratio_percent` and per-route drill-down tables from `final-metrics.txt` for mixed A/B regression checks.
 - [x] **Adaptive backpressure mixed decision slice (#53/#54)** — Reproducible mixed `adaptive off` vs `on` saturation runs completed (including calibrated high-pressure profile), artifacts captured, and v1.5 decision recorded: keep runtime default `enabled off`; recommended opt-in enterprise start profile `min_total 400`, `queued_percent 88`, `ready_lag 45s`, `oldest_queued_age 90s`, `sustained_growth on`; hardware results treated as relative same-host evidence, not universal default proof.
 - [x] **Store observability backend-agnostic metrics (#38)** — Unified store runtime metric vocabulary with backend/operation labels (`hookaido_store_operation_seconds`, `hookaido_store_operation_total`, `hookaido_store_errors_total`) across `sqlite`, `memory`, and `postgres`, while retaining SQLite compatibility series.
 - [x] **Optional gRPC worker API (Phase 2)** — Added worker transport contract and handlers, shared Pull operation core, opt-in runtime listener/config wiring via `pull_api.grpc_listen` with listener guardrails, auth parity (global + route override), integration/E2E parity coverage, and docs for operations. Scope is fixed to pull-worker lease transport (`dequeue`/`ack`/`nack`/`extend`) with explicit MCP non-goal for worker lease ops.

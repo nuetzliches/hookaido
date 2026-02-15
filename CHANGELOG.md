@@ -28,6 +28,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Adaptive backpressure production tuning guide (`docs/adaptive-backpressure.md`) with data-driven starting profiles (`balanced`, `latency_first`, `throughput_first`), metric-driven decision matrix, and rollout guardrails for enterprise workloads.
 - Reproducible adaptive backpressure A/B runtime harness (`scripts/adaptive-ab.sh`) plus Make targets (`adaptive-ab`, `adaptive-ab-all`, `adaptive-ab-pull`, `adaptive-ab-mixed`) to capture `final-metrics.txt`/`final-health.json`/`monitor-output.log` artifacts, generate side-by-side comparison tables for `adaptive off` vs `on`, and report Pull contention metrics (`hookaido_pull_acked_total`, `hookaido_pull_ack_conflict_total`, `hookaido_pull_nack_conflict_total`, `pull_ack_conflict_ratio_percent`).
 - Calibrated mixed saturation target (`make adaptive-ab-mixed-saturation`) for issue validation (`#53/#54/#55`) with fixed high-pressure profile (`duration=30s`, `ingress_workers=256`, `mixed_drain_workers=8`, `dequeue_batch=5`, `queue_max_depth=2000`).
+- Mixed Pull ACK conflict guardrail workflow for issue `#55`: `scripts/adaptive-guardrail.sh` and Make targets (`adaptive-ab-guardrail-check`, `adaptive-ab-mixed-guardrail`) validate aggregate `pull_ack_conflict_ratio_percent` thresholds and emit per-route drill-down tables from final metrics.
 - Metrics schema marker `hookaido_metrics_schema_info{schema="1.3.0"}` for dashboard compatibility gating across mixed Hookaido versions.
 
 ### Changed

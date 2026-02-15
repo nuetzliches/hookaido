@@ -12,8 +12,6 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## P1 - Medium Priority (v1.x)
 
-- [ ] **Queue lag/age recovery tuning (#56)** — Reduce persistent `queue_ready_lag_seconds` / `queue_oldest_queued_age_seconds` under saturation and use the lag/age guardrail workflow (`adaptive-ab-lag-guardrail-check`, `adaptive-ab-mixed-lag-guardrail`) as regression acceptance.
-- [ ] **Delivery dead-letter growth tuning (#57)** — Use dead-reason attribution (`hookaido_delivery_dead_by_reason_total`, `delivery.dead_by_reason`) to tune retry/drain behavior and bound sustained DLQ growth.
 - [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
 - [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
 - [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).
@@ -41,6 +39,8 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## Completed (move here when done)
 
+- [x] **Queue lag/age recovery tuning (#56)** — Added lag/age regression acceptance guardrails (`scripts/adaptive-lag-guardrail.sh`, `adaptive-ab-lag-guardrail-check`, `adaptive-ab-mixed-lag-guardrail`) and completed runtime tuning for push drain (`routeMutationBatch` up to dequeue micro-batch size, lease TTL scaling by micro-batch) with mixed saturation revalidation pass (`run 20260215-003728`).
+- [x] **Delivery dead-letter growth tuning (#57)** — Completed attribution + runtime + regression-gate path: dead reason metrics/health diagnostics (`#62`), dead-growth E2E saturation guardrail (`#64`), retry max semantics fix (`#65`), and mixed saturation revalidation with `hookaido_delivery_dead_total=0` (`run 20260215-003728`).
 - [x] **Mixed Pull ACK conflict guardrail (#55)** — Added reproducible guardrail validation via `scripts/adaptive-guardrail.sh` + Make targets (`adaptive-ab-guardrail-check`, `adaptive-ab-mixed-guardrail`) with acceptance thresholds on `pull_ack_conflict_ratio_percent` and per-route drill-down tables from `final-metrics.txt` for mixed A/B regression checks.
 - [x] **Adaptive backpressure mixed decision slice (#53/#54)** — Reproducible mixed `adaptive off` vs `on` saturation runs completed (including calibrated high-pressure profile), artifacts captured, and v1.5 decision recorded: keep runtime default `enabled off`; recommended opt-in enterprise start profile `min_total 400`, `queued_percent 88`, `ready_lag 45s`, `oldest_queued_age 90s`, `sustained_growth on`; hardware results treated as relative same-host evidence, not universal default proof.
 - [x] **Store observability backend-agnostic metrics (#38)** — Unified store runtime metric vocabulary with backend/operation labels (`hookaido_store_operation_seconds`, `hookaido_store_operation_total`, `hookaido_store_errors_total`) across `sqlite`, `memory`, and `postgres`, while retaining SQLite compatibility series.

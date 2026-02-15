@@ -362,7 +362,10 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 	}
 
 	shouldRetry := shouldRetry(res)
-	if shouldRetry && env.Attempt < target.Retry.Max {
+	// retry.max is defined as maximum retry attempts (not total attempts).
+	// Attempt starts at 1 for the first delivery, so retry is allowed while
+	// current attempt number is <= retry.max.
+	if shouldRetry && env.Attempt <= target.Retry.Max {
 		delay := retryDelay(env.Attempt, target.Retry)
 		attempt.Outcome = queue.AttemptOutcomeRetry
 		d.recordAttempt(logger, attempt)

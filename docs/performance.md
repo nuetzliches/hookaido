@@ -183,7 +183,7 @@ This writes:
 - `deliveries_fast`
 - `deliveries_slow`
 
-### Adaptive Backpressure A/B Runtime Check (Issues #53/#54/#55)
+### Adaptive Backpressure A/B Runtime Check (Issues #53/#54/#55/#56)
 
 For explicit `adaptive_backpressure.enabled=off` vs `on` runs (same load profile):
 
@@ -206,12 +206,14 @@ Guardrail checks on an existing mixed run:
 
 ```bash
 make adaptive-ab-guardrail-check RUN_ROOT=.artifacts/adaptive-ab/<run-id>
+make adaptive-ab-lag-guardrail-check RUN_ROOT=.artifacts/adaptive-ab/<run-id>
 ```
 
 One-shot calibrated run + guardrail check:
 
 ```bash
 make adaptive-ab-mixed-guardrail
+make adaptive-ab-mixed-lag-guardrail
 ```
 
 `make adaptive-ab-all` executes:
@@ -219,7 +221,7 @@ make adaptive-ab-mixed-guardrail
 - `pull-off`, `pull-on` (reference profile)
 - `mixed-off`, `mixed-on` (remaining decision profile)
 
-`make adaptive-ab-mixed-saturation` is a calibrated high-pressure profile for issue validation (`#53/#54/#55`):
+`make adaptive-ab-mixed-saturation` is a calibrated high-pressure profile for issue validation (`#53/#54/#55/#56`):
 
 - duration: `30s` per mode
 - ingress workers: `256`
@@ -249,6 +251,7 @@ Comparison tables are generated as:
 - `./.artifacts/adaptive-ab/<run-id>/comparison-mixed.md`
 - `./.artifacts/adaptive-ab/<run-id>/comparison.md`
 - `./.artifacts/adaptive-ab/<run-id>/guardrail-mixed.md` (when guardrail target/script is used)
+- `./.artifacts/adaptive-ab/<run-id>/guardrail-lag-mixed.md` (when lag/age guardrail target/script is used)
 
 The comparison table includes:
 
@@ -269,6 +272,14 @@ Guardrail defaults for `#55`:
 - aggregate `pull_ack_conflict_ratio_percent <= 5.0`
 - minimum aggregate `pull_acked_total >= 100` per mode (`mixed-off`, `mixed-on`)
 - per-route `pull_ack_conflict_ratio_percent <= 5.0` when route `pull_acked_total >= 50`
+
+Guardrail defaults for `#56`:
+
+- aggregate `queue_ready_lag_seconds <= 30` per mode (`mixed-off`, `mixed-on`)
+- aggregate `queue_oldest_queued_age_seconds <= 30` per mode (`mixed-off`, `mixed-on`)
+- delta (on-off) `queue_ready_lag_seconds <= 10`
+- delta (on-off) `queue_oldest_queued_age_seconds <= 10`
+- minimum `accepted_total >= 100` per mode
 
 ## Reproducibility Defaults
 
@@ -297,6 +308,7 @@ This reduces host variance and gives stable median trends across runs.
 - For adaptive A/B runs, first confirm `adaptive_applied_total=0` in `off`, then compare `queue_full` delta and latency/rate trade-offs in `on`.
 - For mixed A/B (`#55`), track `pull_ack_conflict_ratio_percent` alongside ingress metrics; large conflict-ratio regressions can hide behind stable ingress acceptance.
 - For `#55` regression acceptance, use `guardrail-mixed.md` as the pass/fail artifact and inspect the per-route drill-down section to localize conflict spikes.
+- For lag/age regression acceptance (`#56`), use `guardrail-lag-mixed.md` and investigate sustained queue lag/age when absolute or delta thresholds fail.
 - Keep policy decisions tied to workload SLOs: same-host gains do not imply cross-environment default changes.
 
 ## Notes

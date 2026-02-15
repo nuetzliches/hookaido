@@ -12,6 +12,8 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## P1 - Medium Priority (v1.x)
 
+- [ ] **Queue lag/age recovery tuning (#56)** — Reduce persistent `queue_ready_lag_seconds` / `queue_oldest_queued_age_seconds` under saturation and use the lag/age guardrail workflow (`adaptive-ab-lag-guardrail-check`, `adaptive-ab-mixed-lag-guardrail`) as regression acceptance.
+- [ ] **Delivery dead-letter growth tuning (#57)** — Use dead-reason attribution (`hookaido_delivery_dead_by_reason_total`, `delivery.dead_by_reason`) to tune retry/drain behavior and bound sustained DLQ growth.
 - [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
 - [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
 - [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).

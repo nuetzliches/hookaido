@@ -163,7 +163,8 @@ Container publish workflow is defined in `.github/workflows/container.yml`.
 - Trigger: `push` tag matching `v*.*.*` (and manual `workflow_dispatch`) with strict guardrail `^v[0-9]+\.[0-9]+\.[0-9]+$`
 - Registry: GHCR (`ghcr.io/nuetzliches/hookaido`)
 - Platforms: `linux/amd64`, `linux/arm64`
-- Tags: semver tags (`X.Y.Z`, `X.Y`, `X`), `latest`, and short `sha-*`
+- Image tags (derived from one pushed release tag): semver (`X.Y.Z`, `X.Y`, `X`), `latest`, and short `sha-*`
+- Repository tag policy: create/push only `vX.Y.Z` git tags
 - Attestation: `actions/attest-build-provenance@v3` with `push-to-registry: true`
 - Metadata: OCI labels include source URL and image description
 - Build metadata: Docker build args wire to `hookaido version --long` (`version`, `commit`, `build_date`)
@@ -200,8 +201,8 @@ For each release, verify that:
 
 1. Create release commit with finalized `CHANGELOG.md`.
 2. Push release tag:
-   - `git tag v0.1.0`
-   - `git push origin main --tags`
+   - `git tag -a v0.1.0 -m "v0.1.0"`
+   - `git push origin v0.1.0`
 3. Confirm workflow `release` succeeded and uploaded:
    - archives
    - checksums

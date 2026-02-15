@@ -202,6 +202,18 @@ make adaptive-ab-all
 make adaptive-ab-mixed-saturation
 ```
 
+Guardrail checks on an existing mixed run:
+
+```bash
+make adaptive-ab-guardrail-check RUN_ROOT=.artifacts/adaptive-ab/<run-id>
+```
+
+One-shot calibrated run + guardrail check:
+
+```bash
+make adaptive-ab-mixed-guardrail
+```
+
 `make adaptive-ab-all` executes:
 
 - `pull-off`, `pull-on` (reference profile)
@@ -236,6 +248,7 @@ Comparison tables are generated as:
 - `./.artifacts/adaptive-ab/<run-id>/comparison-pull.md`
 - `./.artifacts/adaptive-ab/<run-id>/comparison-mixed.md`
 - `./.artifacts/adaptive-ab/<run-id>/comparison.md`
+- `./.artifacts/adaptive-ab/<run-id>/guardrail-mixed.md` (when guardrail target/script is used)
 
 The comparison table includes:
 
@@ -250,6 +263,12 @@ The comparison table includes:
 - `hookaido_pull_ack_conflict_total` (sum across routes)
 - `hookaido_pull_nack_conflict_total` (sum across routes)
 - `pull_ack_conflict_ratio_percent` (`ack_conflict / acked * 100`)
+
+Guardrail defaults for `#55`:
+
+- aggregate `pull_ack_conflict_ratio_percent <= 5.0`
+- minimum aggregate `pull_acked_total >= 100` per mode (`mixed-off`, `mixed-on`)
+- per-route `pull_ack_conflict_ratio_percent <= 5.0` when route `pull_acked_total >= 50`
 
 ## Reproducibility Defaults
 
@@ -277,6 +296,7 @@ This reduces host variance and gives stable median trends across runs.
 - For push skewed-target runs, track `p95_ms`/`p99_ms`, `deliveries_slow`, and `ingress_rejects_queue_full`; improving slow-target drain without growing queue-full rejects or tail latency indicates better cross-target fairness.
 - For adaptive A/B runs, first confirm `adaptive_applied_total=0` in `off`, then compare `queue_full` delta and latency/rate trade-offs in `on`.
 - For mixed A/B (`#55`), track `pull_ack_conflict_ratio_percent` alongside ingress metrics; large conflict-ratio regressions can hide behind stable ingress acceptance.
+- For `#55` regression acceptance, use `guardrail-mixed.md` as the pass/fail artifact and inspect the per-route drill-down section to localize conflict spikes.
 - Keep policy decisions tied to workload SLOs: same-host gains do not imply cross-environment default changes.
 
 ## Notes

@@ -984,12 +984,18 @@ func TestRouteLeaseTTL(t *testing.T) {
 		{URL: "https://fast", Timeout: 2 * time.Second},
 		{URL: "https://slow", Timeout: 9 * time.Second},
 	}
-	if got := routeLeaseTTL(targets, 30*time.Second); got != 39*time.Second {
+	if got := routeLeaseTTL(targets, 30*time.Second, 1); got != 39*time.Second {
 		t.Fatalf("routeLeaseTTL=%s, want 39s", got)
 	}
+	if got := routeLeaseTTL(targets, 30*time.Second, 4); got != 66*time.Second {
+		t.Fatalf("routeLeaseTTL batched=%s, want 66s", got)
+	}
 
-	if got := routeLeaseTTL([]TargetConfig{{URL: "https://default"}}, 5*time.Second); got != 30*time.Second {
+	if got := routeLeaseTTL([]TargetConfig{{URL: "https://default"}}, 5*time.Second, 1); got != 30*time.Second {
 		t.Fatalf("routeLeaseTTL default=%s, want 30s floor", got)
+	}
+	if got := routeLeaseTTL([]TargetConfig{{URL: "https://default"}}, 5*time.Second, 3); got != 35*time.Second {
+		t.Fatalf("routeLeaseTTL default batched=%s, want 35s", got)
 	}
 }
 
@@ -1025,8 +1031,9 @@ func TestRouteMutationBatch(t *testing.T) {
 	}{
 		{name: "single", dequeueBatch: 1, want: 1},
 		{name: "two", dequeueBatch: 2, want: 2},
-		{name: "three maps to two", dequeueBatch: 3, want: 2},
-		{name: "four maps to two", dequeueBatch: 4, want: 2},
+		{name: "three", dequeueBatch: 3, want: 3},
+		{name: "four", dequeueBatch: 4, want: 4},
+		{name: "cap at four", dequeueBatch: 8, want: 4},
 	}
 
 	for _, tc := range cases {

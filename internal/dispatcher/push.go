@@ -98,9 +98,9 @@ func (d *PushDispatcher) Start() {
 		if concurrency <= 0 {
 			concurrency = 1
 		}
-		routeLeaseTTL := routeLeaseTTL(rt.Targets, leaseSlack)
-		targetsByURL := targetConfigByURL(rt.Targets)
 		dequeueBatch := routeDequeueBatch(concurrency, len(rt.Targets))
+		routeLeaseTTL := routeLeaseTTL(rt.Targets, leaseSlack, dequeueBatch)
+		targetsByURL := targetConfigByURL(rt.Targets)
 		for w := 0; w < concurrency; w++ {
 			d.wg.Add(1)
 			go d.runRoute(logger, rt.Route, targetsByURL, maxWait, routeLeaseTTL, dequeueBatch)
@@ -116,7 +116,11 @@ func targetConfigByURL(targets []TargetConfig) map[string]TargetConfig {
 	return byURL
 }
 
-func routeLeaseTTL(targets []TargetConfig, leaseSlack time.Duration) time.Duration {
+func routeLeaseTTL(targets []TargetConfig, leaseSlack time.Duration, dequeueBatch int) time.Duration {
+	if dequeueBatch <= 0 {
+		dequeueBatch = 1
+	}
+
 	maxTimeout := time.Duration(0)
 	for _, target := range targets {
 		timeout := target.Timeout
@@ -127,7 +131,9 @@ func routeLeaseTTL(targets []TargetConfig, leaseSlack time.Duration) time.Durati
 			maxTimeout = timeout
 		}
 	}
-	ttl := maxTimeout + leaseSlack
+	// Scale TTL by dequeue batch so the first leased item in a sequential
+	// micro-batch has enough time budget before lease expiry.
+	ttl := (maxTimeout * time.Duration(dequeueBatch)) + leaseSlack
 	if ttl < 30*time.Second {
 		ttl = 30 * time.Second
 	}
@@ -156,7 +162,12 @@ func routeMutationBatch(dequeueBatch int) int {
 	if dequeueBatch <= 1 {
 		return 1
 	}
-	return 2
+	// Single-target routes can safely apply lease mutations in the same batch
+	// size as dequeue (bounded by routeDequeueBatch) to cut store roundtrips.
+	if dequeueBatch > 4 {
+		return 4
+	}
+	return dequeueBatch
 }
 
 type leaseActionKind int

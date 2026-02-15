@@ -39,3 +39,10 @@ go test ./...
    - following [the PR template](.github/PULL_REQUEST_TEMPLATE.md).
 
 PRs must pass CI and branch protection checks before merge.
+
+## Branch + Tag Policy
+
+- `main` is protected: no direct pushes and no direct local merges.
+- `main` protection must keep force-push and deletion disabled.
+- Release tags are strict SemVer `vX.Y.Z` only (no `vX.Y`).
+- For releases, push only the explicit tag (for example `git push origin v1.5.0`), not `--tags`.

@@ -69,6 +69,7 @@ Project: Hookaido (Webhook ingress queue, Caddy-style).
 ## Git & Release Workflow
 
 - `main` is protected: no direct pushes, no local-only merges to `main`; use PRs.
+- Keep `main` protection hardening enabled: no branch deletion and no force-push.
 - SemVer tags are strict `vX.Y.Z` only. Never create `vX.Y` tags.
 - Create release tags only from the merged/up-to-date `origin/main` state.
 - Container/release publishing is tag-driven; treat tagging as a production action.

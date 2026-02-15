@@ -47,6 +47,8 @@ type runtimeMetrics struct {
 	deliveryAckedTotal   atomic.Int64
 	deliveryRetryTotal   atomic.Int64
 	deliveryDeadTotal    atomic.Int64
+	deliveryDeadMu       sync.Mutex
+	deliveryDeadByReason map[string]int64
 
 	// Queue store for on-scrape stats
 	queueStore queue.Store
@@ -97,6 +99,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		now:                             time.Now,
 		ingressAdaptiveByReason:         make(map[string]int64),
 		ingressRejectedByReasonAndState: make(map[string]map[string]int64),
+		deliveryDeadByReason:            make(map[string]int64),
 	}
 	m.queueStats.ttl = time.Second
 	return m
@@ -189,6 +192,19 @@ func (m *runtimeMetrics) observeDeliveryAttempt(outcome queue.AttemptOutcome) {
 	case queue.AttemptOutcomeDead:
 		m.deliveryDeadTotal.Add(1)
 	}
+}
+
+func (m *runtimeMetrics) observeDeliveryDeadReason(reason string) {
+	if m == nil {
+		return
+	}
+	normalized := normalizeDeliveryDeadReason(reason)
+	m.deliveryDeadMu.Lock()
+	if m.deliveryDeadByReason == nil {
+		m.deliveryDeadByReason = make(map[string]int64)
+	}
+	m.deliveryDeadByReason[normalized]++
+	m.deliveryDeadMu.Unlock()
 }
 
 func (m *runtimeMetrics) observePublishResult(accepted, rejected int, code string, scoped bool) {
@@ -586,6 +602,14 @@ var ingressRejectStatusOrder = []string{
 	"other",
 }
 
+var deliveryDeadReasonOrder = []string{
+	"max_retries",
+	"no_retry",
+	"policy_denied",
+	"unspecified",
+	"other",
+}
+
 func orderedPullStatuses(byStatus map[string]int64) []string {
 	seen := make(map[string]struct{}, len(byStatus))
 	out := make([]string, 0, len(byStatus)+len(pullStatusPreferredOrder))
@@ -673,6 +697,37 @@ func normalizeIngressRejectStatus(statusCode int) string {
 	default:
 		return "other"
 	}
+}
+
+func normalizeDeliveryDeadReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "max_retries":
+		return "max_retries"
+	case "no_retry":
+		return "no_retry"
+	case "policy_denied":
+		return "policy_denied"
+	case "":
+		return "unspecified"
+	default:
+		return "other"
+	}
+}
+
+func (m *runtimeMetrics) deliveryDeadReasonSnapshot() map[string]int64 {
+	out := make(map[string]int64, len(deliveryDeadReasonOrder))
+	for _, reason := range deliveryDeadReasonOrder {
+		out[reason] = 0
+	}
+	if m == nil {
+		return out
+	}
+	m.deliveryDeadMu.Lock()
+	defer m.deliveryDeadMu.Unlock()
+	for reason, count := range m.deliveryDeadByReason {
+		out[reason] = count
+	}
+	return out
 }
 
 func (m *runtimeMetrics) ingressAdaptiveSnapshot() map[string]int64 {
@@ -830,6 +885,11 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 		}
 		ingressRejectedByReasonAny[reason] = total
 	}
+	deliveryDeadByReason := m.deliveryDeadReasonSnapshot()
+	deliveryDeadByReasonAny := make(map[string]any, len(deliveryDeadByReason))
+	for _, reason := range deliveryDeadReasonOrder {
+		deliveryDeadByReasonAny[reason] = deliveryDeadByReason[reason]
+	}
 
 	diagnostics := map[string]any{
 		"tracing": map[string]any{
@@ -859,10 +919,11 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 			"adaptive_backpressure_by_reason":     ingressAdaptiveByReasonAny,
 		},
 		"delivery": map[string]any{
-			"attempt_total": m.deliveryAttemptTotal.Load(),
-			"acked_total":   m.deliveryAckedTotal.Load(),
-			"retry_total":   m.deliveryRetryTotal.Load(),
-			"dead_total":    m.deliveryDeadTotal.Load(),
+			"attempt_total":   m.deliveryAttemptTotal.Load(),
+			"acked_total":     m.deliveryAckedTotal.Load(),
+			"retry_total":     m.deliveryRetryTotal.Load(),
+			"dead_total":      m.deliveryDeadTotal.Load(),
+			"dead_by_reason":  deliveryDeadByReasonAny,
 		},
 		"pull": pullDiagnostics(pullSnapshot),
 	}
@@ -927,6 +988,10 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		for _, reason := range adaptiveBackpressureReasonOrder {
 			ingressAdaptiveByReason[reason] = 0
 		}
+		deliveryDeadByReason := make(map[string]int64, len(deliveryDeadReasonOrder))
+		for _, reason := range deliveryDeadReasonOrder {
+			deliveryDeadByReason[reason] = 0
+		}
 		ingressRejectBreakdown := newIngressRejectBreakdownSnapshot()
 		var pullSnapshot map[string]pullRouteSnapshot
 		if rm != nil {
@@ -946,6 +1011,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			publishScopedRejectedTotal = rm.publishScopedRejectedTotal.Load()
 			ingressAdaptiveTotal = rm.ingressAdaptiveTotal.Load()
 			ingressAdaptiveByReason = rm.ingressAdaptiveSnapshot()
+			deliveryDeadByReason = rm.deliveryDeadReasonSnapshot()
 			ingressRejectBreakdown = rm.ingressRejectBreakdownSnapshot()
 			pullSnapshot = rm.pullSnapshot()
 		}
@@ -1070,6 +1136,11 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_delivery_dead_total Total number of push deliveries moved to dead letter queue.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_delivery_dead_total counter\n")
 		_, _ = fmt.Fprintf(w, "hookaido_delivery_dead_total %d\n", deliveryDead)
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_delivery_dead_by_reason_total Total number of push deliveries moved to dead letter queue by normalized reason.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_delivery_dead_by_reason_total counter\n")
+		for _, reason := range deliveryDeadReasonOrder {
+			_, _ = fmt.Fprintf(w, "hookaido_delivery_dead_by_reason_total{reason=%q} %d\n", reason, deliveryDeadByReason[reason])
+		}
 
 		// --- Pull metrics ---
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_pull_dequeue_total Total number of Pull dequeue requests by route and status class.\n")

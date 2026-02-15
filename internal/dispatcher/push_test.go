@@ -188,6 +188,38 @@ func TestHandleDelivery_PolicyDeniedMarksDeadNoRetry(t *testing.T) {
 	}
 }
 
+func TestHandleDelivery_ObserveDeadReason(t *testing.T) {
+	store := &stubPushStore{}
+	var observedOutcome queue.AttemptOutcome
+	var observedReason string
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: staticDeliverer{res: Result{StatusCode: http.StatusServiceUnavailable}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ObserveAttempt: func(outcome queue.AttemptOutcome) {
+			observedOutcome = outcome
+		},
+		ObserveDead: func(reason string) {
+			observedReason = reason
+		},
+	}
+
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 3}
+	target := TargetConfig{
+		URL:     "https://x",
+		Timeout: time.Second,
+		Retry:   RetryConfig{Max: 3, Base: time.Second, Cap: 10 * time.Second},
+	}
+	d.handleDelivery(d.Logger, env, target)
+
+	if observedOutcome != queue.AttemptOutcomeDead {
+		t.Fatalf("observed outcome=%q, want dead", observedOutcome)
+	}
+	if observedReason != "max_retries" {
+		t.Fatalf("observed dead reason=%q, want max_retries", observedReason)
+	}
+}
+
 type staticDeliverer struct {
 	res Result
 }

@@ -260,6 +260,9 @@ func run() int {
 			ObserveAttempt: func(outcome queue.AttemptOutcome) {
 				appMetrics.observeDeliveryAttempt(outcome)
 			},
+			ObserveDead: func(reason string) {
+				appMetrics.observeDeliveryDeadReason(reason)
+			},
 		}
 		push.Start()
 		defer func() {

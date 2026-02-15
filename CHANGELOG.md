@@ -53,6 +53,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Push route workers now lease small dequeue micro-batches (single-target routes: bounded by route concurrency, capped at 4; multi-target routes: capped at 2) to balance throughput and fairness under saturation.
 - Push dispatcher now applies batched lease mutations (`ack`/`nack`/`mark dead`) on single-target routes when the backend supports `LeaseBatchStore`, with automatic fallback to per-lease mutations and multi-target safety guardrails to avoid skewed-route regressions.
 - Push single-target lease mutations now batch up to the route dequeue micro-batch size (capped at 4) instead of a fixed size of 2, reducing store roundtrips on saturated single-target routes.
+- Push dispatcher lease TTL now scales with route dequeue micro-batch size, reducing avoidable lease-expiry conflicts/requeues when single route workers process slow target batches sequentially.
 
 ### Fixed
 

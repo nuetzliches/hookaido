@@ -1190,34 +1190,25 @@ func (s *SQLiteStore) dequeueLeaseByIDsTx(ctx context.Context, conn *sql.Conn, i
 		return nil, nil
 	}
 
-	leaseIDs := newHexIDs("lease_", len(ids))
 	indexByID := make(map[string]int, len(ids))
 	for i, id := range ids {
 		indexByID[id] = i
 	}
-
-	caseExpr := strings.Builder{}
-	caseExpr.WriteString("CASE id")
-	args := make([]any, 0, 1+(len(ids)*2)+3+len(ids))
-	args = append(args, string(StateLeased))
-	for i, id := range ids {
-		caseExpr.WriteString(" WHEN ? THEN ?")
-		args = append(args, id, leaseIDs[i])
-	}
-	caseExpr.WriteString(" END")
 
 	inPlaceholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
 	query := `
 UPDATE queue_items
 SET state = ?,
     attempt = attempt + 1,
-    lease_id = ` + caseExpr.String() + `,
+    lease_id = 'lease_' || lower(hex(randomblob(8))),
     lease_until = ?,
     next_run_at = ?
 WHERE state = ?
   AND id IN (` + inPlaceholders + `)
-RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version;`
-	args = append(args, leaseUntil.UnixNano(), leaseUntil.UnixNano(), string(StateQueued))
+RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version, lease_id;`
+
+	args := make([]any, 0, 4+len(ids))
+	args = append(args, string(StateLeased), leaseUntil.UnixNano(), leaseUntil.UnixNano(), string(StateQueued))
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -1236,6 +1227,7 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 		var receivedAtNanos int64
 		var headersJSON sql.NullString
 		var traceJSON sql.NullString
+		var leaseID string
 
 		if err := rows.Scan(
 			&env.ID,
@@ -1247,6 +1239,7 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 			&headersJSON,
 			&traceJSON,
 			&env.SchemaVersion,
+			&leaseID,
 		); err != nil {
 			return nil, err
 		}
@@ -1259,7 +1252,7 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 		env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
 		env.NextRunAt = leaseUntil
 		env.LeaseUntil = leaseUntil
-		env.LeaseID = leaseIDs[idx]
+		env.LeaseID = leaseID
 		env.Headers = unmarshalStringMap(headersJSON)
 		env.Trace = unmarshalStringMap(traceJSON)
 		out[idx] = env
@@ -1523,6 +1516,22 @@ func (s *SQLiteStore) withLeaseMutation(
 	}
 	defer conn.Close()
 
+	startedAt := time.Now()
+	affected, err := mutate(ctx, conn, now, leaseID)
+	if err != nil {
+		s.observeSQLiteError(err)
+		s.observeSQLiteTx(sqliteTxClassWrite, startedAt, false)
+		return err
+	}
+	if affected > 0 {
+		s.observeSQLiteTx(sqliteTxClassWrite, startedAt, true)
+		return nil
+	}
+
+	return s.resolveLeaseMutationConflictTx(ctx, conn, now, leaseID)
+}
+
+func (s *SQLiteStore) resolveLeaseMutationConflictTx(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) error {
 	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
 	if err != nil {
 		return err
@@ -1534,18 +1543,6 @@ func (s *SQLiteStore) withLeaseMutation(
 		}
 		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 	}()
-
-	affected, err := mutate(ctx, conn, now, leaseID)
-	if err != nil {
-		return err
-	}
-	if affected > 0 {
-		if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
-			return err
-		}
-		committed = true
-		return nil
-	}
 
 	expired, err := s.resolveSingleLeaseConflictTx(ctx, conn, leaseID, now)
 	if err != nil {

@@ -187,6 +187,74 @@ The common families are emitted by all first-party queue backends (`sqlite`, `me
 | `hookaido_store_memory_retained_bytes_total`     | gauge   | Estimated total retained bytes in memory store                               |
 | `hookaido_store_memory_evictions_total{reason}`  | counter | Memory-store evictions by reason (`drop_oldest`, retention evictions, etc.)  |
 
+### Backend Metric Expectations
+
+Use backend-agnostic metric families as the default dashboard and alert base:
+
+- `hookaido_store_operation_seconds{backend,operation}`
+- `hookaido_store_operation_total{backend,operation}`
+- `hookaido_store_errors_total{backend,operation,kind}`
+- `hookaido_delivery_dead_by_reason_total{reason}`
+
+Backend-specific coverage:
+
+| Backend    | Required/common store metrics | Backend-specific metrics | Notes |
+| ---------- | ----------------------------- | ------------------------ | ----- |
+| `sqlite`   | `hookaido_store_operation_*`, `hookaido_store_errors_total` | `hookaido_store_sqlite_*` | `hookaido_store_sqlite_*` is compatibility/debug surface for SQLite internals. |
+| `memory`   | `hookaido_store_operation_*`, `hookaido_store_errors_total` | `hookaido_store_memory_*` | `hookaido_store_sqlite_*` is intentionally absent. |
+| `postgres` | `hookaido_store_operation_*`, `hookaido_store_errors_total` | none (store internals exposed via common families) | `hookaido_store_sqlite_*` and `hookaido_store_memory_*` are intentionally absent. |
+
+Migration guidance:
+
+- Prefer common store metric families for SLOs, saturation alerts, and cross-backend dashboards.
+- Keep `hookaido_store_sqlite_*` for SQLite-only deep diagnostics (for example WAL/checkpoint lock analysis).
+- Treat missing backend-specific series on other backends as "not emitted", not as zero or failure.
+
+### PromQL Examples (Backend-Aware)
+
+Store p95 by backend and operation:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (backend, operation, le) (
+    rate(hookaido_store_operation_seconds_bucket[5m])
+  )
+)
+```
+
+Store error rate by backend, operation, and kind:
+
+```promql
+sum by (backend, operation, kind) (
+  rate(hookaido_store_errors_total[5m])
+)
+```
+
+Backend-specific store throughput comparison:
+
+```promql
+sum by (backend, operation) (
+  rate(hookaido_store_operation_total[5m])
+)
+```
+
+DLQ growth by dead reason:
+
+```promql
+sum by (reason) (
+  increase(hookaido_delivery_dead_by_reason_total[15m])
+)
+```
+
+Alert example (backend-aware store error burst):
+
+```promql
+sum by (backend) (
+  rate(hookaido_store_errors_total[5m])
+) > 0
+```
+
 **Publish metrics:**
 
 | Metric                                       | Type    | Description                       |

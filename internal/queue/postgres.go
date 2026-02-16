@@ -51,10 +51,12 @@ func newPostgresRuntimeMetrics() *postgresRuntimeMetrics {
 }
 
 var _ Store = (*PostgresStore)(nil)
+var _ BacklogTrendStore = (*PostgresStore)(nil)
 
 const (
 	postgresMaxDequeueBatch = 100
 	postgresMaxListLimit    = 1000
+	postgresBacklogMaxLimit = 20000
 )
 
 const postgresSchemaV1 = `
@@ -104,6 +106,20 @@ CREATE INDEX IF NOT EXISTS idx_delivery_attempts_event
   ON delivery_attempts(event_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_delivery_attempts_route_target
   ON delivery_attempts(route, target, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS backlog_trend_samples (
+  captured_at BIGINT NOT NULL,
+  route       TEXT NOT NULL,
+  target      TEXT NOT NULL,
+  queued      INTEGER NOT NULL,
+  leased      INTEGER NOT NULL,
+  dead        INTEGER NOT NULL,
+  PRIMARY KEY (captured_at, route, target)
+);
+CREATE INDEX IF NOT EXISTS idx_pg_backlog_trend_time
+  ON backlog_trend_samples(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pg_backlog_trend_route_target_time
+  ON backlog_trend_samples(route, target, captured_at DESC);
 `
 
 func WithPostgresNowFunc(now func() time.Time) PostgresOption {
@@ -1262,6 +1278,185 @@ LIMIT $2
 		}
 
 		return stats, nil
+	})
+}
+
+func (s *PostgresStore) CaptureBacklogTrendSample(at time.Time) error {
+	return s.runStoreOperation("capture_backlog_trend", func() error {
+		if s == nil || s.db == nil {
+			return errors.New("postgres store is closed")
+		}
+
+		capturedAt := at
+		if capturedAt.IsZero() {
+			capturedAt = s.now()
+		}
+		capturedAt = capturedAt.UTC()
+		if err := s.maybePrune(capturedAt); err != nil {
+			return err
+		}
+
+		capturedNanos := capturedAt.UnixNano()
+		retentionCutoff := capturedAt.Add(-backlogTrendRetention).UnixNano()
+
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			_ = tx.Rollback()
+		}()
+
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM backlog_trend_samples
+WHERE captured_at = $1
+`, capturedNanos); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM backlog_trend_samples
+WHERE captured_at < $1
+`, retentionCutoff); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO backlog_trend_samples (captured_at, route, target, queued, leased, dead)
+SELECT
+  $1,
+  '',
+  '',
+  COALESCE(SUM(CASE WHEN state = $2 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN state = $3 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN state = $4 THEN 1 ELSE 0 END), 0)
+FROM queue_items
+WHERE state IN ($2, $3, $4)
+`, capturedNanos, string(StateQueued), string(StateLeased), string(StateDead)); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO backlog_trend_samples (captured_at, route, target, queued, leased, dead)
+SELECT
+  $1,
+  route,
+  target,
+  SUM(CASE WHEN state = $2 THEN 1 ELSE 0 END) AS queued,
+  SUM(CASE WHEN state = $3 THEN 1 ELSE 0 END) AS leased,
+  SUM(CASE WHEN state = $4 THEN 1 ELSE 0 END) AS dead
+FROM queue_items
+WHERE state IN ($2, $3, $4)
+GROUP BY route, target
+`, capturedNanos, string(StateQueued), string(StateLeased), string(StateDead)); err != nil {
+			return err
+		}
+
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
+}
+
+func (s *PostgresStore) ListBacklogTrend(req BacklogTrendListRequest) (BacklogTrendListResponse, error) {
+	return runPostgresStoreOperationResult(s, "list_backlog_trend", func() (BacklogTrendListResponse, error) {
+		if s == nil || s.db == nil {
+			return BacklogTrendListResponse{}, errors.New("postgres store is closed")
+		}
+
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 1000
+		}
+		if limit > postgresBacklogMaxLimit {
+			limit = postgresBacklogMaxLimit
+		}
+
+		route := strings.TrimSpace(req.Route)
+		target := strings.TrimSpace(req.Target)
+		since := req.Since.UTC()
+		until := req.Until.UTC()
+
+		query := ""
+		args := make([]any, 0, 8)
+		if route == "" && target == "" {
+			query = `
+SELECT captured_at, queued, leased, dead
+FROM backlog_trend_samples
+WHERE route = '' AND target = ''`
+		} else {
+			query = `
+SELECT captured_at, SUM(queued), SUM(leased), SUM(dead)
+FROM backlog_trend_samples
+WHERE NOT (route = '' AND target = '')`
+			if route != "" {
+				query += fmt.Sprintf(" AND route = $%d", len(args)+1)
+				args = append(args, route)
+			}
+			if target != "" {
+				query += fmt.Sprintf(" AND target = $%d", len(args)+1)
+				args = append(args, target)
+			}
+		}
+		if !since.IsZero() {
+			query += fmt.Sprintf(" AND captured_at >= $%d", len(args)+1)
+			args = append(args, since.UnixNano())
+		}
+		if !until.IsZero() {
+			query += fmt.Sprintf(" AND captured_at < $%d", len(args)+1)
+			args = append(args, until.UnixNano())
+		}
+		if route != "" || target != "" {
+			query += " GROUP BY captured_at"
+		}
+		query += fmt.Sprintf(" ORDER BY captured_at DESC LIMIT $%d", len(args)+1)
+		args = append(args, limit+1)
+
+		rows, err := s.db.QueryContext(context.Background(), query, args...)
+		if err != nil {
+			return BacklogTrendListResponse{}, err
+		}
+		defer rows.Close()
+
+		out := make([]BacklogTrendSample, 0, limit+1)
+		for rows.Next() {
+			var capturedNanos int64
+			var queued int
+			var leased int
+			var dead int
+			if err := rows.Scan(&capturedNanos, &queued, &leased, &dead); err != nil {
+				return BacklogTrendListResponse{}, err
+			}
+			out = append(out, BacklogTrendSample{
+				CapturedAt: time.Unix(0, capturedNanos).UTC(),
+				Queued:     queued,
+				Leased:     leased,
+				Dead:       dead,
+			})
+		}
+		if err := rows.Err(); err != nil {
+			return BacklogTrendListResponse{}, err
+		}
+
+		truncated := false
+		if len(out) > limit {
+			truncated = true
+			out = out[:limit]
+		}
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+
+		return BacklogTrendListResponse{
+			Items:     out,
+			Truncated: truncated,
+		}, nil
 	})
 }
 

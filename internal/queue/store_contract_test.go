@@ -150,6 +150,97 @@ func TestStoreContract_NackDelayRequeue(t *testing.T) {
 	}
 }
 
+func TestStoreContract_BacklogTrendCaptureList(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 2, 16, 10, 0, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			trendStore, ok := store.(BacklogTrendStore)
+			if !ok {
+				t.Skip("store does not implement BacklogTrendStore")
+			}
+
+			seed := []Envelope{
+				{ID: "evt_1", Route: "/r1", Target: "pull"},
+				{ID: "evt_2", Route: "/r1", Target: "pull"},
+				{ID: "evt_3", Route: "/r2", Target: "deliver"},
+			}
+			for _, env := range seed {
+				if err := store.Enqueue(env); err != nil {
+					t.Fatalf("enqueue %q: %v", env.ID, err)
+				}
+			}
+
+			dequeued, err := store.Dequeue(DequeueRequest{
+				Route:    "/r1",
+				Target:   "pull",
+				Batch:    1,
+				LeaseTTL: 30 * time.Second,
+			})
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			if len(dequeued.Items) != 1 {
+				t.Fatalf("dequeue items=%d, want 1", len(dequeued.Items))
+			}
+			if err := store.MarkDead(dequeued.Items[0].LeaseID, "test_dead"); err != nil {
+				t.Fatalf("mark dead: %v", err)
+			}
+
+			if err := trendStore.CaptureBacklogTrendSample(now); err != nil {
+				t.Fatalf("capture backlog trend sample: %v", err)
+			}
+
+			global, err := trendStore.ListBacklogTrend(BacklogTrendListRequest{
+				Since: now.Add(-time.Minute),
+				Until: now.Add(time.Minute),
+				Limit: 10,
+			})
+			if err != nil {
+				t.Fatalf("list global backlog trend: %v", err)
+			}
+			if global.Truncated {
+				t.Fatalf("expected global trend not truncated")
+			}
+			if len(global.Items) != 1 {
+				t.Fatalf("expected 1 global trend sample, got %d", len(global.Items))
+			}
+			if got := global.Items[0].Queued; got != 2 {
+				t.Fatalf("global queued=%d, want 2", got)
+			}
+			if got := global.Items[0].Leased; got != 0 {
+				t.Fatalf("global leased=%d, want 0", got)
+			}
+			if got := global.Items[0].Dead; got != 1 {
+				t.Fatalf("global dead=%d, want 1", got)
+			}
+
+			routeOnly, err := trendStore.ListBacklogTrend(BacklogTrendListRequest{
+				Route: "/r1",
+				Since: now.Add(-time.Minute),
+				Until: now.Add(time.Minute),
+				Limit: 10,
+			})
+			if err != nil {
+				t.Fatalf("list route backlog trend: %v", err)
+			}
+			if len(routeOnly.Items) != 1 {
+				t.Fatalf("expected 1 route trend sample, got %d", len(routeOnly.Items))
+			}
+			if got := routeOnly.Items[0].Queued; got != 1 {
+				t.Fatalf("route queued=%d, want 1", got)
+			}
+			if got := routeOnly.Items[0].Leased; got != 0 {
+				t.Fatalf("route leased=%d, want 0", got)
+			}
+			if got := routeOnly.Items[0].Dead; got != 1 {
+				t.Fatalf("route dead=%d, want 1", got)
+			}
+		})
+	}
+}
+
 func TestStoreContract_ExtendLease(t *testing.T) {
 	for _, factory := range contractStoreFactories() {
 		t.Run(factory.name, func(t *testing.T) {

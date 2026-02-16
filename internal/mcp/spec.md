@@ -120,6 +120,7 @@ Notes:
 - `reload_timeout` is optional and only used by `write_and_reload` (default `5s`).
 - Admin auth tokens are loaded for the health check; unresolved token refs fail `write_and_reload`.
 - Token refs used by MCP health/reload flows support `env:`, `file:`, `vault:`, and `raw:` schemes via the shared secrets resolver.
+- `write_and_reload` does not signal a running `hookaido run` process; runtime reload is handled by config file watch (`--watch`) or explicit `instance_reload`.
 
 ### `admin_health`
 Return local read-only snapshot (`config_readable`, `db_exists`, `db_readable`).

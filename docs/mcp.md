@@ -66,6 +66,8 @@ Runtime control tools (`instance_start`, `instance_stop`, `instance_reload`) req
 - `write_only` — atomic write after successful validation
 - `write_and_reload` — write + health check + rollback on failure
 
+`write_and_reload` does not send a reload signal to a running process. Runtime adoption happens via file watch (`hookaido run --watch`) or an explicit `instance_reload` call.
+
 ### Queue/Admin Read Tools
 
 | Tool                    | Role   | Description                                     |

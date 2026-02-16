@@ -237,6 +237,7 @@ type SQLiteStore struct {
 	checkpointInterval       time.Duration
 	checkpointStop           chan struct{}
 	checkpointDone           chan struct{}
+	queueLikelyFull          atomic.Bool
 
 	metrics *sqliteRuntimeMetrics
 
@@ -582,6 +583,16 @@ INSERT INTO queue_items (
 }
 
 func (s *SQLiteStore) enqueueWithLimit(env Envelope, headersJSON any, traceJSON any) error {
+	if s.dropPolicy != "drop_oldest" && s.queueLikelyFull.Load() {
+		count, err := s.activeDepthCount()
+		if err == nil && count >= s.maxDepth {
+			return ErrQueueFull
+		}
+		if err == nil && count < s.maxDepth {
+			s.queueLikelyFull.Store(false)
+		}
+	}
+
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -613,10 +624,12 @@ func (s *SQLiteStore) enqueueWithLimit(env Envelope, headersJSON any, traceJSON 
 				return err
 			}
 			if !dropped {
+				s.queueLikelyFull.Store(true)
 				return ErrQueueFull
 			}
 			count--
 		} else {
+			s.queueLikelyFull.Store(true)
 			return ErrQueueFull
 		}
 	}
@@ -654,8 +667,36 @@ INSERT INTO queue_items (
 		return err
 	}
 	committed = true
+	s.queueLikelyFull.Store(false)
 	s.signal()
 	return nil
+}
+
+func (s *SQLiteStore) activeDepthCount() (int, error) {
+	var queued int
+	var leased int
+	err := s.db.QueryRowContext(context.Background(), `
+SELECT queued, leased
+FROM queue_counters
+WHERE id = 1;
+`).Scan(&queued, &leased)
+	if err == nil {
+		return queued + leased, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) && !isSQLiteMissingCounterError(err) {
+		return 0, err
+	}
+
+	// Fallback for databases created before counter migration initialization.
+	var count int
+	if err := s.db.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM queue_items
+WHERE state IN (?, ?);
+`, string(StateQueued), string(StateLeased)).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *SQLiteStore) activeDepthCountTx(ctx context.Context, conn *sql.Conn) (int, error) {

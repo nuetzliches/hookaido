@@ -1579,7 +1579,10 @@ func (s *SQLiteStore) resolveLeaseMutationConflictTx(ctx context.Context, conn *
 	}
 	committed := false
 	defer func() {
-		s.observeSQLiteTx(sqliteTxClassWrite, startedAt, committed)
+		if committed {
+			return
+		}
+		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
 	}()
 
 	expired, err := s.resolveSingleLeaseConflictTx(ctx, conn, leaseID, now)

@@ -41,6 +41,6 @@ Current weighted implementation grade: **~95%**.
 
 ## What's Missing (MVP Core)
 
-- Runtime reload has restart-required edges (listener/prefix changes, dispatcher-affecting settings).
+- Runtime reload intentionally keeps restart-required edges for topology/startup-bound changes (listeners, API prefixes, dispatcher-affecting settings).
 
 See `BACKLOG.md` for prioritized next steps.

@@ -2,40 +2,50 @@
 
 Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and roughly ordered within each tier.
 
-## P0 - High Priority (v1.x)
+## P0 - High Priority (v2.0 — Modular Architecture)
 
-- [x] **~~Remaining DSL directives~~** — All directives from DESIGN.md now implemented (moved to Completed).
-- [x] **~~Runtime reload completeness~~** — Silent-bug reload guards fixed and full reload behavior documented (moved to Completed).
-- [x] **~~Queue publish hardening~~** — Moved to Completed.
-- [x] **~~E2E test suite~~** — Moved to Completed.
-- [x] **~~SQLite WAL recovery tests~~** — Moved to Completed.
+- [ ] **Phase 1a: Extract shared backlog analytics** — Move duplicated backlog analysis types, constants, and algorithms from `admin/http.go` and `mcp/server.go` into `internal/backlog/`. Both packages import the shared package. Design: `docs/plans/2026-03-08-modular-architecture-design.md`.
+- [ ] **Phase 1b: Split mcp/server.go** — Break 8,406-line god file into protocol.go, tools_messages.go, tools_dlq.go, tools_config.go, tools_backlog.go. No behavior change.
+- [ ] **Phase 1c: Split admin/http.go** — Break 5,285-line god file into handler groups, parameter parsing, routing. No behavior change.
+- [ ] **Phase 2a: Module registry** — Create `internal/hookaido/` with typed module interfaces (QueueBackend, TracingProvider, MCPProvider, WorkerTransport) and registration functions.
+- [ ] **Phase 2b: Wire queue backend registry** — `app/run.go` selects queue backend through registry instead of direct constructor calls. Backends register from current location.
+- [ ] **Phase 2c: Config parser backend validation** — Parser validates backend names against registry. Unknown backends produce actionable error ("not compiled in").
+- [ ] **Phase 3a: Extract sqlite module** — Move SQLite backend from `internal/queue/` to `modules/sqlite/` with init() registration.
+- [ ] **Phase 3b: Extract postgres module** — Move Postgres backend to `modules/postgres/`.
+- [ ] **Phase 3c: Extract grpcworker module** — Move workerapi to `modules/grpcworker/`.
+- [ ] **Phase 3d: Extract otel module** — Extract OpenTelemetry setup from `app/run.go` to `modules/otel/`.
+- [ ] **Phase 3e: Extract mcp module** — Move MCP server to `modules/mcp/` (already split in Phase 1b).
+- [ ] **Phase 4: Build variants** — Standard main.go (all modules), minimal main.go (core only), Makefile targets for build/build-minimal/build-custom.
 
-## P1 - Medium Priority (v1.x)
+## P1 - Medium Priority (v1.x / v2.0)
 
-- [x] **~~Mixed-workload tail latency playbook~~** — Reproducible mixed ingress+drain benchmark workflow with p95/p99 reporting added (`bench-pull-mixed*`; moved to Completed).
-- [x] **~~Drain fairness under saturation~~** — Reproducible push saturation/skewed benchmark guardrails now include reject-reason splits plus `p95_ms`/`p99_ms`; dispatcher saturation path tuned with route-shared workers, target-aware dequeue micro-batching, and single-target lease-mutation batching with multi-target fallback (moved to Completed).
-- [x] **~~Adaptive backpressure production tuning guide~~** — Data-driven threshold tuning guidance with enterprise starting profiles published (moved to Completed).
-- [x] **~~Management model runtime wiring~~** — All Admin API management fields wired in `run.go` (moved to Completed).
-- [x] **~~Config `validate --format json`~~** — Parse/file errors now respect `--format` flag; 7 CLI tests added (moved to Completed).
-- [x] **~~Egress policy enforcement~~** — Full test coverage added: deny-before-allow ordering, CIDR-deny-overrides-allow, subdomain wildcards, deny-only mode, empty policy, non-HTTP scheme, redirect blocked/followed/hop-recheck, HTTPS-only delivery denial (moved to Completed).
-- [x] **~~Admin API integration tests~~** — Added audit-reason enforcement for requeue/resume by-ID and DLQ requeue/delete, plus resume empty-IDs bad request (moved to Completed).
-- [x] **~~MCP Admin-proxy mode tests~~** — Added resume_by_filter via admin proxy: scoped path, structured error, not-found fallback. ~198 MCP tests total (moved to Completed).
-- [x] **~~Attestation bundle validation~~** — `verify-release` now validates Sigstore DSSE/in-toto provenance and SBOM attestation bundles with `--require-provenance` flag, subject-digest cross-check, auto-detection; 7 new tests (moved to Completed).
+- [ ] **Remove or integrate internal/router** — Router interface is defined but unused; routing lives in `app/run.go`. Either wire the interface or remove the dead package.
+- [ ] **Improve workerapi test coverage** — 175 test lines vs 1,380 prod lines. Add integration tests for gRPC transport edge cases.
+- [x] **~~Mixed-workload tail latency playbook~~** — Moved to Completed.
+- [x] **~~Drain fairness under saturation~~** — Moved to Completed.
+- [x] **~~Adaptive backpressure production tuning guide~~** — Moved to Completed.
+- [x] **~~Management model runtime wiring~~** — Moved to Completed.
+- [x] **~~Config `validate --format json`~~** — Moved to Completed.
+- [x] **~~Egress policy enforcement~~** — Moved to Completed.
+- [x] **~~Admin API integration tests~~** — Moved to Completed.
+- [x] **~~MCP Admin-proxy mode tests~~** — Moved to Completed.
+- [x] **~~Attestation bundle validation~~** — Moved to Completed.
 
-## P2 - Nice to Have (v1.x / Phase 2)
+## P2 - Nice to Have (v2.0+)
 
+- [ ] **xhookaido build tool** — CLI tool for building custom Hookaido binaries with selected modules (like xcaddy). Deferred until module system is stable.
+- [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.
-- [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [x] **~~Documentation UX refresh~~** — Moved to Completed.
 - [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
 - [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
 - [x] **~~CII Best Practices badge~~** — Moved to Completed.
-- [x] **~~Config `diff` CLI command~~** — `hookaido config diff old.hcl new.hcl` with exit code semantics (0=identical, 1=changed, 2=error); diff engine extracted to shared `config.FormatDiff`; 6 CLI tests (moved to Completed).
-- [x] **~~VS Code Extension (Hookaidofile)~~** — TextMate grammar, 18 snippets, file association for `Hookaidofile`/`.hookaido`/`.hkd` (moved to Completed). _Optional Phase 2: LSP backed by `config validate`/`config compile` for live diagnostics._
-- [x] **~~Graceful shutdown draining~~** — PushDispatcher uses internal stopCh+WaitGroup lifecycle; Drain(timeout) completes in-flight deliveries on SIGTERM; 3 drain unit tests + E2E coverage (moved to Completed).
-- [x] **~~Shared listener mode~~** — Auto-detected when pull_api.listen == admin_api.listen; prefix routing via sharedPrefixMux (moved to Completed).
-- [x] **~~Windows CI~~** — Added `windows-latest` to CI matrix; pure-Go SQLite + fsnotify support Windows natively (moved to Completed).
+- [x] **~~Config `diff` CLI command~~** — Moved to Completed.
+- [x] **~~VS Code Extension (Hookaidofile)~~** — Moved to Completed. _Optional: LSP backed by `config validate`/`config compile` for live diagnostics._
+- [x] **~~Graceful shutdown draining~~** — Moved to Completed.
+- [x] **~~Shared listener mode~~** — Moved to Completed.
+- [x] **~~Windows CI~~** — Moved to Completed.
 
 ## Completed (move here when done)
 

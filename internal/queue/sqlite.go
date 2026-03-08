@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 	sqlite3 "modernc.org/sqlite"
 )
 
@@ -3352,4 +3353,27 @@ func isSQLiteMissingCounterError(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "no such table: queue_counters")
+}
+
+// sqliteBackend implements hookaido.QueueBackend for the SQLite queue.
+type sqliteBackend struct{}
+
+func (sqliteBackend) Name() string { return "sqlite" }
+
+func (sqliteBackend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() error, error) {
+	store, err := NewSQLiteStore(
+		cfg.DSN,
+		WithSQLiteQueueLimits(cfg.QueueMaxDepth, cfg.QueueDropPolicy),
+		WithSQLiteRetention(cfg.RetentionMaxAge, cfg.RetentionPruneInterval),
+		WithSQLiteDeliveredRetention(cfg.DeliveredRetentionMaxAge),
+		WithSQLiteDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, store.Close, nil
+}
+
+func init() {
+	hookaido.RegisterQueueBackend(sqliteBackend{})
 }

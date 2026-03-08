@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 )
 
 type PostgresOption func(*PostgresStore)
@@ -2127,4 +2128,27 @@ func clampSliceCap(size, max int) int {
 		return max
 	}
 	return size
+}
+
+// postgresBackend implements hookaido.QueueBackend for the PostgreSQL queue.
+type postgresBackend struct{}
+
+func (postgresBackend) Name() string { return "postgres" }
+
+func (postgresBackend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() error, error) {
+	store, err := NewPostgresStore(
+		cfg.DSN,
+		WithPostgresQueueLimits(cfg.QueueMaxDepth, cfg.QueueDropPolicy),
+		WithPostgresRetention(cfg.RetentionMaxAge, cfg.RetentionPruneInterval),
+		WithPostgresDeliveredRetention(cfg.DeliveredRetentionMaxAge),
+		WithPostgresDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, store.Close, nil
+}
+
+func init() {
+	hookaido.RegisterQueueBackend(postgresBackend{})
 }

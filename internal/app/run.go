@@ -29,6 +29,7 @@ import (
 	"github.com/nuetzliches/hookaido/internal/admin"
 	"github.com/nuetzliches/hookaido/internal/config"
 	"github.com/nuetzliches/hookaido/internal/dispatcher"
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 	"github.com/nuetzliches/hookaido/internal/ingress"
 	"github.com/nuetzliches/hookaido/internal/pullapi"
 	"github.com/nuetzliches/hookaido/internal/queue"
@@ -2166,44 +2167,50 @@ func resolvePostgresDSN(flagValue string) string {
 
 func newQueueStore(compiled config.Compiled, dbPath, postgresDSN string) (queue.Store, string, func() error, error) {
 	backend := queueBackendForCompiled(compiled)
+	if backend == "mixed" {
+		return nil, backend, nil, errors.New("mixed route queue backends are not supported yet")
+	}
+
+	b, ok := hookaido.LookupQueueBackend(backend)
+	if !ok {
+		available := strings.Join(hookaido.QueueBackendNames(), ", ")
+		return nil, backend, nil, fmt.Errorf("queue backend %q is not available (not compiled in); available backends: %s", backend, available)
+	}
+
+	dsn := ""
 	switch backend {
 	case "sqlite":
-		store, err := queue.NewSQLiteStore(
-			dbPath,
-			queue.WithSQLiteQueueLimits(compiled.QueueLimits.MaxDepth, compiled.QueueLimits.DropPolicy),
-			queue.WithSQLiteRetention(compiled.QueueRetention.MaxAge, compiled.QueueRetention.PruneInterval),
-			queue.WithSQLiteDeliveredRetention(compiled.DeliveredRetention.MaxAge),
-			queue.WithSQLiteDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
-		)
-		if err != nil {
-			return nil, backend, nil, err
-		}
-		return store, backend, store.Close, nil
-	case "memory":
-		store := queue.NewMemoryStore(
-			queue.WithQueueLimits(compiled.QueueLimits.MaxDepth, compiled.QueueLimits.DropPolicy),
-			queue.WithQueueRetention(compiled.QueueRetention.MaxAge, compiled.QueueRetention.PruneInterval),
-			queue.WithDeliveredRetention(compiled.DeliveredRetention.MaxAge),
-			queue.WithDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
-		)
-		return store, backend, func() error { return nil }, nil
+		dsn = dbPath
 	case "postgres":
-		store, err := queue.NewPostgresStore(
-			postgresDSN,
-			queue.WithPostgresQueueLimits(compiled.QueueLimits.MaxDepth, compiled.QueueLimits.DropPolicy),
-			queue.WithPostgresRetention(compiled.QueueRetention.MaxAge, compiled.QueueRetention.PruneInterval),
-			queue.WithPostgresDeliveredRetention(compiled.DeliveredRetention.MaxAge),
-			queue.WithPostgresDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
-		)
-		if err != nil {
-			return nil, backend, nil, err
-		}
-		return store, backend, store.Close, nil
-	case "mixed":
-		return nil, backend, nil, errors.New("mixed route queue backends are not supported yet")
-	default:
-		return nil, backend, nil, fmt.Errorf("unsupported queue backend %q", backend)
+		dsn = postgresDSN
 	}
+
+	cfg := hookaido.QueueBackendConfig{
+		DSN:                      dsn,
+		QueueMaxDepth:            compiled.QueueLimits.MaxDepth,
+		QueueDropPolicy:          compiled.QueueLimits.DropPolicy,
+		RetentionMaxAge:          compiled.QueueRetention.MaxAge,
+		RetentionPruneInterval:   compiled.QueueRetention.PruneInterval,
+		DeliveredRetentionMaxAge: compiled.DeliveredRetention.MaxAge,
+		DLQRetentionMaxAge:       compiled.DLQRetention.MaxAge,
+		DLQRetentionMaxDepth:     compiled.DLQRetention.MaxDepth,
+	}
+
+	store, closer, err := b.OpenStore(cfg)
+	if err != nil {
+		return nil, backend, nil, err
+	}
+
+	qs, ok := store.(queue.Store)
+	if !ok {
+		return nil, backend, nil, fmt.Errorf("queue backend %q returned a store that does not implement queue.Store", backend)
+	}
+
+	if closer == nil {
+		closer = func() error { return nil }
+	}
+
+	return qs, backend, closer, nil
 }
 
 func queueBackendForCompiled(compiled config.Compiled) string {

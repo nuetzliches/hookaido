@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 	"github.com/nuetzliches/hookaido/internal/httpheader"
 	"github.com/nuetzliches/hookaido/internal/secrets"
 )
@@ -794,8 +795,12 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				res.Errors = append(res.Errors, fmt.Sprintf("route %q queue.backend must not be empty", rPath))
 			} else {
 				raw = strings.ToLower(raw)
-				if raw != "sqlite" && raw != "memory" && raw != "postgres" {
-					res.Errors = append(res.Errors, fmt.Sprintf("route %q queue.backend must be one of: sqlite, memory, postgres", rPath))
+				if !hookaido.HasQueueBackend(raw) {
+					available := strings.Join(hookaido.QueueBackendNames(), ", ")
+					if available == "" {
+						available = "(none compiled in)"
+					}
+					res.Errors = append(res.Errors, fmt.Sprintf("route %q queue.backend %q is not available; compiled backends: %s", rPath, raw, available))
 				} else {
 					queueBackend = raw
 				}

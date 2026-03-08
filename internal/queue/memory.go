@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 )
 
 var (
@@ -1890,4 +1892,23 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// memoryBackend implements hookaido.QueueBackend for the in-memory queue.
+type memoryBackend struct{}
+
+func (memoryBackend) Name() string { return "memory" }
+
+func (memoryBackend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() error, error) {
+	store := NewMemoryStore(
+		WithQueueLimits(cfg.QueueMaxDepth, cfg.QueueDropPolicy),
+		WithQueueRetention(cfg.RetentionMaxAge, cfg.RetentionPruneInterval),
+		WithDeliveredRetention(cfg.DeliveredRetentionMaxAge),
+		WithDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
+	)
+	return store, func() error { return nil }, nil
+}
+
+func init() {
+	hookaido.RegisterQueueBackend(memoryBackend{})
 }

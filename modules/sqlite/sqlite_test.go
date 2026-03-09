@@ -1,4 +1,4 @@
-package queue
+package sqlite
 
 import (
 	"database/sql"
@@ -9,10 +9,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
-func TestSQLiteStore_JournalModeIsWAL(t *testing.T) {
-	s := newSQLiteStoreForTest(t, time.Now)
+func TestStore_JournalModeIsWAL(t *testing.T) {
+	s := newStoreForTest(t, time.Now)
 
 	var mode string
 	if err := s.db.QueryRow(`PRAGMA journal_mode;`).Scan(&mode); err != nil {
@@ -23,8 +25,8 @@ func TestSQLiteStore_JournalModeIsWAL(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_SchemaVersionRecorded(t *testing.T) {
-	s := newSQLiteStoreForTest(t, time.Now)
+func TestStore_SchemaVersionRecorded(t *testing.T) {
+	s := newStoreForTest(t, time.Now)
 
 	var v int
 	if err := s.db.QueryRow(`SELECT version FROM schema_migrations LIMIT 1;`).Scan(&v); err != nil {
@@ -35,16 +37,16 @@ func TestSQLiteStore_SchemaVersionRecorded(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_EnqueueDequeueAck(t *testing.T) {
+func TestStore_EnqueueDequeueAck(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	err := s.Enqueue(Envelope{
+	err := s.Enqueue(queue.Envelope{
 		ID:         "evt_1",
 		Route:      "/pull/github",
 		Target:     "pull",
-		State:      StateQueued,
+		State:      queue.StateQueued,
 		ReceivedAt: nowVar,
 		NextRunAt:  nowVar,
 		Payload:    []byte("hello"),
@@ -55,7 +57,7 @@ func TestSQLiteStore_EnqueueDequeueAck(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{
+	resp, err := s.Dequeue(queue.DequeueRequest{
 		Route:    "/pull/github",
 		Target:   "pull",
 		Batch:    1,
@@ -71,7 +73,7 @@ func TestSQLiteStore_EnqueueDequeueAck(t *testing.T) {
 	if item.Attempt != 1 {
 		t.Fatalf("expected attempt=1, got %d", item.Attempt)
 	}
-	if item.State != StateLeased {
+	if item.State != queue.StateLeased {
 		t.Fatalf("expected leased state, got %q", item.State)
 	}
 	if item.LeaseID == "" {
@@ -88,7 +90,7 @@ func TestSQLiteStore_EnqueueDequeueAck(t *testing.T) {
 		t.Fatalf("ack: %v", err)
 	}
 
-	resp2, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull"})
+	resp2, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull"})
 	if err != nil {
 		t.Fatalf("dequeue2: %v", err)
 	}
@@ -97,16 +99,16 @@ func TestSQLiteStore_EnqueueDequeueAck(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_LeaseExpiryRequeues(t *testing.T) {
+func TestStore_LeaseExpiryRequeues(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull", Payload: []byte("x")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull", Payload: []byte("x")}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -122,11 +124,11 @@ func TestSQLiteStore_LeaseExpiryRequeues(t *testing.T) {
 	}
 
 	nowVar = nowVar.Add(11 * time.Second)
-	if err := s.Ack(leaseID); err != ErrLeaseExpired {
-		t.Fatalf("expected ErrLeaseExpired, got %v", err)
+	if err := s.Ack(leaseID); err != queue.ErrLeaseExpired {
+		t.Fatalf("expected queue.ErrLeaseExpired, got %v", err)
 	}
 
-	resp2, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
+	resp2, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue2: %v", err)
 	}
@@ -138,16 +140,16 @@ func TestSQLiteStore_LeaseExpiryRequeues(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_NackDelay(t *testing.T) {
+func TestStore_NackDelay(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 30 * time.Second})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -159,7 +161,7 @@ func TestSQLiteStore_NackDelay(t *testing.T) {
 		t.Fatalf("nack: %v", err)
 	}
 
-	resp2, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull"})
+	resp2, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull"})
 	if err != nil {
 		t.Fatalf("dequeue2: %v", err)
 	}
@@ -168,7 +170,7 @@ func TestSQLiteStore_NackDelay(t *testing.T) {
 	}
 
 	nowVar = nowVar.Add(5 * time.Second)
-	resp3, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull"})
+	resp3, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull"})
 	if err != nil {
 		t.Fatalf("dequeue3: %v", err)
 	}
@@ -180,16 +182,16 @@ func TestSQLiteStore_NackDelay(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_MarkDead(t *testing.T) {
+func TestStore_MarkDead(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 30 * time.Second})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -208,8 +210,8 @@ func TestSQLiteStore_MarkDead(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT state, lease_id, dead_reason FROM queue_items WHERE id = ?;`, "evt_1").Scan(&state, &leaseIDDB, &deadReason); err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	if state != string(StateDead) {
-		t.Fatalf("state=%q, want %q", state, StateDead)
+	if state != string(queue.StateDead) {
+		t.Fatalf("state=%q, want %q", state, queue.StateDead)
 	}
 	if leaseIDDB != nil {
 		t.Fatalf("expected lease_id NULL, got %q", *leaseIDDB)
@@ -219,18 +221,18 @@ func TestSQLiteStore_MarkDead(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_LeaseBatchMethods(t *testing.T) {
+func TestStore_LeaseBatchMethods(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
 	for _, id := range []string{"evt_1", "evt_2", "evt_3"} {
-		if err := s.Enqueue(Envelope{ID: id, Route: "/pull/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
+		if err := s.Enqueue(queue.Envelope{ID: id, Route: "/pull/github", Target: "pull", ReceivedAt: nowVar, NextRunAt: nowVar}); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
 	}
 
-	deq, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 2, LeaseTTL: 30 * time.Second})
+	deq, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 2, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -252,7 +254,7 @@ func TestSQLiteStore_LeaseBatchMethods(t *testing.T) {
 		t.Fatalf("unexpected conflict: %#v", ackRes.Conflicts[0])
 	}
 
-	deq2, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	deq2, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue2: %v", err)
 	}
@@ -268,7 +270,7 @@ func TestSQLiteStore_LeaseBatchMethods(t *testing.T) {
 		t.Fatalf("unexpected nack batch result: %#v", nackRes)
 	}
 
-	deq3, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1})
+	deq3, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1})
 	if err != nil {
 		t.Fatalf("dequeue3: %v", err)
 	}
@@ -277,7 +279,7 @@ func TestSQLiteStore_LeaseBatchMethods(t *testing.T) {
 	}
 
 	nowVar = nowVar.Add(5 * time.Second)
-	deq4, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	deq4, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue4: %v", err)
 	}
@@ -305,8 +307,8 @@ func TestSQLiteStore_LeaseBatchMethods(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT state, lease_id, dead_reason FROM queue_items WHERE id = ?;`, deq4.Items[0].ID).Scan(&state, &leaseIDDB, &deadReason); err != nil {
 		t.Fatalf("query dead item: %v", err)
 	}
-	if state != string(StateDead) {
-		t.Fatalf("state=%q, want %q", state, StateDead)
+	if state != string(queue.StateDead) {
+		t.Fatalf("state=%q, want %q", state, queue.StateDead)
 	}
 	if leaseIDDB != nil {
 		t.Fatalf("expected lease_id NULL, got %q", *leaseIDDB)
@@ -316,16 +318,16 @@ func TestSQLiteStore_LeaseBatchMethods(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_AckBatchExpiredRequeues(t *testing.T) {
+func TestStore_AckBatchExpiredRequeues(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	deq, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: time.Second})
+	deq, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -349,7 +351,7 @@ func TestSQLiteStore_AckBatchExpiredRequeues(t *testing.T) {
 		t.Fatalf("unexpected conflict: %#v", res.Conflicts[0])
 	}
 
-	deq2, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: time.Second})
+	deq2, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", Batch: 1, LeaseTTL: time.Second})
 	if err != nil {
 		t.Fatalf("dequeue2: %v", err)
 	}
@@ -361,25 +363,25 @@ func TestSQLiteStore_AckBatchExpiredRequeues(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ListDead(t *testing.T) {
+func TestStore_ListDead(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-2 * time.Minute), Payload: []byte("a")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-2 * time.Minute), Payload: []byte("a")}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-1 * time.Minute), Payload: []byte("b")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-1 * time.Minute), Payload: []byte("b")}); err != nil {
 		t.Fatalf("enqueue dead_2: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_3", Route: "/other", Target: "pull", State: StateDead, ReceivedAt: now.Add(-30 * time.Second), Payload: []byte("c")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_3", Route: "/other", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-30 * time.Second), Payload: []byte("c")}); err != nil {
 		t.Fatalf("enqueue dead_3: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now, Payload: []byte("q")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now, Payload: []byte("q")}); err != nil {
 		t.Fatalf("enqueue queued_1: %v", err)
 	}
 
-	resp, err := s.ListDead(DeadListRequest{Route: "/r", Limit: 10})
+	resp, err := s.ListDead(queue.DeadListRequest{Route: "/r", Limit: 10})
 	if err != nil {
 		t.Fatalf("list dead: %v", err)
 	}
@@ -393,7 +395,7 @@ func TestSQLiteStore_ListDead(t *testing.T) {
 		t.Fatalf("expected payload omitted by default")
 	}
 
-	resp2, err := s.ListDead(DeadListRequest{
+	resp2, err := s.ListDead(queue.DeadListRequest{
 		Route:          "/r",
 		Limit:          10,
 		Before:         now.Add(-90 * time.Second),
@@ -410,12 +412,12 @@ func TestSQLiteStore_ListDead(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RecordAndListAttempts(t *testing.T) {
+func TestStore_RecordAndListAttempts(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.RecordAttempt(DeliveryAttempt{
+	if err := s.RecordAttempt(queue.DeliveryAttempt{
 		ID:         "att_1",
 		EventID:    "evt_1",
 		Route:      "/r",
@@ -423,37 +425,37 @@ func TestSQLiteStore_RecordAndListAttempts(t *testing.T) {
 		Attempt:    1,
 		StatusCode: 503,
 		Error:      "upstream timeout",
-		Outcome:    AttemptOutcomeRetry,
+		Outcome:    queue.AttemptOutcomeRetry,
 		CreatedAt:  now.Add(-2 * time.Minute),
 	}); err != nil {
 		t.Fatalf("record att_1: %v", err)
 	}
-	if err := s.RecordAttempt(DeliveryAttempt{
+	if err := s.RecordAttempt(queue.DeliveryAttempt{
 		ID:         "att_2",
 		EventID:    "evt_1",
 		Route:      "/r",
 		Target:     "https://example.internal/a",
 		Attempt:    2,
 		StatusCode: 502,
-		Outcome:    AttemptOutcomeDead,
+		Outcome:    queue.AttemptOutcomeDead,
 		DeadReason: "max_retries",
 		CreatedAt:  now.Add(-1 * time.Minute),
 	}); err != nil {
 		t.Fatalf("record att_2: %v", err)
 	}
-	if err := s.RecordAttempt(DeliveryAttempt{
+	if err := s.RecordAttempt(queue.DeliveryAttempt{
 		ID:        "att_3",
 		EventID:   "evt_2",
 		Route:     "/other",
 		Target:    "https://example.internal/b",
 		Attempt:   1,
-		Outcome:   AttemptOutcomeAcked,
+		Outcome:   queue.AttemptOutcomeAcked,
 		CreatedAt: now.Add(-30 * time.Second),
 	}); err != nil {
 		t.Fatalf("record att_3: %v", err)
 	}
 
-	resp, err := s.ListAttempts(AttemptListRequest{
+	resp, err := s.ListAttempts(queue.AttemptListRequest{
 		Route:   "/r",
 		EventID: "evt_1",
 		Limit:   10,
@@ -467,15 +469,15 @@ func TestSQLiteStore_RecordAndListAttempts(t *testing.T) {
 	if resp.Items[0].ID != "att_2" || resp.Items[1].ID != "att_1" {
 		t.Fatalf("unexpected order: %#v", []string{resp.Items[0].ID, resp.Items[1].ID})
 	}
-	if resp.Items[0].Outcome != AttemptOutcomeDead {
+	if resp.Items[0].Outcome != queue.AttemptOutcomeDead {
 		t.Fatalf("expected dead outcome, got %q", resp.Items[0].Outcome)
 	}
 	if resp.Items[0].DeadReason != "max_retries" {
 		t.Fatalf("expected dead reason max_retries, got %q", resp.Items[0].DeadReason)
 	}
 
-	resp2, err := s.ListAttempts(AttemptListRequest{
-		Outcome: AttemptOutcomeRetry,
+	resp2, err := s.ListAttempts(queue.AttemptListRequest{
+		Outcome: queue.AttemptOutcomeRetry,
 		Before:  now.Add(-1 * time.Minute),
 		Limit:   10,
 	})
@@ -490,19 +492,19 @@ func TestSQLiteStore_RecordAndListAttempts(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RequeueDead(t *testing.T) {
+func TestStore_RequeueDead(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-time.Minute), DeadReason: "max_retries"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-time.Minute), DeadReason: "max_retries"}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-2 * time.Minute), DeadReason: "no_retry"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-2 * time.Minute), DeadReason: "no_retry"}); err != nil {
 		t.Fatalf("enqueue dead_2: %v", err)
 	}
 
-	resp, err := s.RequeueDead(DeadRequeueRequest{IDs: []string{"dead_1", "missing", "dead_1"}})
+	resp, err := s.RequeueDead(queue.DeadRequeueRequest{IDs: []string{"dead_1", "missing", "dead_1"}})
 	if err != nil {
 		t.Fatalf("requeue dead: %v", err)
 	}
@@ -510,7 +512,7 @@ func TestSQLiteStore_RequeueDead(t *testing.T) {
 		t.Fatalf("expected requeued=1, got %d", resp.Requeued)
 	}
 
-	deadResp, err := s.ListDead(DeadListRequest{Route: "/r", Limit: 10})
+	deadResp, err := s.ListDead(queue.DeadListRequest{Route: "/r", Limit: 10})
 	if err != nil {
 		t.Fatalf("list dead: %v", err)
 	}
@@ -518,7 +520,7 @@ func TestSQLiteStore_RequeueDead(t *testing.T) {
 		t.Fatalf("expected only dead_2 in DLQ, got %#v", deadResp.Items)
 	}
 
-	deq, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 10})
+	deq, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 10})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -534,17 +536,17 @@ func TestSQLiteStore_RequeueDead(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_DeleteDead(t *testing.T) {
-	s := newSQLiteStoreForTest(t, time.Now)
+func TestStore_DeleteDead(t *testing.T) {
+	s := newStoreForTest(t, time.Now)
 
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead, DeadReason: "max_retries"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, DeadReason: "max_retries"}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: StateDead, DeadReason: "no_retry"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: queue.StateDead, DeadReason: "no_retry"}); err != nil {
 		t.Fatalf("enqueue dead_2: %v", err)
 	}
 
-	resp, err := s.DeleteDead(DeadDeleteRequest{IDs: []string{"dead_1", "dead_1", "missing"}})
+	resp, err := s.DeleteDead(queue.DeadDeleteRequest{IDs: []string{"dead_1", "dead_1", "missing"}})
 	if err != nil {
 		t.Fatalf("delete dead: %v", err)
 	}
@@ -552,7 +554,7 @@ func TestSQLiteStore_DeleteDead(t *testing.T) {
 		t.Fatalf("expected deleted=1, got %d", resp.Deleted)
 	}
 
-	deadResp, err := s.ListDead(DeadListRequest{Route: "/r", Limit: 10})
+	deadResp, err := s.ListDead(queue.DeadListRequest{Route: "/r", Limit: 10})
 	if err != nil {
 		t.Fatalf("list dead: %v", err)
 	}
@@ -561,24 +563,24 @@ func TestSQLiteStore_DeleteDead(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ListMessages(t *testing.T) {
+func TestStore_ListMessages(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-2 * time.Minute), Payload: []byte("a")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-2 * time.Minute), Payload: []byte("a")}); err != nil {
 		t.Fatalf("enqueue queued_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "queued_2", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-1 * time.Minute), Payload: []byte("b")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "queued_2", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-1 * time.Minute), Payload: []byte("b")}); err != nil {
 		t.Fatalf("enqueue queued_2: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-30 * time.Second), Payload: []byte("dead")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-30 * time.Second), Payload: []byte("dead")}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
 
-	resp, err := s.ListMessages(MessageListRequest{
+	resp, err := s.ListMessages(queue.MessageListRequest{
 		Route:          "/r",
-		State:          StateQueued,
+		State:          queue.StateQueued,
 		Limit:          1,
 		IncludePayload: true,
 	})
@@ -596,47 +598,47 @@ func TestSQLiteStore_ListMessages(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_LookupMessages(t *testing.T) {
-	s := newSQLiteStoreForTest(t, time.Now)
+func TestStore_LookupMessages(t *testing.T) {
+	s := newStoreForTest(t, time.Now)
 
-	if err := s.Enqueue(Envelope{ID: "queued_1", Route: "/r/queued", Target: "pull", State: StateQueued}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "queued_1", Route: "/r/queued", Target: "pull", State: queue.StateQueued}); err != nil {
 		t.Fatalf("enqueue queued_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r/dead", Target: "pull", State: StateDead}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r/dead", Target: "pull", State: queue.StateDead}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
 
-	resp, err := s.LookupMessages(MessageLookupRequest{IDs: []string{"dead_1", "missing", "queued_1", "dead_1", " "}})
+	resp, err := s.LookupMessages(queue.MessageLookupRequest{IDs: []string{"dead_1", "missing", "queued_1", "dead_1", " "}})
 	if err != nil {
 		t.Fatalf("lookup messages: %v", err)
 	}
 	if len(resp.Items) != 2 {
 		t.Fatalf("expected 2 lookup items, got %d", len(resp.Items))
 	}
-	if resp.Items[0].ID != "dead_1" || resp.Items[0].Route != "/r/dead" || resp.Items[0].State != StateDead {
+	if resp.Items[0].ID != "dead_1" || resp.Items[0].Route != "/r/dead" || resp.Items[0].State != queue.StateDead {
 		t.Fatalf("unexpected first lookup item: %#v", resp.Items[0])
 	}
-	if resp.Items[1].ID != "queued_1" || resp.Items[1].Route != "/r/queued" || resp.Items[1].State != StateQueued {
+	if resp.Items[1].ID != "queued_1" || resp.Items[1].Route != "/r/queued" || resp.Items[1].State != queue.StateQueued {
 		t.Fatalf("unexpected second lookup item: %#v", resp.Items[1])
 	}
 }
 
-func TestSQLiteStore_ListMessagesOrderAsc(t *testing.T) {
+func TestStore_ListMessagesOrderAsc(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue queued_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "queued_2", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "queued_2", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue queued_2: %v", err)
 	}
 
-	resp, err := s.ListMessages(MessageListRequest{
+	resp, err := s.ListMessages(queue.MessageListRequest{
 		Route: "/r",
-		State: StateQueued,
-		Order: MessageOrderAsc,
+		State: queue.StateQueued,
+		Order: queue.MessageOrderAsc,
 		Limit: 2,
 	})
 	if err != nil {
@@ -650,33 +652,33 @@ func TestSQLiteStore_ListMessagesOrderAsc(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ListMessagesOrderInvalid(t *testing.T) {
-	s := newSQLiteStoreForTest(t, time.Now)
-	_, err := s.ListMessages(MessageListRequest{Order: "sideways"})
+func TestStore_ListMessagesOrderInvalid(t *testing.T) {
+	s := newStoreForTest(t, time.Now)
+	_, err := s.ListMessages(queue.MessageListRequest{Order: "sideways"})
 	if err == nil {
 		t.Fatalf("expected error for invalid order")
 	}
 }
 
-func TestSQLiteStore_CancelMessages(t *testing.T) {
+func TestStore_CancelMessages(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: StateQueued}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "queued_1", Route: "/r", Target: "pull", State: queue.StateQueued}); err != nil {
 		t.Fatalf("enqueue queued_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "delivered_1", Route: "/r", Target: "pull", State: StateDelivered}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "delivered_1", Route: "/r", Target: "pull", State: queue.StateDelivered}); err != nil {
 		t.Fatalf("enqueue delivered_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "leased_1", Route: "/r", Target: "pull", State: StateQueued}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "leased_1", Route: "/r", Target: "pull", State: queue.StateQueued}); err != nil {
 		t.Fatalf("enqueue leased_1: %v", err)
 	}
 
-	deq, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1})
+	deq, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -685,7 +687,7 @@ func TestSQLiteStore_CancelMessages(t *testing.T) {
 	}
 	leaseID := deq.Items[0].LeaseID
 
-	resp, err := s.CancelMessages(MessageCancelRequest{
+	resp, err := s.CancelMessages(queue.MessageCancelRequest{
 		IDs: []string{"queued_1", "dead_1", "leased_1", "delivered_1", "missing", "queued_1"},
 	})
 	if err != nil {
@@ -694,11 +696,11 @@ func TestSQLiteStore_CancelMessages(t *testing.T) {
 	if resp.Canceled != 3 {
 		t.Fatalf("expected canceled=3, got %d", resp.Canceled)
 	}
-	if err := s.Ack(leaseID); err != ErrLeaseNotFound {
+	if err := s.Ack(leaseID); err != queue.ErrLeaseNotFound {
 		t.Fatalf("expected lease not found after cancel, got %v", err)
 	}
 
-	canceledResp, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateCanceled, Limit: 10})
+	canceledResp, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateCanceled, Limit: 10})
 	if err != nil {
 		t.Fatalf("list canceled messages: %v", err)
 	}
@@ -706,7 +708,7 @@ func TestSQLiteStore_CancelMessages(t *testing.T) {
 		t.Fatalf("expected 3 canceled items, got %d", len(canceledResp.Items))
 	}
 
-	deq2, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 10})
+	deq2, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 10})
 	if err != nil {
 		t.Fatalf("dequeue after cancel: %v", err)
 	}
@@ -715,22 +717,22 @@ func TestSQLiteStore_CancelMessages(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RequeueMessages(t *testing.T) {
+func TestStore_RequeueMessages(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead, DeadReason: "max_retries"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, DeadReason: "max_retries"}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "canceled_1", Route: "/r", Target: "pull", State: StateCanceled}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "canceled_1", Route: "/r", Target: "pull", State: queue.StateCanceled}); err != nil {
 		t.Fatalf("enqueue canceled_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "delivered_1", Route: "/r", Target: "pull", State: StateDelivered}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "delivered_1", Route: "/r", Target: "pull", State: queue.StateDelivered}); err != nil {
 		t.Fatalf("enqueue delivered_1: %v", err)
 	}
 
-	resp, err := s.RequeueMessages(MessageRequeueRequest{
+	resp, err := s.RequeueMessages(queue.MessageRequeueRequest{
 		IDs: []string{"dead_1", "canceled_1", "delivered_1", "missing", "dead_1"},
 	})
 	if err != nil {
@@ -740,7 +742,7 @@ func TestSQLiteStore_RequeueMessages(t *testing.T) {
 		t.Fatalf("expected requeued=2, got %d", resp.Requeued)
 	}
 
-	queuedResp, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateQueued, Limit: 10})
+	queuedResp, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateQueued, Limit: 10})
 	if err != nil {
 		t.Fatalf("list queued messages: %v", err)
 	}
@@ -755,19 +757,19 @@ func TestSQLiteStore_RequeueMessages(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ResumeMessages(t *testing.T) {
+func TestStore_ResumeMessages(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "canceled_1", Route: "/r", Target: "pull", State: StateCanceled}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "canceled_1", Route: "/r", Target: "pull", State: queue.StateCanceled}); err != nil {
 		t.Fatalf("enqueue canceled_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead}); err != nil {
 		t.Fatalf("enqueue dead_1: %v", err)
 	}
 
-	resp, err := s.ResumeMessages(MessageResumeRequest{
+	resp, err := s.ResumeMessages(queue.MessageResumeRequest{
 		IDs: []string{"canceled_1", "dead_1", "missing"},
 	})
 	if err != nil {
@@ -777,7 +779,7 @@ func TestSQLiteStore_ResumeMessages(t *testing.T) {
 		t.Fatalf("expected resumed=1, got %d", resp.Resumed)
 	}
 
-	queuedResp, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateQueued, Limit: 10})
+	queuedResp, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateQueued, Limit: 10})
 	if err != nil {
 		t.Fatalf("list queued messages: %v", err)
 	}
@@ -786,25 +788,25 @@ func TestSQLiteStore_ResumeMessages(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_CancelMessagesByFilter(t *testing.T) {
+func TestStore_CancelMessagesByFilter(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "q_1", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-4 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q_1", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-4 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue q_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "q_2", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-3 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q_2", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-3 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue q_2: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "d_1", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "d_1", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue d_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "x_1", Route: "/x", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "x_1", Route: "/x", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue x_1: %v", err)
 	}
 
-	resp, err := s.CancelMessagesByFilter(MessageManageFilterRequest{
+	resp, err := s.CancelMessagesByFilter(queue.MessageManageFilterRequest{
 		Route: "/r",
 		Limit: 2,
 	})
@@ -815,7 +817,7 @@ func TestSQLiteStore_CancelMessagesByFilter(t *testing.T) {
 		t.Fatalf("expected canceled=2, got %d", resp.Canceled)
 	}
 
-	canceled, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateCanceled, Limit: 10})
+	canceled, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateCanceled, Limit: 10})
 	if err != nil {
 		t.Fatalf("list canceled: %v", err)
 	}
@@ -824,27 +826,27 @@ func TestSQLiteStore_CancelMessagesByFilter(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RequeueMessagesByFilter(t *testing.T) {
+func TestStore_RequeueMessagesByFilter(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "d_1", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-4 * time.Minute), DeadReason: "max_retries"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "d_1", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-4 * time.Minute), DeadReason: "max_retries"}); err != nil {
 		t.Fatalf("enqueue d_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "c_1", Route: "/r", Target: "pull", State: StateCanceled, ReceivedAt: now.Add(-3 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "c_1", Route: "/r", Target: "pull", State: queue.StateCanceled, ReceivedAt: now.Add(-3 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue c_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "c_2", Route: "/r", Target: "pull", State: StateCanceled, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "c_2", Route: "/r", Target: "pull", State: queue.StateCanceled, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue c_2: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "q_1", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q_1", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue q_1: %v", err)
 	}
 
-	resp, err := s.RequeueMessagesByFilter(MessageManageFilterRequest{
+	resp, err := s.RequeueMessagesByFilter(queue.MessageManageFilterRequest{
 		Route:  "/r",
-		State:  StateCanceled,
+		State:  queue.StateCanceled,
 		Before: now.Add(-90 * time.Second),
 		Limit:  10,
 	})
@@ -855,7 +857,7 @@ func TestSQLiteStore_RequeueMessagesByFilter(t *testing.T) {
 		t.Fatalf("expected requeued=2, got %d", resp.Requeued)
 	}
 
-	queued, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateQueued, Limit: 10})
+	queued, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateQueued, Limit: 10})
 	if err != nil {
 		t.Fatalf("list queued: %v", err)
 	}
@@ -864,21 +866,21 @@ func TestSQLiteStore_RequeueMessagesByFilter(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_CancelMessagesByFilterPreviewOnly(t *testing.T) {
+func TestStore_CancelMessagesByFilterPreviewOnly(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "q_1", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q_1", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue q_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "q_2", Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q_2", Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue q_2: %v", err)
 	}
 
-	resp, err := s.CancelMessagesByFilter(MessageManageFilterRequest{
+	resp, err := s.CancelMessagesByFilter(queue.MessageManageFilterRequest{
 		Route:       "/r",
-		State:       StateQueued,
+		State:       queue.StateQueued,
 		Limit:       10,
 		PreviewOnly: true,
 	})
@@ -889,7 +891,7 @@ func TestSQLiteStore_CancelMessagesByFilterPreviewOnly(t *testing.T) {
 		t.Fatalf("unexpected preview response: %#v", resp)
 	}
 
-	queued, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateQueued, Limit: 10})
+	queued, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateQueued, Limit: 10})
 	if err != nil {
 		t.Fatalf("list queued: %v", err)
 	}
@@ -898,19 +900,19 @@ func TestSQLiteStore_CancelMessagesByFilterPreviewOnly(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RequeueMessagesByFilterPreviewOnly(t *testing.T) {
+func TestStore_RequeueMessagesByFilterPreviewOnly(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "d_1", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "d_1", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue d_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "c_1", Route: "/r", Target: "pull", State: StateCanceled, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "c_1", Route: "/r", Target: "pull", State: queue.StateCanceled, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue c_1: %v", err)
 	}
 
-	resp, err := s.RequeueMessagesByFilter(MessageManageFilterRequest{
+	resp, err := s.RequeueMessagesByFilter(queue.MessageManageFilterRequest{
 		Route:       "/r",
 		Limit:       10,
 		PreviewOnly: true,
@@ -922,7 +924,7 @@ func TestSQLiteStore_RequeueMessagesByFilterPreviewOnly(t *testing.T) {
 		t.Fatalf("unexpected preview response: %#v", resp)
 	}
 
-	queued, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateQueued, Limit: 10})
+	queued, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateQueued, Limit: 10})
 	if err != nil {
 		t.Fatalf("list queued: %v", err)
 	}
@@ -931,19 +933,19 @@ func TestSQLiteStore_RequeueMessagesByFilterPreviewOnly(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ResumeMessagesByFilterPreviewOnly(t *testing.T) {
+func TestStore_ResumeMessagesByFilterPreviewOnly(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "c_1", Route: "/r", Target: "pull", State: StateCanceled, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "c_1", Route: "/r", Target: "pull", State: queue.StateCanceled, ReceivedAt: now.Add(-2 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue c_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "c_2", Route: "/r", Target: "pull", State: StateCanceled, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "c_2", Route: "/r", Target: "pull", State: queue.StateCanceled, ReceivedAt: now.Add(-1 * time.Minute)}); err != nil {
 		t.Fatalf("enqueue c_2: %v", err)
 	}
 
-	resp, err := s.ResumeMessagesByFilter(MessageManageFilterRequest{
+	resp, err := s.ResumeMessagesByFilter(queue.MessageManageFilterRequest{
 		Route:       "/r",
 		Limit:       10,
 		PreviewOnly: true,
@@ -955,7 +957,7 @@ func TestSQLiteStore_ResumeMessagesByFilterPreviewOnly(t *testing.T) {
 		t.Fatalf("unexpected preview response: %#v", resp)
 	}
 
-	queued, err := s.ListMessages(MessageListRequest{Route: "/r", State: StateQueued, Limit: 10})
+	queued, err := s.ListMessages(queue.MessageListRequest{Route: "/r", State: queue.StateQueued, Limit: 10})
 	if err != nil {
 		t.Fatalf("list queued: %v", err)
 	}
@@ -964,25 +966,25 @@ func TestSQLiteStore_ResumeMessagesByFilterPreviewOnly(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_Stats(t *testing.T) {
+func TestStore_Stats(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{
+	if err := s.Enqueue(queue.Envelope{
 		ID:         "q_1",
 		Route:      "/r",
 		Target:     "pull",
-		State:      StateQueued,
+		State:      queue.StateQueued,
 		ReceivedAt: now.Add(-2 * time.Minute),
 		NextRunAt:  now.Add(-30 * time.Second),
 	}); err != nil {
 		t.Fatalf("enqueue q_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "d_1", Route: "/r", Target: "pull", State: StateDead}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "d_1", Route: "/r", Target: "pull", State: queue.StateDead}); err != nil {
 		t.Fatalf("enqueue d_1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "c_1", Route: "/r", Target: "pull", State: StateCanceled}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "c_1", Route: "/r", Target: "pull", State: queue.StateCanceled}); err != nil {
 		t.Fatalf("enqueue c_1: %v", err)
 	}
 
@@ -993,7 +995,7 @@ func TestSQLiteStore_Stats(t *testing.T) {
 	if stats.Total != 3 {
 		t.Fatalf("expected total=3, got %d", stats.Total)
 	}
-	if stats.ByState[StateQueued] != 1 || stats.ByState[StateDead] != 1 || stats.ByState[StateCanceled] != 1 {
+	if stats.ByState[queue.StateQueued] != 1 || stats.ByState[queue.StateDead] != 1 || stats.ByState[queue.StateCanceled] != 1 {
 		t.Fatalf("unexpected by_state: %#v", stats.ByState)
 	}
 	if got, want := stats.OldestQueuedReceivedAt, now.Add(-2*time.Minute); !got.Equal(want) {
@@ -1016,18 +1018,18 @@ func TestSQLiteStore_Stats(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_BacklogTrendCaptureAndList(t *testing.T) {
+func TestStore_BacklogTrendCaptureAndList(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "q1", Route: "/r1", Target: "pull", State: StateQueued}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q1", Route: "/r1", Target: "pull", State: queue.StateQueued}); err != nil {
 		t.Fatalf("enqueue q1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "l1", Route: "/r1", Target: "pull", State: StateLeased}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "l1", Route: "/r1", Target: "pull", State: queue.StateLeased}); err != nil {
 		t.Fatalf("enqueue l1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "d1", Route: "/r2", Target: "pull", State: StateDead}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "d1", Route: "/r2", Target: "pull", State: queue.StateDead}); err != nil {
 		t.Fatalf("enqueue d1: %v", err)
 	}
 
@@ -1035,7 +1037,7 @@ func TestSQLiteStore_BacklogTrendCaptureAndList(t *testing.T) {
 		t.Fatalf("capture trend #1: %v", err)
 	}
 
-	if err := s.Enqueue(Envelope{ID: "q2", Route: "/r1", Target: "https://example.org/hook", State: StateQueued}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q2", Route: "/r1", Target: "https://example.org/hook", State: queue.StateQueued}); err != nil {
 		t.Fatalf("enqueue q2: %v", err)
 	}
 	nowVar = nowVar.Add(1 * time.Minute)
@@ -1043,7 +1045,7 @@ func TestSQLiteStore_BacklogTrendCaptureAndList(t *testing.T) {
 		t.Fatalf("capture trend #2: %v", err)
 	}
 
-	global, err := s.ListBacklogTrend(BacklogTrendListRequest{
+	global, err := s.ListBacklogTrend(queue.BacklogTrendListRequest{
 		Since: now.Add(-1 * time.Minute),
 		Until: now.Add(2 * time.Minute),
 		Limit: 10,
@@ -1064,7 +1066,7 @@ func TestSQLiteStore_BacklogTrendCaptureAndList(t *testing.T) {
 		t.Fatalf("unexpected global sample #2: %#v", global.Items[1])
 	}
 
-	routeOnly, err := s.ListBacklogTrend(BacklogTrendListRequest{
+	routeOnly, err := s.ListBacklogTrend(queue.BacklogTrendListRequest{
 		Route: "/r1",
 		Limit: 10,
 	})
@@ -1081,7 +1083,7 @@ func TestSQLiteStore_BacklogTrendCaptureAndList(t *testing.T) {
 		t.Fatalf("unexpected route sample #2: %#v", routeOnly.Items[1])
 	}
 
-	truncated, err := s.ListBacklogTrend(BacklogTrendListRequest{Limit: 1})
+	truncated, err := s.ListBacklogTrend(queue.BacklogTrendListRequest{Limit: 1})
 	if err != nil {
 		t.Fatalf("list truncated trend: %v", err)
 	}
@@ -1096,26 +1098,26 @@ func TestSQLiteStore_BacklogTrendCaptureAndList(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_DeliveredRetentionPrunesDelivered(t *testing.T) {
+func TestStore_DeliveredRetentionPrunesDelivered(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(
+	s, err := NewStore(
 		dbPath,
-		WithSQLiteNowFunc(func() time.Time { return nowVar }),
-		WithSQLiteRetention(0, 1*time.Second),
-		WithSQLiteDeliveredRetention(2*time.Second),
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithRetention(0, 1*time.Second),
+		WithDeliveredRetention(2*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1127,10 +1129,10 @@ func TestSQLiteStore_DeliveredRetentionPrunesDelivered(t *testing.T) {
 	}
 
 	nowVar = nowVar.Add(3 * time.Second)
-	_, _ = s.Dequeue(DequeueRequest{Route: "/r", Target: "pull"})
+	_, _ = s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull"})
 
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM queue_items WHERE state = ?;`, string(StateDelivered)).Scan(&count); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM queue_items WHERE state = ?;`, string(queue.StateDelivered)).Scan(&count); err != nil {
 		t.Fatalf("count delivered: %v", err)
 	}
 	if count != 0 {
@@ -1138,16 +1140,16 @@ func TestSQLiteStore_DeliveredRetentionPrunesDelivered(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_Extend(t *testing.T) {
+func TestStore_Extend(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1163,14 +1165,14 @@ func TestSQLiteStore_Extend(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ExtendZeroIsNoop(t *testing.T) {
+func TestStore_ExtendZeroIsNoop(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
-	s := newSQLiteStoreForTest(t, func() time.Time { return now })
+	s := newStoreForTest(t, func() time.Time { return now })
 
-	if err := s.Enqueue(Envelope{ID: "evt_z", Route: "/pull/zero", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_z", Route: "/pull/zero", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	resp, err := s.Dequeue(DequeueRequest{Route: "/pull/zero", Target: "pull", LeaseTTL: 10 * time.Second})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/pull/zero", Target: "pull", LeaseTTL: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1188,12 +1190,12 @@ func TestSQLiteStore_ExtendZeroIsNoop(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_DequeueLongPollWakesOnEnqueue(t *testing.T) {
-	s := newSQLiteStoreForTest(t, time.Now)
+func TestStore_DequeueLongPollWakesOnEnqueue(t *testing.T) {
+	s := newStoreForTest(t, time.Now)
 
-	done := make(chan DequeueResponse, 1)
+	done := make(chan queue.DequeueResponse, 1)
 	go func() {
-		resp, _ := s.Dequeue(DequeueRequest{
+		resp, _ := s.Dequeue(queue.DequeueRequest{
 			Route:   "/pull/github",
 			Target:  "pull",
 			Batch:   1,
@@ -1203,7 +1205,7 @@ func TestSQLiteStore_DequeueLongPollWakesOnEnqueue(t *testing.T) {
 	}()
 
 	time.Sleep(20 * time.Millisecond)
-	_ = s.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"})
+	_ = s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"})
 
 	resp := <-done
 	if len(resp.Items) != 1 {
@@ -1211,30 +1213,30 @@ func TestSQLiteStore_DequeueLongPollWakesOnEnqueue(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RetentionPrunesQueued(t *testing.T) {
+func TestStore_RetentionPrunesQueued(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(
+	s, err := NewStore(
 		dbPath,
-		WithSQLiteNowFunc(func() time.Time { return nowVar }),
-		WithSQLiteRetention(2*time.Second, 1*time.Second),
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithRetention(2*time.Second, 1*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue1: %v", err)
 	}
 
 	nowVar = nowVar.Add(3 * time.Second)
-	if err := s.Enqueue(Envelope{ID: "evt_2", Route: "/r", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_2", Route: "/r", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue2: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull"})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull"})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1243,20 +1245,20 @@ func TestSQLiteStore_RetentionPrunesQueued(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_RecoveryAfterRestart(t *testing.T) {
+func TestStore_RecoveryAfterRestart(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
 
-	s1, err := NewSQLiteStore(dbPath, WithSQLiteNowFunc(func() time.Time { return nowVar }))
+	s1, err := NewStore(dbPath, WithNowFunc(func() time.Time { return nowVar }))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	if err := s1.Enqueue(Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
+	if err := s1.Enqueue(queue.Envelope{ID: "evt_1", Route: "/pull/github", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	resp, err := s1.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
+	resp, err := s1.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1268,13 +1270,13 @@ func TestSQLiteStore_RecoveryAfterRestart(t *testing.T) {
 	}
 
 	nowVar = nowVar.Add(11 * time.Second)
-	s2, err := NewSQLiteStore(dbPath, WithSQLiteNowFunc(func() time.Time { return nowVar }))
+	s2, err := NewStore(dbPath, WithNowFunc(func() time.Time { return nowVar }))
 	if err != nil {
 		t.Fatalf("new store2: %v", err)
 	}
 	t.Cleanup(func() { _ = s2.Close() })
 
-	resp2, err := s2.Dequeue(DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
+	resp2, err := s2.Dequeue(queue.DequeueRequest{Route: "/pull/github", Target: "pull", LeaseTTL: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue2: %v", err)
 	}
@@ -1286,34 +1288,34 @@ func TestSQLiteStore_RecoveryAfterRestart(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_DLQRetentionPrunesDead(t *testing.T) {
+func TestStore_DLQRetentionPrunesDead(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(
+	s, err := NewStore(
 		dbPath,
-		WithSQLiteNowFunc(func() time.Time { return nowVar }),
-		WithSQLiteRetention(0, 1*time.Second),
-		WithSQLiteDLQRetention(2*time.Second, 1),
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithRetention(0, 1*time.Second),
+		WithDLQRetention(2*time.Second, 1),
 	)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Enqueue(Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: nowVar}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: nowVar}); err != nil {
 		t.Fatalf("enqueue1: %v", err)
 	}
 
 	nowVar = nowVar.Add(3 * time.Second)
-	if err := s.Enqueue(Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: StateDead, ReceivedAt: nowVar}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "dead_2", Route: "/r", Target: "pull", State: queue.StateDead, ReceivedAt: nowVar}); err != nil {
 		t.Fatalf("enqueue2: %v", err)
 	}
 
-	_, _ = s.Dequeue(DequeueRequest{Route: "/r", Target: "pull"})
+	_, _ = s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull"})
 
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM queue_items WHERE state = ?;`, string(StateDead)).Scan(&count); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM queue_items WHERE state = ?;`, string(queue.StateDead)).Scan(&count); err != nil {
 		t.Fatalf("count dead: %v", err)
 	}
 	if count != 1 {
@@ -1321,41 +1323,41 @@ func TestSQLiteStore_DLQRetentionPrunesDead(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_QueueLimitsReject(t *testing.T) {
+func TestStore_QueueLimitsReject(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath, WithSQLiteQueueLimits(1, "reject"))
+	s, err := NewStore(dbPath, WithQueueLimits(1, "reject"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "evt_2", Route: "/r", Target: "pull"}); err != ErrQueueFull {
-		t.Fatalf("expected ErrQueueFull, got %v", err)
+	if err := s.Enqueue(queue.Envelope{ID: "evt_2", Route: "/r", Target: "pull"}); err != queue.ErrQueueFull {
+		t.Fatalf("expected queue.ErrQueueFull, got %v", err)
 	}
 }
 
-func TestSQLiteStore_EnqueueDuplicateID(t *testing.T) {
+func TestStore_EnqueueDuplicateID(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath)
+	s, err := NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Enqueue(Envelope{ID: "evt_dup", Route: "/r", Target: "pull", Payload: []byte("first")}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_dup", Route: "/r", Target: "pull", Payload: []byte("first")}); err != nil {
 		t.Fatalf("enqueue first: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "evt_dup", Route: "/r", Target: "pull", Payload: []byte("second")}); err != ErrEnvelopeExists {
-		t.Fatalf("expected ErrEnvelopeExists, got %v", err)
+	if err := s.Enqueue(queue.Envelope{ID: "evt_dup", Route: "/r", Target: "pull", Payload: []byte("second")}); err != queue.ErrEnvelopeExists {
+		t.Fatalf("expected queue.ErrEnvelopeExists, got %v", err)
 	}
 
-	resp, err := s.ListMessages(MessageListRequest{
+	resp, err := s.ListMessages(queue.MessageListRequest{
 		Route:          "/r",
 		Target:         "pull",
-		State:          StateQueued,
+		State:          queue.StateQueued,
 		Limit:          10,
 		IncludePayload: true,
 	})
@@ -1370,22 +1372,22 @@ func TestSQLiteStore_EnqueueDuplicateID(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_QueueLimitsDropOldest(t *testing.T) {
+func TestStore_QueueLimitsDropOldest(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath, WithSQLiteQueueLimits(1, "drop_oldest"))
+	s, err := NewStore(dbPath, WithQueueLimits(1, "drop_oldest"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "evt_2", Route: "/r", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_2", Route: "/r", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue2: %v", err)
 	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull"})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull"})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1394,10 +1396,10 @@ func TestSQLiteStore_QueueLimitsDropOldest(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_QueueCountersTrackActiveDepth(t *testing.T) {
+func TestStore_QueueCountersTrackActiveDepth(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	s := newSQLiteStoreForTest(t, func() time.Time { return nowVar })
+	s := newStoreForTest(t, func() time.Time { return nowVar })
 
 	mustCounters := func(wantQueued, wantLeased int) {
 		t.Helper()
@@ -1413,18 +1415,18 @@ func TestSQLiteStore_QueueCountersTrackActiveDepth(t *testing.T) {
 
 	mustCounters(0, 0)
 
-	if err := s.Enqueue(Envelope{ID: "q1", Route: "/r", Target: "pull", State: StateQueued}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q1", Route: "/r", Target: "pull", State: queue.StateQueued}); err != nil {
 		t.Fatalf("enqueue q1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "d1", Route: "/r", Target: "pull", State: StateDead}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "d1", Route: "/r", Target: "pull", State: queue.StateDead}); err != nil {
 		t.Fatalf("enqueue d1: %v", err)
 	}
-	if err := s.Enqueue(Envelope{ID: "q2", Route: "/r", Target: "pull", State: StateQueued}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "q2", Route: "/r", Target: "pull", State: queue.StateQueued}); err != nil {
 		t.Fatalf("enqueue q2: %v", err)
 	}
 	mustCounters(2, 0)
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1439,7 +1441,7 @@ func TestSQLiteStore_QueueCountersTrackActiveDepth(t *testing.T) {
 	}
 	mustCounters(2, 0)
 
-	resp2, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 2, LeaseTTL: 30 * time.Second})
+	resp2, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 2, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue2: %v", err)
 	}
@@ -1459,25 +1461,25 @@ func TestSQLiteStore_QueueCountersTrackActiveDepth(t *testing.T) {
 	mustCounters(0, 0)
 }
 
-func TestSQLiteStore_RuntimeMetrics(t *testing.T) {
+func TestStore_RuntimeMetrics(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(
+	s, err := NewStore(
 		dbPath,
-		WithSQLiteNowFunc(func() time.Time { return nowVar }),
-		WithSQLiteQueueLimits(10000, "reject"),
-		WithSQLiteCheckpointInterval(0),
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithQueueLimits(10000, "reject"),
+		WithCheckpointInterval(0),
 	)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -1495,7 +1497,7 @@ func TestSQLiteStore_RuntimeMetrics(t *testing.T) {
 	if rm.Backend != "sqlite" {
 		t.Fatalf("backend: got %q, want sqlite", rm.Backend)
 	}
-	durationByOperation := make(map[string]HistogramSnapshot, len(rm.Common.OperationDurationSeconds))
+	durationByOperation := make(map[string]queue.HistogramSnapshot, len(rm.Common.OperationDurationSeconds))
 	for _, metric := range rm.Common.OperationDurationSeconds {
 		durationByOperation[metric.Operation] = metric.DurationSeconds
 	}
@@ -1553,10 +1555,10 @@ func TestSQLiteStore_RuntimeMetrics(t *testing.T) {
 	}
 }
 
-func newSQLiteStoreForTest(t *testing.T, nowFn func() time.Time) *SQLiteStore {
+func newStoreForTest(t *testing.T, nowFn func() time.Time) *Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath, WithSQLiteNowFunc(nowFn), WithSQLitePollInterval(5*time.Millisecond))
+	s, err := NewStore(dbPath, WithNowFunc(nowFn), WithPollInterval(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -1566,19 +1568,19 @@ func newSQLiteStoreForTest(t *testing.T, nowFn func() time.Time) *SQLiteStore {
 
 // --- WAL recovery and resilience tests ---
 
-func TestSQLiteStore_CrashRecovery_NoClose(t *testing.T) {
+func TestStore_CrashRecovery_NoClose(t *testing.T) {
 	// Simulate crash: open DB, enqueue items, abandon store (no Close), reopen.
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
 
-	s1, err := NewSQLiteStore(dbPath, WithSQLiteNowFunc(func() time.Time { return now }))
+	s1, err := NewStore(dbPath, WithNowFunc(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	for i := 0; i < 10; i++ {
-		err := s1.Enqueue(Envelope{
+		err := s1.Enqueue(queue.Envelope{
 			ID: fmt.Sprintf("evt_%d", i), Route: "/r", Target: "pull",
-			State: StateQueued, ReceivedAt: now, Payload: []byte("data"),
+			State: queue.StateQueued, ReceivedAt: now, Payload: []byte("data"),
 		})
 		if err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
@@ -1589,13 +1591,13 @@ func TestSQLiteStore_CrashRecovery_NoClose(t *testing.T) {
 	t.Cleanup(func() { _ = s1.Close() })
 
 	// Reopen — WAL recovery should replay committed data.
-	s2, err := NewSQLiteStore(dbPath, WithSQLiteNowFunc(func() time.Time { return now }))
+	s2, err := NewStore(dbPath, WithNowFunc(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("reopen after crash: %v", err)
 	}
 	t.Cleanup(func() { _ = s2.Close() })
 
-	resp, err := s2.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 20, LeaseTTL: 30 * time.Second})
+	resp, err := s2.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 20, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue after crash: %v", err)
 	}
@@ -1604,33 +1606,33 @@ func TestSQLiteStore_CrashRecovery_NoClose(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_CrashRecovery_LeasedItemsRequeued(t *testing.T) {
+func TestStore_CrashRecovery_LeasedItemsRequeued(t *testing.T) {
 	// Items leased when the process crashed should become re-dequeueable after lease expiry.
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
 
-	s1, err := NewSQLiteStore(dbPath, WithSQLiteNowFunc(func() time.Time { return nowVar }))
+	s1, err := NewStore(dbPath, WithNowFunc(func() time.Time { return nowVar }))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	for i := 0; i < 5; i++ {
-		_ = s1.Enqueue(Envelope{ID: fmt.Sprintf("evt_%d", i), Route: "/r", Target: "pull", State: StateQueued, ReceivedAt: nowVar})
+		_ = s1.Enqueue(queue.Envelope{ID: fmt.Sprintf("evt_%d", i), Route: "/r", Target: "pull", State: queue.StateQueued, ReceivedAt: nowVar})
 	}
-	_, _ = s1.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 5, LeaseTTL: 10 * time.Second})
+	_, _ = s1.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 5, LeaseTTL: 10 * time.Second})
 	// All 5 items are now leased. Crash (no Close).
 	// Deferred close releases the file handle for TempDir cleanup on Windows.
 	t.Cleanup(func() { _ = s1.Close() })
 
 	// Advance past lease expiry and reopen.
 	nowVar = nowVar.Add(15 * time.Second)
-	s2, err := NewSQLiteStore(dbPath, WithSQLiteNowFunc(func() time.Time { return nowVar }))
+	s2, err := NewStore(dbPath, WithNowFunc(func() time.Time { return nowVar }))
 	if err != nil {
 		t.Fatalf("reopen after crash: %v", err)
 	}
 	t.Cleanup(func() { _ = s2.Close() })
 
-	resp, err := s2.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 10, LeaseTTL: 30 * time.Second})
+	resp, err := s2.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 10, LeaseTTL: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("dequeue after crash: %v", err)
 	}
@@ -1644,9 +1646,9 @@ func TestSQLiteStore_CrashRecovery_LeasedItemsRequeued(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ConcurrentEnqueueDequeue(t *testing.T) {
+func TestStore_ConcurrentEnqueueDequeue(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath, WithSQLitePollInterval(2*time.Millisecond))
+	s, err := NewStore(dbPath, WithPollInterval(2*time.Millisecond))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
@@ -1660,9 +1662,9 @@ func TestSQLiteStore_ConcurrentEnqueueDequeue(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			err := s.Enqueue(Envelope{
+			err := s.Enqueue(queue.Envelope{
 				ID: fmt.Sprintf("evt_%d", id), Route: "/r", Target: "pull",
-				State: StateQueued, Payload: []byte("p"),
+				State: queue.StateQueued, Payload: []byte("p"),
 			})
 			if err != nil {
 				t.Errorf("enqueue %d: %v", id, err)
@@ -1674,7 +1676,7 @@ func TestSQLiteStore_ConcurrentEnqueueDequeue(t *testing.T) {
 	// Drain all items via dequeue.
 	seen := make(map[string]bool)
 	for {
-		resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 20, LeaseTTL: 30 * time.Second})
+		resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 20, LeaseTTL: 30 * time.Second})
 		if err != nil {
 			t.Fatalf("dequeue: %v", err)
 		}
@@ -1693,12 +1695,12 @@ func TestSQLiteStore_ConcurrentEnqueueDequeue(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_ConcurrentEnqueueDequeueStress(t *testing.T) {
+func TestStore_ConcurrentEnqueueDequeueStress(t *testing.T) {
 	if testing.Short() {
 		t.Skip("stress test skipped in short mode")
 	}
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath, WithSQLitePollInterval(2*time.Millisecond))
+	s, err := NewStore(dbPath, WithPollInterval(2*time.Millisecond))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
@@ -1714,9 +1716,9 @@ func TestSQLiteStore_ConcurrentEnqueueDequeueStress(t *testing.T) {
 		go func(pid int) {
 			defer prodWg.Done()
 			for i := 0; i < itemsPerProducer; i++ {
-				_ = s.Enqueue(Envelope{
+				_ = s.Enqueue(queue.Envelope{
 					ID: fmt.Sprintf("evt_p%d_%d", pid, i), Route: "/r", Target: "pull",
-					State: StateQueued, Payload: []byte("stress"),
+					State: queue.StateQueued, Payload: []byte("stress"),
 				})
 			}
 		}(p)
@@ -1735,7 +1737,7 @@ func TestSQLiteStore_ConcurrentEnqueueDequeueStress(t *testing.T) {
 					return
 				default:
 				}
-				resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 5, LeaseTTL: 5 * time.Second})
+				resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 5, LeaseTTL: 5 * time.Second})
 				if err != nil {
 					continue
 				}
@@ -1786,12 +1788,12 @@ func TestSQLiteStore_ConcurrentEnqueueDequeueStress(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_IntegrityCheckAfterStress(t *testing.T) {
+func TestStore_IntegrityCheckAfterStress(t *testing.T) {
 	if testing.Short() {
 		t.Skip("stress test skipped in short mode")
 	}
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath, WithSQLitePollInterval(2*time.Millisecond))
+	s, err := NewStore(dbPath, WithPollInterval(2*time.Millisecond))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
@@ -1802,9 +1804,9 @@ func TestSQLiteStore_IntegrityCheckAfterStress(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			_ = s.Enqueue(Envelope{
+			_ = s.Enqueue(queue.Envelope{
 				ID: fmt.Sprintf("evt_%d", id), Route: "/r", Target: "pull",
-				State: StateQueued, Payload: []byte("integrity"),
+				State: queue.StateQueued, Payload: []byte("integrity"),
 			})
 		}(i)
 	}
@@ -1821,7 +1823,7 @@ func TestSQLiteStore_IntegrityCheckAfterStress(t *testing.T) {
 	_ = s.Close()
 
 	// Reopen and verify integrity after WAL replay.
-	s2, err := NewSQLiteStore(dbPath)
+	s2, err := NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -1835,23 +1837,23 @@ func TestSQLiteStore_IntegrityCheckAfterStress(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_EnqueueBatch_AllOrNothing(t *testing.T) {
+func TestStore_EnqueueBatch_AllOrNothing(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath, WithSQLiteQueueLimits(2, "reject"))
+	s, err := NewStore(dbPath, WithQueueLimits(2, "reject"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Batch of 3 items with depth limit 2 → all rejected (none committed).
-	items := []Envelope{
+	items := []queue.Envelope{
 		{ID: "a", Route: "/r", Target: "t"},
 		{ID: "b", Route: "/r", Target: "t"},
 		{ID: "c", Route: "/r", Target: "t"},
 	}
 	n, err := s.EnqueueBatch(items)
-	if err != ErrQueueFull {
-		t.Fatalf("expected ErrQueueFull, got n=%d err=%v", n, err)
+	if err != queue.ErrQueueFull {
+		t.Fatalf("expected queue.ErrQueueFull, got n=%d err=%v", n, err)
 	}
 	if n != 0 {
 		t.Fatalf("expected 0 committed, got %d", n)
@@ -1864,7 +1866,7 @@ func TestSQLiteStore_EnqueueBatch_AllOrNothing(t *testing.T) {
 	}
 
 	// Batch of 2 items that fits → all committed.
-	items2 := []Envelope{
+	items2 := []queue.Envelope{
 		{ID: "a", Route: "/r", Target: "t"},
 		{ID: "b", Route: "/r", Target: "t"},
 	}
@@ -1877,32 +1879,32 @@ func TestSQLiteStore_EnqueueBatch_AllOrNothing(t *testing.T) {
 	}
 
 	stats, _ = s.Stats()
-	if stats.ByState[StateQueued] != 2 {
-		t.Fatalf("expected 2 queued, got %d", stats.ByState[StateQueued])
+	if stats.ByState[queue.StateQueued] != 2 {
+		t.Fatalf("expected 2 queued, got %d", stats.ByState[queue.StateQueued])
 	}
 }
 
-func TestSQLiteStore_EnqueueBatch_DuplicateID(t *testing.T) {
+func TestStore_EnqueueBatch_DuplicateID(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	s, err := NewSQLiteStore(dbPath)
+	s, err := NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Pre-existing item.
-	if err := s.Enqueue(Envelope{ID: "existing", Route: "/r", Target: "t"}); err != nil {
+	if err := s.Enqueue(queue.Envelope{ID: "existing", Route: "/r", Target: "t"}); err != nil {
 		t.Fatalf("pre-enqueue: %v", err)
 	}
 
 	// Batch with duplicate → no items committed (transaction rollback).
-	items := []Envelope{
+	items := []queue.Envelope{
 		{ID: "new1", Route: "/r", Target: "t"},
 		{ID: "existing", Route: "/r", Target: "t"},
 	}
 	n, err := s.EnqueueBatch(items)
-	if err != ErrEnvelopeExists {
-		t.Fatalf("expected ErrEnvelopeExists, got n=%d err=%v", n, err)
+	if err != queue.ErrEnvelopeExists {
+		t.Fatalf("expected queue.ErrEnvelopeExists, got n=%d err=%v", n, err)
 	}
 
 	// Only the pre-existing item should be in the queue.

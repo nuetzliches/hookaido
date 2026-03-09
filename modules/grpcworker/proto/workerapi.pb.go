@@ -674,7 +674,7 @@ const file_workerapi_proto_rawDesc = "" +
 	"\aDequeue\x12\".hookaido.worker.v1.DequeueRequest\x1a#.hookaido.worker.v1.DequeueResponse\x12F\n" +
 	"\x03Ack\x12\x1e.hookaido.worker.v1.AckRequest\x1a\x1f.hookaido.worker.v1.AckResponse\x12I\n" +
 	"\x04Nack\x12\x1f.hookaido.worker.v1.NackRequest\x1a .hookaido.worker.v1.NackResponse\x12C\n" +
-	"\x06Extend\x12!.hookaido.worker.v1.ExtendRequest\x1a\x16.google.protobuf.EmptyBFZDgithub.com/nuetzliches/hookaido/internal/workerapi/proto;workerapipbb\x06proto3"
+	"\x06Extend\x12!.hookaido.worker.v1.ExtendRequest\x1a\x16.google.protobuf.EmptyBFZDgithub.com/nuetzliches/hookaido/modules/grpcworker/proto;workerapipbb\x06proto3"
 
 var (
 	file_workerapi_proto_rawDescOnce sync.Once

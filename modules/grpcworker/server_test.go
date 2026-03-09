@@ -1,4 +1,4 @@
-package workerapi
+package grpcworker
 
 import (
 	"context"
@@ -7,7 +7,8 @@ import (
 
 	"github.com/nuetzliches/hookaido/internal/pullapi"
 	"github.com/nuetzliches/hookaido/internal/queue"
-	workerapipb "github.com/nuetzliches/hookaido/internal/workerapi/proto"
+	"github.com/nuetzliches/hookaido/internal/workerapi"
+	workerapipb "github.com/nuetzliches/hookaido/modules/grpcworker/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -81,7 +82,7 @@ func TestWorkerAPIBearerAuth(t *testing.T) {
 	ws.ResolveRoute = func(endpoint string) (string, bool) {
 		return "/r", true
 	}
-	ws.Authorize = BearerTokenAuthorizer([][]byte{[]byte("t1")})
+	ws.Authorize = workerapi.BearerTokenAuthorizer([][]byte{[]byte("t1")})
 
 	_, err := ws.Dequeue(context.Background(), &workerapipb.DequeueRequest{
 		Endpoint: "/pull/r",

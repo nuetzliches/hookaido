@@ -1,4 +1,4 @@
-package queue
+package sqlite
 
 import (
 	"context"
@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nuetzliches/hookaido/internal/hookaido"
+	"github.com/nuetzliches/hookaido/internal/queue"
 	sqlite3 "modernc.org/sqlite"
 )
 
@@ -24,6 +26,7 @@ const schemaVersion = 6
 const backlogTrendRetention = 30 * 24 * time.Hour
 const defaultSQLiteCheckpointInterval = time.Minute
 const defaultSQLiteLeaseSweepInterval = 10 * time.Millisecond
+const statsTopBacklogLimit = 10
 
 var sqliteDurationHistogramBounds = []float64{
 	0.001, // 1ms
@@ -150,26 +153,26 @@ BEGIN
 END;
 `
 
-type SQLiteOption func(*SQLiteStore)
+type Option func(*Store)
 
-func WithSQLiteNowFunc(now func() time.Time) SQLiteOption {
-	return func(s *SQLiteStore) {
+func WithNowFunc(now func() time.Time) Option {
+	return func(s *Store) {
 		if now != nil {
 			s.nowFn = now
 		}
 	}
 }
 
-func WithSQLitePollInterval(d time.Duration) SQLiteOption {
-	return func(s *SQLiteStore) {
+func WithPollInterval(d time.Duration) Option {
+	return func(s *Store) {
 		if d > 0 {
 			s.pollInterval = d
 		}
 	}
 }
 
-func WithSQLiteCheckpointInterval(d time.Duration) SQLiteOption {
-	return func(s *SQLiteStore) {
+func WithCheckpointInterval(d time.Duration) Option {
+	return func(s *Store) {
 		if d > 0 {
 			s.checkpointInterval = d
 		} else {
@@ -178,8 +181,8 @@ func WithSQLiteCheckpointInterval(d time.Duration) SQLiteOption {
 	}
 }
 
-func WithSQLiteRetention(maxAge, pruneInterval time.Duration) SQLiteOption {
-	return func(s *SQLiteStore) {
+func WithRetention(maxAge, pruneInterval time.Duration) Option {
+	return func(s *Store) {
 		if maxAge > 0 {
 			s.retentionMaxAge = maxAge
 		} else {
@@ -193,8 +196,8 @@ func WithSQLiteRetention(maxAge, pruneInterval time.Duration) SQLiteOption {
 	}
 }
 
-func WithSQLiteDeliveredRetention(maxAge time.Duration) SQLiteOption {
-	return func(s *SQLiteStore) {
+func WithDeliveredRetention(maxAge time.Duration) Option {
+	return func(s *Store) {
 		if maxAge > 0 {
 			s.deliveredRetentionMaxAge = maxAge
 		} else {
@@ -203,8 +206,8 @@ func WithSQLiteDeliveredRetention(maxAge time.Duration) SQLiteOption {
 	}
 }
 
-func WithSQLiteDLQRetention(maxAge time.Duration, maxDepth int) SQLiteOption {
-	return func(s *SQLiteStore) {
+func WithDLQRetention(maxAge time.Duration, maxDepth int) Option {
+	return func(s *Store) {
 		if maxAge > 0 {
 			s.dlqRetentionMaxAge = maxAge
 		} else {
@@ -218,7 +221,7 @@ func WithSQLiteDLQRetention(maxAge time.Duration, maxDepth int) SQLiteOption {
 	}
 }
 
-type SQLiteStore struct {
+type Store struct {
 	db *sql.DB
 
 	mu                       sync.Mutex
@@ -301,12 +304,12 @@ func (h *sqliteHistogram) observe(seconds float64) {
 	h.sum += seconds
 }
 
-func (h *sqliteHistogram) snapshot() HistogramSnapshot {
+func (h *sqliteHistogram) snapshot() queue.HistogramSnapshot {
 	if h == nil {
-		return HistogramSnapshot{}
+		return queue.HistogramSnapshot{}
 	}
-	out := HistogramSnapshot{
-		Buckets: make([]HistogramBucket, 0, len(h.counts)),
+	out := queue.HistogramSnapshot{
+		Buckets: make([]queue.HistogramBucket, 0, len(h.counts)),
 		Count:   h.count,
 		Sum:     h.sum,
 	}
@@ -317,12 +320,12 @@ func (h *sqliteHistogram) snapshot() HistogramSnapshot {
 		if i < len(h.bounds) {
 			le = h.bounds[i]
 		}
-		out.Buckets = append(out.Buckets, HistogramBucket{Le: le, Count: cumulative})
+		out.Buckets = append(out.Buckets, queue.HistogramBucket{Le: le, Count: cumulative})
 	}
 	return out
 }
 
-func NewSQLiteStore(dbPath string, opts ...SQLiteOption) (*SQLiteStore, error) {
+func NewStore(dbPath string, opts ...Option) (*Store, error) {
 	dbPath = strings.TrimSpace(dbPath)
 	if dbPath == "" {
 		return nil, errors.New("empty db path")
@@ -341,7 +344,7 @@ func NewSQLiteStore(dbPath string, opts ...SQLiteOption) (*SQLiteStore, error) {
 	}
 	db.SetMaxOpenConns(1)
 
-	s := &SQLiteStore{
+	s := &Store{
 		db:                 db,
 		nowFn:              time.Now,
 		notify:             make(chan struct{}),
@@ -363,8 +366,8 @@ func NewSQLiteStore(dbPath string, opts ...SQLiteOption) (*SQLiteStore, error) {
 	return s, nil
 }
 
-func WithSQLiteQueueLimits(maxDepth int, dropPolicy string) SQLiteOption {
-	return func(s *SQLiteStore) {
+func WithQueueLimits(maxDepth int, dropPolicy string) Option {
+	return func(s *Store) {
 		if maxDepth >= 0 {
 			s.maxDepth = maxDepth
 		}
@@ -374,12 +377,12 @@ func WithSQLiteQueueLimits(maxDepth int, dropPolicy string) SQLiteOption {
 	}
 }
 
-func (s *SQLiteStore) Close() error {
+func (s *Store) Close() error {
 	s.stopCheckpointLoop()
 	return s.db.Close()
 }
 
-func (s *SQLiteStore) init() error {
+func (s *Store) init() error {
 	ctx := context.Background()
 
 	var journalMode string
@@ -403,7 +406,7 @@ func (s *SQLiteStore) init() error {
 	return nil
 }
 
-func (s *SQLiteStore) migrate(ctx context.Context) error {
+func (s *Store) migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -505,7 +508,7 @@ func writeSchemaVersion(ctx context.Context, conn *sql.Conn, v int) error {
 	return nil
 }
 
-func (s *SQLiteStore) Enqueue(env Envelope) error {
+func (s *Store) Enqueue(env queue.Envelope) error {
 	now := s.now()
 	if err := s.maybePrune(now); err != nil {
 		return err
@@ -515,9 +518,9 @@ func (s *SQLiteStore) Enqueue(env Envelope) error {
 		env.ID = newHexID("evt_")
 	}
 	if env.State == "" {
-		env.State = StateQueued
+		env.State = queue.StateQueued
 	}
-	if env.State != StateDead {
+	if env.State != queue.StateDead {
 		env.DeadReason = ""
 	}
 	if env.ReceivedAt.IsZero() {
@@ -582,11 +585,11 @@ INSERT INTO queue_items (
 	return nil
 }
 
-func (s *SQLiteStore) enqueueWithLimit(env Envelope, headersJSON any, traceJSON any) error {
+func (s *Store) enqueueWithLimit(env queue.Envelope, headersJSON any, traceJSON any) error {
 	if s.dropPolicy != "drop_oldest" && s.queueLikelyFull.Load() {
 		count, err := s.activeDepthCount()
 		if err == nil && count >= s.maxDepth {
-			return ErrQueueFull
+			return queue.ErrQueueFull
 		}
 		if err == nil && count < s.maxDepth {
 			s.queueLikelyFull.Store(false)
@@ -625,12 +628,12 @@ func (s *SQLiteStore) enqueueWithLimit(env Envelope, headersJSON any, traceJSON 
 			}
 			if !dropped {
 				s.queueLikelyFull.Store(true)
-				return ErrQueueFull
+				return queue.ErrQueueFull
 			}
 			count--
 		} else {
 			s.queueLikelyFull.Store(true)
-			return ErrQueueFull
+			return queue.ErrQueueFull
 		}
 	}
 
@@ -672,7 +675,7 @@ INSERT INTO queue_items (
 	return nil
 }
 
-func (s *SQLiteStore) activeDepthCount() (int, error) {
+func (s *Store) activeDepthCount() (int, error) {
 	var queued int
 	var leased int
 	err := s.db.QueryRowContext(context.Background(), `
@@ -693,13 +696,13 @@ WHERE id = 1;
 SELECT COUNT(*)
 FROM queue_items
 WHERE state IN (?, ?);
-`, string(StateQueued), string(StateLeased)).Scan(&count); err != nil {
+`, string(queue.StateQueued), string(queue.StateLeased)).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
 }
 
-func (s *SQLiteStore) activeDepthCountTx(ctx context.Context, conn *sql.Conn) (int, error) {
+func (s *Store) activeDepthCountTx(ctx context.Context, conn *sql.Conn) (int, error) {
 	var queued int
 	var leased int
 	err := conn.QueryRowContext(ctx, `
@@ -720,7 +723,7 @@ WHERE id = 1;
 SELECT COUNT(*)
 FROM queue_items
 WHERE state IN (?, ?);
-`, string(StateQueued), string(StateLeased)).Scan(&count); err != nil {
+`, string(queue.StateQueued), string(queue.StateLeased)).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -728,7 +731,7 @@ WHERE state IN (?, ?);
 
 // EnqueueBatch atomically enqueues all items or none (all-or-nothing) in a
 // single transaction. Returns the number of items enqueued and an error.
-func (s *SQLiteStore) EnqueueBatch(items []Envelope) (int, error) {
+func (s *Store) EnqueueBatch(items []queue.Envelope) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
@@ -739,7 +742,7 @@ func (s *SQLiteStore) EnqueueBatch(items []Envelope) (int, error) {
 	}
 
 	type preparedEnv struct {
-		env         Envelope
+		env         queue.Envelope
 		headersJSON any
 		traceJSON   any
 		deadReason  any
@@ -752,9 +755,9 @@ func (s *SQLiteStore) EnqueueBatch(items []Envelope) (int, error) {
 			env.ID = newHexID("evt_")
 		}
 		if env.State == "" {
-			env.State = StateQueued
+			env.State = queue.StateQueued
 		}
-		if env.State != StateDead {
+		if env.State != queue.StateDead {
 			env.DeadReason = ""
 		}
 		if env.ReceivedAt.IsZero() {
@@ -816,12 +819,12 @@ func (s *SQLiteStore) EnqueueBatch(items []Envelope) (int, error) {
 					return 0, dErr
 				}
 				if !dropped {
-					return 0, ErrQueueFull
+					return 0, queue.ErrQueueFull
 				}
 				needed--
 			}
 		} else if needed > s.maxDepth {
-			return 0, ErrQueueFull
+			return 0, queue.ErrQueueFull
 		}
 	}
 
@@ -860,7 +863,7 @@ INSERT INTO queue_items (
 	return len(prepared), nil
 }
 
-func (s *SQLiteStore) dropOldestQueued(ctx context.Context, conn *sql.Conn) (bool, error) {
+func (s *Store) dropOldestQueued(ctx context.Context, conn *sql.Conn) (bool, error) {
 	res, err := conn.ExecContext(ctx, `
 DELETE FROM queue_items
 WHERE id = (
@@ -869,7 +872,7 @@ WHERE id = (
   ORDER BY received_at ASC
   LIMIT 1
 );
-`, string(StateQueued))
+`, string(queue.StateQueued))
 	if err != nil {
 		return false, err
 	}
@@ -880,7 +883,7 @@ WHERE id = (
 	return n > 0, nil
 }
 
-func (s *SQLiteStore) maybePrune(now time.Time) error {
+func (s *Store) maybePrune(now time.Time) error {
 	if s.pruneInterval <= 0 {
 		return nil
 	}
@@ -901,7 +904,7 @@ func (s *SQLiteStore) maybePrune(now time.Time) error {
 DELETE FROM queue_items
 WHERE state = ?
   AND received_at <= ?;
-`, string(StateQueued), cutoff.UnixNano())
+`, string(queue.StateQueued), cutoff.UnixNano())
 		if err != nil {
 			return err
 		}
@@ -913,7 +916,7 @@ WHERE state = ?
 DELETE FROM queue_items
 WHERE state = ?
   AND next_run_at <= ?;
-`, string(StateDelivered), cutoff.UnixNano())
+`, string(queue.StateDelivered), cutoff.UnixNano())
 		if err != nil {
 			return err
 		}
@@ -925,7 +928,7 @@ WHERE state = ?
 DELETE FROM queue_items
 WHERE state = ?
   AND received_at <= ?;
-`, string(StateDead), cutoff.UnixNano())
+`, string(queue.StateDead), cutoff.UnixNano())
 		if err != nil {
 			return err
 		}
@@ -940,7 +943,7 @@ WHERE id IN (
   ORDER BY received_at DESC
   LIMIT -1 OFFSET ?
 );
-`, string(StateDead), s.dlqMaxDepth)
+`, string(queue.StateDead), s.dlqMaxDepth)
 		if err != nil {
 			return err
 		}
@@ -949,13 +952,13 @@ WHERE id IN (
 	return nil
 }
 
-func (s *SQLiteStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
+func (s *Store) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
 	pruneNow := req.Now
 	if pruneNow.IsZero() {
 		pruneNow = s.now()
 	}
 	if err := s.maybePrune(pruneNow); err != nil {
-		return DequeueResponse{}, err
+		return queue.DequeueResponse{}, err
 	}
 
 	batch := req.Batch
@@ -981,7 +984,7 @@ func (s *SQLiteStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
 	for {
 		resp, err := s.dequeueOnce(req, batch, leaseTTL)
 		if err != nil {
-			return DequeueResponse{}, err
+			return queue.DequeueResponse{}, err
 		}
 		if len(resp.Items) > 0 || maxWait == 0 {
 			return resp, nil
@@ -989,7 +992,7 @@ func (s *SQLiteStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return DequeueResponse{}, nil
+			return queue.DequeueResponse{}, nil
 		}
 
 		waitCh := s.waitCh()
@@ -1010,7 +1013,7 @@ func (s *SQLiteStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
 	}
 }
 
-func (s *SQLiteStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.Duration) (DequeueResponse, error) {
+func (s *Store) dequeueOnce(req queue.DequeueRequest, batch int, leaseTTL time.Duration) (queue.DequeueResponse, error) {
 	now := req.Now
 	if now.IsZero() {
 		now = s.now()
@@ -1020,13 +1023,13 @@ func (s *SQLiteStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.D
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return DequeueResponse{}, err
+		return queue.DequeueResponse{}, err
 	}
 	defer conn.Close()
 
 	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
 	if err != nil {
-		return DequeueResponse{}, err
+		return queue.DequeueResponse{}, err
 	}
 	committed := false
 	defer func() {
@@ -1038,67 +1041,67 @@ func (s *SQLiteStore) dequeueOnce(req DequeueRequest, batch int, leaseTTL time.D
 
 	if s.shouldSweepExpiredLeases(now) {
 		if err := s.requeueExpiredLeases(ctx, conn, now); err != nil {
-			return DequeueResponse{}, err
+			return queue.DequeueResponse{}, err
 		}
 	}
 	if batch == 1 {
 		item, ok, err := s.dequeueCandidateSingleTx(ctx, conn, req, now, leaseUntil)
 		if err != nil {
-			return DequeueResponse{}, err
+			return queue.DequeueResponse{}, err
 		}
 		if ok {
 			if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
-				return DequeueResponse{}, err
+				return queue.DequeueResponse{}, err
 			}
 			committed = true
-			return DequeueResponse{Items: []Envelope{item}}, nil
+			return queue.DequeueResponse{Items: []queue.Envelope{item}}, nil
 		}
 		if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
-			return DequeueResponse{}, err
+			return queue.DequeueResponse{}, err
 		}
 		committed = true
-		return DequeueResponse{}, nil
+		return queue.DequeueResponse{}, nil
 	}
 
 	ids, err := dequeueCandidateIDsTx(ctx, conn, req, now, batch)
 	if err != nil {
-		return DequeueResponse{}, err
+		return queue.DequeueResponse{}, err
 	}
 	if len(ids) == 0 {
 		if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
-			return DequeueResponse{}, err
+			return queue.DequeueResponse{}, err
 		}
 		committed = true
-		return DequeueResponse{}, nil
+		return queue.DequeueResponse{}, nil
 	}
 	if len(ids) == 1 {
 		item, ok, err := s.dequeueLeaseSingleTx(ctx, conn, ids[0], leaseUntil)
 		if err != nil {
-			return DequeueResponse{}, err
+			return queue.DequeueResponse{}, err
 		}
 		if ok {
 			if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
-				return DequeueResponse{}, err
+				return queue.DequeueResponse{}, err
 			}
 			committed = true
-			return DequeueResponse{Items: []Envelope{item}}, nil
+			return queue.DequeueResponse{Items: []queue.Envelope{item}}, nil
 		}
 	}
 
 	out, err := s.dequeueLeaseByIDsTx(ctx, conn, ids, leaseUntil)
 	if err != nil {
-		return DequeueResponse{}, err
+		return queue.DequeueResponse{}, err
 	}
 
 	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassDequeue); err != nil {
-		return DequeueResponse{}, err
+		return queue.DequeueResponse{}, err
 	}
 	committed = true
 
-	return DequeueResponse{Items: out}, nil
+	return queue.DequeueResponse{Items: out}, nil
 }
 
-func (s *SQLiteStore) dequeueCandidateSingleTx(ctx context.Context, conn *sql.Conn, req DequeueRequest, now time.Time, leaseUntil time.Time) (Envelope, bool, error) {
+func (s *Store) dequeueCandidateSingleTx(ctx context.Context, conn *sql.Conn, req queue.DequeueRequest, now time.Time, leaseUntil time.Time) (queue.Envelope, bool, error) {
 	leaseID := newHexID("lease_")
 
 	var b strings.Builder
@@ -1109,7 +1112,7 @@ WITH candidate AS (
   WHERE state = ?
     AND next_run_at <= ?`)
 
-	args := []any{string(StateQueued), now.UnixNano()}
+	args := []any{string(queue.StateQueued), now.UnixNano()}
 	if req.Route != "" {
 		b.WriteString(" AND route = ?")
 		args = append(args, req.Route)
@@ -1133,13 +1136,13 @@ WHERE id = (SELECT id FROM candidate)
 RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version;`)
 
 	args = append(args,
-		string(StateLeased),
+		string(queue.StateLeased),
 		leaseID,
 		leaseUntil.UnixNano(),
 		leaseUntil.UnixNano(),
 	)
 
-	var env Envelope
+	var env queue.Envelope
 	var receivedAtNanos int64
 	var headersJSON sql.NullString
 	var traceJSON sql.NullString
@@ -1157,12 +1160,12 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Envelope{}, false, nil
+			return queue.Envelope{}, false, nil
 		}
-		return Envelope{}, false, err
+		return queue.Envelope{}, false, err
 	}
 
-	env.State = StateLeased
+	env.State = queue.StateLeased
 	env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
 	env.NextRunAt = leaseUntil
 	env.LeaseUntil = leaseUntil
@@ -1172,10 +1175,10 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 	return env, true, nil
 }
 
-func (s *SQLiteStore) dequeueLeaseSingleTx(ctx context.Context, conn *sql.Conn, id string, leaseUntil time.Time) (Envelope, bool, error) {
+func (s *Store) dequeueLeaseSingleTx(ctx context.Context, conn *sql.Conn, id string, leaseUntil time.Time) (queue.Envelope, bool, error) {
 	leaseID := newHexID("lease_")
 
-	var env Envelope
+	var env queue.Envelope
 	var receivedAtNanos int64
 	var headersJSON sql.NullString
 	var traceJSON sql.NullString
@@ -1191,11 +1194,11 @@ WHERE state = ?
   AND id = ?
 RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version;
 `,
-		string(StateLeased),
+		string(queue.StateLeased),
 		leaseID,
 		leaseUntil.UnixNano(),
 		leaseUntil.UnixNano(),
-		string(StateQueued),
+		string(queue.StateQueued),
 		id,
 	).Scan(
 		&env.ID,
@@ -1210,12 +1213,12 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Envelope{}, false, nil
+			return queue.Envelope{}, false, nil
 		}
-		return Envelope{}, false, err
+		return queue.Envelope{}, false, err
 	}
 
-	env.State = StateLeased
+	env.State = queue.StateLeased
 	env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
 	env.NextRunAt = leaseUntil
 	env.LeaseUntil = leaseUntil
@@ -1226,7 +1229,7 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 	return env, true, nil
 }
 
-func (s *SQLiteStore) dequeueLeaseByIDsTx(ctx context.Context, conn *sql.Conn, ids []string, leaseUntil time.Time) ([]Envelope, error) {
+func (s *Store) dequeueLeaseByIDsTx(ctx context.Context, conn *sql.Conn, ids []string, leaseUntil time.Time) ([]queue.Envelope, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -1249,7 +1252,7 @@ WHERE state = ?
 RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_json, schema_version, lease_id;`
 
 	args := make([]any, 0, 4+len(ids))
-	args = append(args, string(StateLeased), leaseUntil.UnixNano(), leaseUntil.UnixNano(), string(StateQueued))
+	args = append(args, string(queue.StateLeased), leaseUntil.UnixNano(), leaseUntil.UnixNano(), string(queue.StateQueued))
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -1260,11 +1263,11 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 	}
 	defer rows.Close()
 
-	out := make([]Envelope, len(ids))
+	out := make([]queue.Envelope, len(ids))
 	filled := make([]bool, len(ids))
 	filledCount := 0
 	for rows.Next() {
-		var env Envelope
+		var env queue.Envelope
 		var receivedAtNanos int64
 		var headersJSON sql.NullString
 		var traceJSON sql.NullString
@@ -1289,7 +1292,7 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 		if !ok {
 			continue
 		}
-		env.State = StateLeased
+		env.State = queue.StateLeased
 		env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
 		env.NextRunAt = leaseUntil
 		env.LeaseUntil = leaseUntil
@@ -1309,7 +1312,7 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 	if filledCount == len(out) {
 		return out, nil
 	}
-	compact := make([]Envelope, 0, filledCount)
+	compact := make([]queue.Envelope, 0, filledCount)
 	for i := range out {
 		if !filled[i] {
 			continue
@@ -1319,7 +1322,7 @@ RETURNING id, route, target, received_at, attempt, payload, headers_json, trace_
 	return compact, nil
 }
 
-func dequeueCandidateIDsTx(ctx context.Context, conn *sql.Conn, req DequeueRequest, now time.Time, batch int) ([]string, error) {
+func dequeueCandidateIDsTx(ctx context.Context, conn *sql.Conn, req queue.DequeueRequest, now time.Time, batch int) ([]string, error) {
 	if batch <= 0 {
 		batch = 1
 	}
@@ -1334,7 +1337,7 @@ FROM queue_items
 WHERE state = ?
   AND next_run_at <= ?`)
 
-	args := []any{string(StateQueued), now.UnixNano()}
+	args := []any{string(queue.StateQueued), now.UnixNano()}
 	if req.Route != "" {
 		b.WriteString(" AND route = ?")
 		args = append(args, req.Route)
@@ -1370,7 +1373,7 @@ LIMIT ?;
 	return ids, nil
 }
 
-func (s *SQLiteStore) Ack(leaseID string) error {
+func (s *Store) Ack(leaseID string) error {
 	return s.withLeaseMutation(leaseID, func(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) (int64, error) {
 		if s.deliveredRetentionMaxAge > 0 {
 			return execRowsAffectedTx(ctx, conn, `
@@ -1380,10 +1383,10 @@ WHERE lease_id = ?
   AND state = ?
   AND (lease_until IS NULL OR lease_until > ?);
 `,
-				string(StateDelivered),
+				string(queue.StateDelivered),
 				now.UnixNano(),
 				leaseID,
-				string(StateLeased),
+				string(queue.StateLeased),
 				now.UnixNano(),
 			)
 		}
@@ -1395,19 +1398,19 @@ WHERE lease_id = ?
   AND (lease_until IS NULL OR lease_until > ?);
 `,
 			leaseID,
-			string(StateLeased),
+			string(queue.StateLeased),
 			now.UnixNano(),
 		)
 	})
 }
 
-func (s *SQLiteStore) AckBatch(leaseIDs []string) (LeaseBatchResult, error) {
+func (s *Store) AckBatch(leaseIDs []string) (queue.LeaseBatchResult, error) {
 	return s.withLeaseBatch(leaseIDs, func(ctx context.Context, conn *sql.Conn, now time.Time, itemIDs []string) error {
 		if s.deliveredRetentionMaxAge > 0 {
 			return s.execByItemIDsTx(ctx, conn, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
-WHERE id IN (`, []any{string(StateDelivered), now.UnixNano()}, itemIDs)
+WHERE id IN (`, []any{string(queue.StateDelivered), now.UnixNano()}, itemIDs)
 		}
 
 		return s.execByItemIDsTx(ctx, conn, `
@@ -1416,7 +1419,7 @@ WHERE id IN (`, nil, itemIDs)
 	})
 }
 
-func (s *SQLiteStore) Nack(leaseID string, delay time.Duration) error {
+func (s *Store) Nack(leaseID string, delay time.Duration) error {
 	if delay < 0 {
 		delay = 0
 	}
@@ -1430,10 +1433,10 @@ WHERE lease_id = ?
   AND state = ?
   AND (lease_until IS NULL OR lease_until > ?);
 `,
-			string(StateQueued),
+			string(queue.StateQueued),
 			nextRunAt.UnixNano(),
 			leaseID,
-			string(StateLeased),
+			string(queue.StateLeased),
 			now.UnixNano(),
 		)
 	})
@@ -1444,7 +1447,7 @@ WHERE lease_id = ?
 	return nil
 }
 
-func (s *SQLiteStore) NackBatch(leaseIDs []string, delay time.Duration) (LeaseBatchResult, error) {
+func (s *Store) NackBatch(leaseIDs []string, delay time.Duration) (queue.LeaseBatchResult, error) {
 	if delay < 0 {
 		delay = 0
 	}
@@ -1454,10 +1457,10 @@ func (s *SQLiteStore) NackBatch(leaseIDs []string, delay time.Duration) (LeaseBa
 		return s.execByItemIDsTx(ctx, conn, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
-WHERE id IN (`, []any{string(StateQueued), nextRunAt.UnixNano()}, itemIDs)
+WHERE id IN (`, []any{string(queue.StateQueued), nextRunAt.UnixNano()}, itemIDs)
 	})
 	if err != nil {
-		return LeaseBatchResult{}, err
+		return queue.LeaseBatchResult{}, err
 	}
 	if res.Succeeded > 0 {
 		s.signal()
@@ -1465,7 +1468,7 @@ WHERE id IN (`, []any{string(StateQueued), nextRunAt.UnixNano()}, itemIDs)
 	return res, nil
 }
 
-func (s *SQLiteStore) Extend(leaseID string, extendBy time.Duration) error {
+func (s *Store) Extend(leaseID string, extendBy time.Duration) error {
 	if extendBy <= 0 {
 		return nil
 	}
@@ -1483,13 +1486,13 @@ WHERE lease_id = ?
 			extendNanos,
 			extendNanos,
 			leaseID,
-			string(StateLeased),
+			string(queue.StateLeased),
 			now.UnixNano(),
 		)
 	})
 }
 
-func (s *SQLiteStore) MarkDead(leaseID string, reason string) error {
+func (s *Store) MarkDead(leaseID string, reason string) error {
 	var deadReason any
 	if strings.TrimSpace(reason) != "" {
 		deadReason = reason
@@ -1503,11 +1506,11 @@ WHERE lease_id = ?
   AND state = ?
   AND (lease_until IS NULL OR lease_until > ?);
 `,
-			string(StateDead),
+			string(queue.StateDead),
 			now.UnixNano(),
 			deadReason,
 			leaseID,
-			string(StateLeased),
+			string(queue.StateLeased),
 			now.UnixNano(),
 		)
 	})
@@ -1518,7 +1521,7 @@ WHERE lease_id = ?
 	return nil
 }
 
-func (s *SQLiteStore) MarkDeadBatch(leaseIDs []string, reason string) (LeaseBatchResult, error) {
+func (s *Store) MarkDeadBatch(leaseIDs []string, reason string) (queue.LeaseBatchResult, error) {
 	var deadReason any
 	if strings.TrimSpace(reason) != "" {
 		deadReason = reason
@@ -1528,10 +1531,10 @@ func (s *SQLiteStore) MarkDeadBatch(leaseIDs []string, reason string) (LeaseBatc
 		return s.execByItemIDsTx(ctx, conn, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = ?
-WHERE id IN (`, []any{string(StateDead), now.UnixNano(), deadReason}, itemIDs)
+WHERE id IN (`, []any{string(queue.StateDead), now.UnixNano(), deadReason}, itemIDs)
 	})
 	if err != nil {
-		return LeaseBatchResult{}, err
+		return queue.LeaseBatchResult{}, err
 	}
 	if res.Succeeded > 0 {
 		s.signal()
@@ -1539,13 +1542,13 @@ WHERE id IN (`, []any{string(StateDead), now.UnixNano(), deadReason}, itemIDs)
 	return res, nil
 }
 
-func (s *SQLiteStore) withLeaseMutation(
+func (s *Store) withLeaseMutation(
 	leaseID string,
 	mutate func(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) (int64, error),
 ) error {
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
-		return ErrLeaseNotFound
+		return queue.ErrLeaseNotFound
 	}
 
 	now := s.now()
@@ -1572,7 +1575,7 @@ func (s *SQLiteStore) withLeaseMutation(
 	return s.resolveLeaseMutationConflictTx(ctx, conn, now, leaseID)
 }
 
-func (s *SQLiteStore) resolveLeaseMutationConflictTx(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) error {
+func (s *Store) resolveLeaseMutationConflictTx(ctx context.Context, conn *sql.Conn, now time.Time, leaseID string) error {
 	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
 	if err != nil {
 		return err
@@ -1590,17 +1593,17 @@ func (s *SQLiteStore) resolveLeaseMutationConflictTx(ctx context.Context, conn *
 		return err
 	}
 	if !expired {
-		return ErrLeaseNotFound
+		return queue.ErrLeaseNotFound
 	}
 
 	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 		return err
 	}
 	committed = true
-	return ErrLeaseExpired
+	return queue.ErrLeaseExpired
 }
 
-func (s *SQLiteStore) resolveSingleLeaseConflictTx(ctx context.Context, conn *sql.Conn, leaseID string, now time.Time) (bool, error) {
+func (s *Store) resolveSingleLeaseConflictTx(ctx context.Context, conn *sql.Conn, leaseID string, now time.Time) (bool, error) {
 	var itemID string
 	var state string
 	var leaseUntilNanos sql.NullInt64
@@ -1617,7 +1620,7 @@ LIMIT 1;
 		}
 		return false, err
 	}
-	if state != string(StateLeased) {
+	if state != string(queue.StateLeased) {
 		return false, nil
 	}
 	if !leaseUntilNanos.Valid {
@@ -1634,13 +1637,13 @@ LIMIT 1;
 	return true, nil
 }
 
-func (s *SQLiteStore) withLeaseBatch(
+func (s *Store) withLeaseBatch(
 	leaseIDs []string,
 	fn func(ctx context.Context, conn *sql.Conn, now time.Time, itemIDs []string) error,
-) (LeaseBatchResult, error) {
+) (queue.LeaseBatchResult, error) {
 	now := s.now()
-	res := LeaseBatchResult{
-		Conflicts: make([]LeaseBatchConflict, 0),
+	res := queue.LeaseBatchResult{
+		Conflicts: make([]queue.LeaseBatchConflict, 0),
 	}
 	if len(leaseIDs) == 0 {
 		return res, nil
@@ -1652,7 +1655,7 @@ func (s *SQLiteStore) withLeaseBatch(
 	for _, rawLeaseID := range leaseIDs {
 		leaseID := strings.TrimSpace(rawLeaseID)
 		if leaseID == "" {
-			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: rawLeaseID})
+			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: rawLeaseID})
 			continue
 		}
 		normalized = append(normalized, leaseID)
@@ -1669,13 +1672,13 @@ func (s *SQLiteStore) withLeaseBatch(
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return LeaseBatchResult{}, err
+		return queue.LeaseBatchResult{}, err
 	}
 	defer conn.Close()
 
 	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
 	if err != nil {
-		return LeaseBatchResult{}, err
+		return queue.LeaseBatchResult{}, err
 	}
 	committed := false
 	defer func() {
@@ -1687,7 +1690,7 @@ func (s *SQLiteStore) withLeaseBatch(
 
 	leasedByLeaseID, err := s.lookupLeasesTx(ctx, conn, unique, now)
 	if err != nil {
-		return LeaseBatchResult{}, err
+		return queue.LeaseBatchResult{}, err
 	}
 
 	processed := make(map[string]struct{}, len(normalized))
@@ -1698,19 +1701,19 @@ func (s *SQLiteStore) withLeaseBatch(
 		if _, ok := processed[leaseID]; ok {
 			// Keep legacy behavior for duplicate lease IDs in one batch:
 			// only the first occurrence may succeed.
-			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
 			continue
 		}
 		processed[leaseID] = struct{}{}
 
 		item, found := leasedByLeaseID[leaseID]
 		if !found {
-			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{LeaseID: leaseID})
+			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
 			continue
 		}
 		if item.expired {
 			expiredIDs = append(expiredIDs, item.id)
-			res.Conflicts = append(res.Conflicts, LeaseBatchConflict{
+			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{
 				LeaseID: leaseID,
 				Expired: true,
 			})
@@ -1720,24 +1723,24 @@ func (s *SQLiteStore) withLeaseBatch(
 	}
 
 	if err := s.requeueLeaseIDsTx(ctx, conn, expiredIDs, now); err != nil {
-		return LeaseBatchResult{}, err
+		return queue.LeaseBatchResult{}, err
 	}
 
 	if len(validIDs) > 0 {
 		if err := fn(ctx, conn, now, validIDs); err != nil {
-			return LeaseBatchResult{}, err
+			return queue.LeaseBatchResult{}, err
 		}
 		res.Succeeded = len(validIDs)
 	}
 
 	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
-		return LeaseBatchResult{}, err
+		return queue.LeaseBatchResult{}, err
 	}
 	committed = true
 	return res, nil
 }
 
-func (s *SQLiteStore) lookupLeasesTx(ctx context.Context, conn *sql.Conn, leaseIDs []string, now time.Time) (map[string]leaseItem, error) {
+func (s *Store) lookupLeasesTx(ctx context.Context, conn *sql.Conn, leaseIDs []string, now time.Time) (map[string]leaseItem, error) {
 	out := make(map[string]leaseItem, len(leaseIDs))
 	if len(leaseIDs) == 0 {
 		return out, nil
@@ -1768,7 +1771,7 @@ WHERE lease_id IN (`+placeholders+`);
 		if err := rows.Scan(&leaseID, &item.id, &state, &leaseUntilNanos); err != nil {
 			return nil, err
 		}
-		if state != string(StateLeased) {
+		if state != string(queue.StateLeased) {
 			continue
 		}
 		if leaseUntilNanos.Valid {
@@ -1785,11 +1788,11 @@ WHERE lease_id IN (`+placeholders+`);
 	return out, nil
 }
 
-func (s *SQLiteStore) requeueLeaseIDsTx(ctx context.Context, conn *sql.Conn, itemIDs []string, now time.Time) error {
+func (s *Store) requeueLeaseIDsTx(ctx context.Context, conn *sql.Conn, itemIDs []string, now time.Time) error {
 	return s.execByItemIDsTx(ctx, conn, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
-WHERE id IN (`, []any{string(StateQueued), now.UnixNano()}, itemIDs)
+WHERE id IN (`, []any{string(queue.StateQueued), now.UnixNano()}, itemIDs)
 }
 
 func execRowsAffectedTx(ctx context.Context, conn *sql.Conn, query string, args ...any) (int64, error) {
@@ -1804,7 +1807,7 @@ func execRowsAffectedTx(ctx context.Context, conn *sql.Conn, query string, args 
 	return n, nil
 }
 
-func (s *SQLiteStore) execByItemIDsTx(ctx context.Context, conn *sql.Conn, queryPrefix string, args []any, itemIDs []string) error {
+func (s *Store) execByItemIDsTx(ctx context.Context, conn *sql.Conn, queryPrefix string, args []any, itemIDs []string) error {
 	if len(itemIDs) == 0 {
 		return nil
 	}
@@ -1821,10 +1824,10 @@ func (s *SQLiteStore) execByItemIDsTx(ctx context.Context, conn *sql.Conn, query
 	return err
 }
 
-func (s *SQLiteStore) ListDead(req DeadListRequest) (DeadListResponse, error) {
+func (s *Store) ListDead(req queue.DeadListRequest) (queue.DeadListResponse, error) {
 	pruneNow := s.now()
 	if err := s.maybePrune(pruneNow); err != nil {
-		return DeadListResponse{}, err
+		return queue.DeadListResponse{}, err
 	}
 
 	limit := req.Limit
@@ -1856,7 +1859,7 @@ SELECT id, route, target, state, received_at, attempt, next_run_at,
   schema_version, dead_reason
 FROM queue_items
 WHERE state = ?`
-	args := []any{includePayload, includeHeaders, includeTrace, string(StateDead)}
+	args := []any{includePayload, includeHeaders, includeTrace, string(queue.StateDead)}
 	if req.Route != "" {
 		query += " AND route = ?"
 		args = append(args, req.Route)
@@ -1870,13 +1873,13 @@ WHERE state = ?`
 
 	rows, err := s.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return DeadListResponse{}, err
+		return queue.DeadListResponse{}, err
 	}
 	defer rows.Close()
 
-	items := make([]Envelope, 0)
+	items := make([]queue.Envelope, 0)
 	for rows.Next() {
-		var env Envelope
+		var env queue.Envelope
 		var receivedAtNanos int64
 		var nextRunAtNanos int64
 		var state string
@@ -1898,10 +1901,10 @@ WHERE state = ?`
 			&env.SchemaVersion,
 			&deadReason,
 		); err != nil {
-			return DeadListResponse{}, err
+			return queue.DeadListResponse{}, err
 		}
 
-		env.State = State(state)
+		env.State = queue.State(state)
 		env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
 		env.NextRunAt = time.Unix(0, nextRunAtNanos).UTC()
 		env.Headers = unmarshalStringMap(headersJSON)
@@ -1913,21 +1916,21 @@ WHERE state = ?`
 		items = append(items, env)
 	}
 	if err := rows.Err(); err != nil {
-		return DeadListResponse{}, err
+		return queue.DeadListResponse{}, err
 	}
 
-	return DeadListResponse{Items: items}, nil
+	return queue.DeadListResponse{Items: items}, nil
 }
 
-func (s *SQLiteStore) RequeueDead(req DeadRequeueRequest) (DeadRequeueResponse, error) {
+func (s *Store) RequeueDead(req queue.DeadRequeueRequest) (queue.DeadRequeueResponse, error) {
 	ids := normalizeUniqueIDs(req.IDs)
 	if len(ids) == 0 {
-		return DeadRequeueResponse{}, nil
+		return queue.DeadRequeueResponse{}, nil
 	}
 
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
 	args := make([]any, 0, 3+len(ids))
-	args = append(args, string(StateQueued), s.now().UnixNano(), string(StateDead))
+	args = append(args, string(queue.StateQueued), s.now().UnixNano(), string(queue.StateDead))
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -1940,27 +1943,27 @@ WHERE state = ?
 
 	res, err := s.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
-		return DeadRequeueResponse{}, err
+		return queue.DeadRequeueResponse{}, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return DeadRequeueResponse{}, err
+		return queue.DeadRequeueResponse{}, err
 	}
 	if n > 0 {
 		s.signal()
 	}
-	return DeadRequeueResponse{Requeued: int(n)}, nil
+	return queue.DeadRequeueResponse{Requeued: int(n)}, nil
 }
 
-func (s *SQLiteStore) DeleteDead(req DeadDeleteRequest) (DeadDeleteResponse, error) {
+func (s *Store) DeleteDead(req queue.DeadDeleteRequest) (queue.DeadDeleteResponse, error) {
 	ids := normalizeUniqueIDs(req.IDs)
 	if len(ids) == 0 {
-		return DeadDeleteResponse{}, nil
+		return queue.DeadDeleteResponse{}, nil
 	}
 
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
 	args := make([]any, 0, 1+len(ids))
-	args = append(args, string(StateDead))
+	args = append(args, string(queue.StateDead))
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -1972,19 +1975,19 @@ WHERE state = ?
 
 	res, err := s.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
-		return DeadDeleteResponse{}, err
+		return queue.DeadDeleteResponse{}, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return DeadDeleteResponse{}, err
+		return queue.DeadDeleteResponse{}, err
 	}
-	return DeadDeleteResponse{Deleted: int(n)}, nil
+	return queue.DeadDeleteResponse{Deleted: int(n)}, nil
 }
 
-func (s *SQLiteStore) ListMessages(req MessageListRequest) (MessageListResponse, error) {
+func (s *Store) ListMessages(req queue.MessageListRequest) (queue.MessageListResponse, error) {
 	pruneNow := s.now()
 	if err := s.maybePrune(pruneNow); err != nil {
-		return MessageListResponse{}, err
+		return queue.MessageListResponse{}, err
 	}
 
 	limit := req.Limit
@@ -1999,12 +2002,12 @@ func (s *SQLiteStore) ListMessages(req MessageListRequest) (MessageListResponse,
 	orderByReceived := "DESC"
 	orderByID := "DESC"
 	switch order {
-	case "", MessageOrderDesc:
-	case MessageOrderAsc:
+	case "", queue.MessageOrderDesc:
+	case queue.MessageOrderAsc:
 		orderByReceived = "ASC"
 		orderByID = "ASC"
 	default:
-		return MessageListResponse{}, fmt.Errorf("invalid message order %q", req.Order)
+		return queue.MessageListResponse{}, fmt.Errorf("invalid message order %q", req.Order)
 	}
 
 	includePayload := 0
@@ -2050,13 +2053,13 @@ WHERE 1 = 1`
 
 	rows, err := s.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return MessageListResponse{}, err
+		return queue.MessageListResponse{}, err
 	}
 	defer rows.Close()
 
-	items := make([]Envelope, 0)
+	items := make([]queue.Envelope, 0)
 	for rows.Next() {
-		var env Envelope
+		var env queue.Envelope
 		var receivedAtNanos int64
 		var nextRunAtNanos int64
 		var state string
@@ -2078,10 +2081,10 @@ WHERE 1 = 1`
 			&env.SchemaVersion,
 			&deadReason,
 		); err != nil {
-			return MessageListResponse{}, err
+			return queue.MessageListResponse{}, err
 		}
 
-		env.State = State(state)
+		env.State = queue.State(state)
 		env.ReceivedAt = time.Unix(0, receivedAtNanos).UTC()
 		env.NextRunAt = time.Unix(0, nextRunAtNanos).UTC()
 		env.Headers = unmarshalStringMap(headersJSON)
@@ -2092,16 +2095,16 @@ WHERE 1 = 1`
 		items = append(items, env)
 	}
 	if err := rows.Err(); err != nil {
-		return MessageListResponse{}, err
+		return queue.MessageListResponse{}, err
 	}
 
-	return MessageListResponse{Items: items}, nil
+	return queue.MessageListResponse{Items: items}, nil
 }
 
-func (s *SQLiteStore) LookupMessages(req MessageLookupRequest) (MessageLookupResponse, error) {
+func (s *Store) LookupMessages(req queue.MessageLookupRequest) (queue.MessageLookupResponse, error) {
 	ids := normalizeUniqueIDs(req.IDs)
 	if len(ids) == 0 {
-		return MessageLookupResponse{}, nil
+		return queue.MessageLookupResponse{}, nil
 	}
 
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
@@ -2117,25 +2120,25 @@ WHERE id IN (` + placeholders + `);`
 
 	rows, err := s.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return MessageLookupResponse{}, err
+		return queue.MessageLookupResponse{}, err
 	}
 	defer rows.Close()
 
-	byID := make(map[string]MessageLookupItem, len(ids))
+	byID := make(map[string]queue.MessageLookupItem, len(ids))
 	for rows.Next() {
-		var item MessageLookupItem
+		var item queue.MessageLookupItem
 		var state string
 		if err := rows.Scan(&item.ID, &item.Route, &state); err != nil {
-			return MessageLookupResponse{}, err
+			return queue.MessageLookupResponse{}, err
 		}
-		item.State = State(state)
+		item.State = queue.State(state)
 		byID[item.ID] = item
 	}
 	if err := rows.Err(); err != nil {
-		return MessageLookupResponse{}, err
+		return queue.MessageLookupResponse{}, err
 	}
 
-	items := make([]MessageLookupItem, 0, len(byID))
+	items := make([]queue.MessageLookupItem, 0, len(byID))
 	for _, id := range ids {
 		item, ok := byID[id]
 		if !ok {
@@ -2143,24 +2146,24 @@ WHERE id IN (` + placeholders + `);`
 		}
 		items = append(items, item)
 	}
-	return MessageLookupResponse{Items: items}, nil
+	return queue.MessageLookupResponse{Items: items}, nil
 }
 
-func (s *SQLiteStore) CancelMessages(req MessageCancelRequest) (MessageCancelResponse, error) {
+func (s *Store) CancelMessages(req queue.MessageCancelRequest) (queue.MessageCancelResponse, error) {
 	ids := normalizeUniqueIDs(req.IDs)
 	if len(ids) == 0 {
-		return MessageCancelResponse{}, nil
+		return queue.MessageCancelResponse{}, nil
 	}
 
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
 	args := make([]any, 0, 6+len(ids))
 	args = append(
 		args,
-		string(StateCanceled),
+		string(queue.StateCanceled),
 		s.now().UnixNano(),
-		string(StateQueued),
-		string(StateLeased),
-		string(StateDead),
+		string(queue.StateQueued),
+		string(queue.StateLeased),
+		string(queue.StateDead),
 	)
 	for _, id := range ids {
 		args = append(args, id)
@@ -2174,29 +2177,29 @@ WHERE state IN (?, ?, ?)
 
 	res, err := s.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
-		return MessageCancelResponse{}, err
+		return queue.MessageCancelResponse{}, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return MessageCancelResponse{}, err
+		return queue.MessageCancelResponse{}, err
 	}
-	return MessageCancelResponse{Canceled: int(n), Matched: int(n)}, nil
+	return queue.MessageCancelResponse{Canceled: int(n), Matched: int(n)}, nil
 }
 
-func (s *SQLiteStore) RequeueMessages(req MessageRequeueRequest) (MessageRequeueResponse, error) {
+func (s *Store) RequeueMessages(req queue.MessageRequeueRequest) (queue.MessageRequeueResponse, error) {
 	ids := normalizeUniqueIDs(req.IDs)
 	if len(ids) == 0 {
-		return MessageRequeueResponse{}, nil
+		return queue.MessageRequeueResponse{}, nil
 	}
 
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
 	args := make([]any, 0, 5+len(ids))
 	args = append(
 		args,
-		string(StateQueued),
+		string(queue.StateQueued),
 		s.now().UnixNano(),
-		string(StateDead),
-		string(StateCanceled),
+		string(queue.StateDead),
+		string(queue.StateCanceled),
 	)
 	for _, id := range ids {
 		args = append(args, id)
@@ -2210,31 +2213,31 @@ WHERE state IN (?, ?)
 
 	res, err := s.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
-		return MessageRequeueResponse{}, err
+		return queue.MessageRequeueResponse{}, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return MessageRequeueResponse{}, err
+		return queue.MessageRequeueResponse{}, err
 	}
 	if n > 0 {
 		s.signal()
 	}
-	return MessageRequeueResponse{Requeued: int(n), Matched: int(n)}, nil
+	return queue.MessageRequeueResponse{Requeued: int(n), Matched: int(n)}, nil
 }
 
-func (s *SQLiteStore) ResumeMessages(req MessageResumeRequest) (MessageResumeResponse, error) {
+func (s *Store) ResumeMessages(req queue.MessageResumeRequest) (queue.MessageResumeResponse, error) {
 	ids := normalizeUniqueIDs(req.IDs)
 	if len(ids) == 0 {
-		return MessageResumeResponse{}, nil
+		return queue.MessageResumeResponse{}, nil
 	}
 
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
 	args := make([]any, 0, 4+len(ids))
 	args = append(
 		args,
-		string(StateQueued),
+		string(queue.StateQueued),
 		s.now().UnixNano(),
-		string(StateCanceled),
+		string(queue.StateCanceled),
 	)
 	for _, id := range ids {
 		args = append(args, id)
@@ -2248,100 +2251,100 @@ WHERE state = ?
 
 	res, err := s.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
-		return MessageResumeResponse{}, err
+		return queue.MessageResumeResponse{}, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return MessageResumeResponse{}, err
+		return queue.MessageResumeResponse{}, err
 	}
 	if n > 0 {
 		s.signal()
 	}
-	return MessageResumeResponse{Resumed: int(n), Matched: int(n)}, nil
+	return queue.MessageResumeResponse{Resumed: int(n), Matched: int(n)}, nil
 }
 
-func (s *SQLiteStore) CancelMessagesByFilter(req MessageManageFilterRequest) (MessageCancelResponse, error) {
-	ids, err := s.selectMessageIDsByFilter(req, []State{StateQueued, StateLeased, StateDead})
+func (s *Store) CancelMessagesByFilter(req queue.MessageManageFilterRequest) (queue.MessageCancelResponse, error) {
+	ids, err := s.selectMessageIDsByFilter(req, []queue.State{queue.StateQueued, queue.StateLeased, queue.StateDead})
 	if err != nil {
-		return MessageCancelResponse{}, err
+		return queue.MessageCancelResponse{}, err
 	}
 	if len(ids) == 0 {
 		if req.PreviewOnly {
-			return MessageCancelResponse{PreviewOnly: true}, nil
+			return queue.MessageCancelResponse{PreviewOnly: true}, nil
 		}
-		return MessageCancelResponse{}, nil
+		return queue.MessageCancelResponse{}, nil
 	}
 	if req.PreviewOnly {
-		return MessageCancelResponse{
+		return queue.MessageCancelResponse{
 			Canceled:    0,
 			Matched:     len(ids),
 			PreviewOnly: true,
 		}, nil
 	}
-	resp, err := s.CancelMessages(MessageCancelRequest{IDs: ids})
+	resp, err := s.CancelMessages(queue.MessageCancelRequest{IDs: ids})
 	if err != nil {
-		return MessageCancelResponse{}, err
+		return queue.MessageCancelResponse{}, err
 	}
 	resp.Matched = len(ids)
 	return resp, nil
 }
 
-func (s *SQLiteStore) ResumeMessagesByFilter(req MessageManageFilterRequest) (MessageResumeResponse, error) {
-	ids, err := s.selectMessageIDsByFilter(req, []State{StateCanceled})
+func (s *Store) ResumeMessagesByFilter(req queue.MessageManageFilterRequest) (queue.MessageResumeResponse, error) {
+	ids, err := s.selectMessageIDsByFilter(req, []queue.State{queue.StateCanceled})
 	if err != nil {
-		return MessageResumeResponse{}, err
+		return queue.MessageResumeResponse{}, err
 	}
 	if len(ids) == 0 {
 		if req.PreviewOnly {
-			return MessageResumeResponse{PreviewOnly: true}, nil
+			return queue.MessageResumeResponse{PreviewOnly: true}, nil
 		}
-		return MessageResumeResponse{}, nil
+		return queue.MessageResumeResponse{}, nil
 	}
 	if req.PreviewOnly {
-		return MessageResumeResponse{
+		return queue.MessageResumeResponse{
 			Resumed:     0,
 			Matched:     len(ids),
 			PreviewOnly: true,
 		}, nil
 	}
-	resp, err := s.ResumeMessages(MessageResumeRequest{IDs: ids})
+	resp, err := s.ResumeMessages(queue.MessageResumeRequest{IDs: ids})
 	if err != nil {
-		return MessageResumeResponse{}, err
+		return queue.MessageResumeResponse{}, err
 	}
 	resp.Matched = len(ids)
 	return resp, nil
 }
 
-func (s *SQLiteStore) RequeueMessagesByFilter(req MessageManageFilterRequest) (MessageRequeueResponse, error) {
-	ids, err := s.selectMessageIDsByFilter(req, []State{StateDead, StateCanceled})
+func (s *Store) RequeueMessagesByFilter(req queue.MessageManageFilterRequest) (queue.MessageRequeueResponse, error) {
+	ids, err := s.selectMessageIDsByFilter(req, []queue.State{queue.StateDead, queue.StateCanceled})
 	if err != nil {
-		return MessageRequeueResponse{}, err
+		return queue.MessageRequeueResponse{}, err
 	}
 	if len(ids) == 0 {
 		if req.PreviewOnly {
-			return MessageRequeueResponse{PreviewOnly: true}, nil
+			return queue.MessageRequeueResponse{PreviewOnly: true}, nil
 		}
-		return MessageRequeueResponse{}, nil
+		return queue.MessageRequeueResponse{}, nil
 	}
 	if req.PreviewOnly {
-		return MessageRequeueResponse{
+		return queue.MessageRequeueResponse{
 			Requeued:    0,
 			Matched:     len(ids),
 			PreviewOnly: true,
 		}, nil
 	}
-	resp, err := s.RequeueMessages(MessageRequeueRequest{IDs: ids})
+	resp, err := s.RequeueMessages(queue.MessageRequeueRequest{IDs: ids})
 	if err != nil {
-		return MessageRequeueResponse{}, err
+		return queue.MessageRequeueResponse{}, err
 	}
 	resp.Matched = len(ids)
 	return resp, nil
 }
 
-func (s *SQLiteStore) Stats() (Stats, error) {
+func (s *Store) Stats() (queue.Stats, error) {
 	pruneNow := s.now()
 	if err := s.maybePrune(pruneNow); err != nil {
-		return Stats{}, err
+		return queue.Stats{}, err
 	}
 
 	rows, err := s.db.QueryContext(context.Background(), `
@@ -2350,30 +2353,30 @@ FROM queue_items
 GROUP BY state;
 `)
 	if err != nil {
-		return Stats{}, err
+		return queue.Stats{}, err
 	}
 	defer rows.Close()
 
-	byState := map[State]int{
-		StateQueued:    0,
-		StateLeased:    0,
-		StateDelivered: 0,
-		StateDead:      0,
-		StateCanceled:  0,
+	byState := map[queue.State]int{
+		queue.StateQueued:    0,
+		queue.StateLeased:    0,
+		queue.StateDelivered: 0,
+		queue.StateDead:      0,
+		queue.StateCanceled:  0,
 	}
 	total := 0
 	for rows.Next() {
 		var state string
 		var count int
 		if err := rows.Scan(&state, &count); err != nil {
-			return Stats{}, err
+			return queue.Stats{}, err
 		}
-		st := State(state)
+		st := queue.State(state)
 		byState[st] = count
 		total += count
 	}
 	if err := rows.Err(); err != nil {
-		return Stats{}, err
+		return queue.Stats{}, err
 	}
 
 	var oldestQueuedReceivedNanos sql.NullInt64
@@ -2382,8 +2385,8 @@ GROUP BY state;
 SELECT MIN(received_at), MIN(next_run_at)
 FROM queue_items
 WHERE state = ?;
-`, string(StateQueued)).Scan(&oldestQueuedReceivedNanos, &earliestQueuedNextRunNanos); err != nil {
-		return Stats{}, err
+`, string(queue.StateQueued)).Scan(&oldestQueuedReceivedNanos, &earliestQueuedNextRunNanos); err != nil {
+		return queue.Stats{}, err
 	}
 
 	var oldestQueuedReceivedAt time.Time
@@ -2411,19 +2414,19 @@ WHERE state = ?
 GROUP BY route, target
 ORDER BY COUNT(*) DESC, route ASC, target ASC
 LIMIT ?;
-`, string(StateQueued), statsTopBacklogLimit)
+`, string(queue.StateQueued), statsTopBacklogLimit)
 	if err != nil {
-		return Stats{}, err
+		return queue.Stats{}, err
 	}
 	defer backlogRows.Close()
 
-	topQueued := make([]BacklogBucket, 0, statsTopBacklogLimit)
+	topQueued := make([]queue.BacklogBucket, 0, statsTopBacklogLimit)
 	for backlogRows.Next() {
-		var b BacklogBucket
+		var b queue.BacklogBucket
 		var oldest sql.NullInt64
 		var earliest sql.NullInt64
 		if err := backlogRows.Scan(&b.Route, &b.Target, &b.Queued, &oldest, &earliest); err != nil {
-			return Stats{}, err
+			return queue.Stats{}, err
 		}
 		if oldest.Valid {
 			b.OldestQueuedReceivedAt = time.Unix(0, oldest.Int64).UTC()
@@ -2440,10 +2443,10 @@ LIMIT ?;
 		topQueued = append(topQueued, b)
 	}
 	if err := backlogRows.Err(); err != nil {
-		return Stats{}, err
+		return queue.Stats{}, err
 	}
 
-	return Stats{
+	return queue.Stats{
 		Total:                  total,
 		ByState:                byState,
 		OldestQueuedReceivedAt: oldestQueuedReceivedAt,
@@ -2454,7 +2457,7 @@ LIMIT ?;
 	}, nil
 }
 
-func (s *SQLiteStore) CaptureBacklogTrendSample(at time.Time) error {
+func (s *Store) CaptureBacklogTrendSample(at time.Time) error {
 	capturedAt := at
 	if capturedAt.IsZero() {
 		capturedAt = s.now()
@@ -2475,7 +2478,7 @@ SELECT route, target, state, COUNT(*)
 FROM queue_items
 WHERE state IN (?, ?, ?)
 GROUP BY route, target, state;
-`, string(StateQueued), string(StateLeased), string(StateDead))
+`, string(queue.StateQueued), string(queue.StateLeased), string(queue.StateDead))
 	if err != nil {
 		return err
 	}
@@ -2493,14 +2496,14 @@ GROUP BY route, target, state;
 		}
 		key := route + "\x00" + target
 		c := perRoute[key]
-		switch State(state) {
-		case StateQueued:
+		switch queue.State(state) {
+		case queue.StateQueued:
 			c.queued += count
 			global.queued += count
-		case StateLeased:
+		case queue.StateLeased:
 			c.leased += count
 			global.leased += count
-		case StateDead:
+		case queue.StateDead:
 			c.dead += count
 			global.dead += count
 		}
@@ -2575,7 +2578,7 @@ VALUES (?, ?, ?, ?, ?, ?);
 	return nil
 }
 
-func (s *SQLiteStore) ListBacklogTrend(req BacklogTrendListRequest) (BacklogTrendListResponse, error) {
+func (s *Store) ListBacklogTrend(req queue.BacklogTrendListRequest) (queue.BacklogTrendListResponse, error) {
 	limit := req.Limit
 	if limit <= 0 {
 		limit = 1000
@@ -2626,20 +2629,20 @@ WHERE NOT (route = '' AND target = '')`
 
 	rows, err := s.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return BacklogTrendListResponse{}, err
+		return queue.BacklogTrendListResponse{}, err
 	}
 	defer rows.Close()
 
-	out := make([]BacklogTrendSample, 0, limit+1)
+	out := make([]queue.BacklogTrendSample, 0, limit+1)
 	for rows.Next() {
 		var capturedNanos int64
 		var queued int
 		var leased int
 		var dead int
 		if err := rows.Scan(&capturedNanos, &queued, &leased, &dead); err != nil {
-			return BacklogTrendListResponse{}, err
+			return queue.BacklogTrendListResponse{}, err
 		}
-		out = append(out, BacklogTrendSample{
+		out = append(out, queue.BacklogTrendSample{
 			CapturedAt: time.Unix(0, capturedNanos).UTC(),
 			Queued:     queued,
 			Leased:     leased,
@@ -2647,7 +2650,7 @@ WHERE NOT (route = '' AND target = '')`
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return BacklogTrendListResponse{}, err
+		return queue.BacklogTrendListResponse{}, err
 	}
 
 	truncated := false
@@ -2660,13 +2663,13 @@ WHERE NOT (route = '' AND target = '')`
 		out[i], out[j] = out[j], out[i]
 	}
 
-	return BacklogTrendListResponse{
+	return queue.BacklogTrendListResponse{
 		Items:     out,
 		Truncated: truncated,
 	}, nil
 }
 
-func (s *SQLiteStore) selectMessageIDsByFilter(req MessageManageFilterRequest, allowed []State) ([]string, error) {
+func (s *Store) selectMessageIDsByFilter(req queue.MessageManageFilterRequest, allowed []queue.State) ([]string, error) {
 	limit := req.Limit
 	if limit <= 0 {
 		limit = 100
@@ -2675,12 +2678,12 @@ func (s *SQLiteStore) selectMessageIDsByFilter(req MessageManageFilterRequest, a
 		limit = 1000
 	}
 
-	allowedSet := make(map[State]struct{}, len(allowed))
+	allowedSet := make(map[queue.State]struct{}, len(allowed))
 	for _, st := range allowed {
 		allowedSet[st] = struct{}{}
 	}
 
-	states := make([]State, 0, len(allowed))
+	states := make([]queue.State, 0, len(allowed))
 	if req.State != "" {
 		if _, ok := allowedSet[req.State]; !ok {
 			return nil, nil
@@ -2741,7 +2744,7 @@ WHERE 1 = 1`
 	return ids, nil
 }
 
-func (s *SQLiteStore) RecordAttempt(attempt DeliveryAttempt) error {
+func (s *Store) RecordAttempt(attempt queue.DeliveryAttempt) error {
 	if strings.TrimSpace(attempt.ID) == "" {
 		attempt.ID = newHexID("att_")
 	}
@@ -2752,7 +2755,7 @@ func (s *SQLiteStore) RecordAttempt(attempt DeliveryAttempt) error {
 	attempt.Error = strings.TrimSpace(attempt.Error)
 	attempt.DeadReason = strings.TrimSpace(attempt.DeadReason)
 	if attempt.Outcome == "" {
-		attempt.Outcome = AttemptOutcomeRetry
+		attempt.Outcome = queue.AttemptOutcomeRetry
 	}
 
 	var statusCode any
@@ -2787,7 +2790,7 @@ INSERT INTO delivery_attempts (
 	return err
 }
 
-func (s *SQLiteStore) ListAttempts(req AttemptListRequest) (AttemptListResponse, error) {
+func (s *Store) ListAttempts(req queue.AttemptListRequest) (queue.AttemptListResponse, error) {
 	limit := req.Limit
 	if limit <= 0 {
 		limit = 100
@@ -2826,13 +2829,13 @@ WHERE 1 = 1`
 
 	rows, err := s.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return AttemptListResponse{}, err
+		return queue.AttemptListResponse{}, err
 	}
 	defer rows.Close()
 
-	items := make([]DeliveryAttempt, 0)
+	items := make([]queue.DeliveryAttempt, 0)
 	for rows.Next() {
-		var item DeliveryAttempt
+		var item queue.DeliveryAttempt
 		var createdAtNanos int64
 		var statusCode sql.NullInt64
 		var errText sql.NullString
@@ -2851,7 +2854,7 @@ WHERE 1 = 1`
 			&deadReason,
 			&createdAtNanos,
 		); err != nil {
-			return AttemptListResponse{}, err
+			return queue.AttemptListResponse{}, err
 		}
 
 		if statusCode.Valid {
@@ -2860,7 +2863,7 @@ WHERE 1 = 1`
 		if errText.Valid {
 			item.Error = errText.String
 		}
-		item.Outcome = AttemptOutcome(outcome)
+		item.Outcome = queue.AttemptOutcome(outcome)
 		if deadReason.Valid {
 			item.DeadReason = deadReason.String
 		}
@@ -2869,10 +2872,10 @@ WHERE 1 = 1`
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return AttemptListResponse{}, err
+		return queue.AttemptListResponse{}, err
 	}
 
-	return AttemptListResponse{Items: items}, nil
+	return queue.AttemptListResponse{Items: items}, nil
 }
 
 type leaseItem struct {
@@ -2884,9 +2887,9 @@ type leaseItem struct {
 	leaseUntil time.Time
 }
 
-func (s *SQLiteStore) withLease(leaseID string, fn func(ctx context.Context, conn *sql.Conn, item leaseItem) error) error {
+func (s *Store) withLease(leaseID string, fn func(ctx context.Context, conn *sql.Conn, item leaseItem) error) error {
 	if strings.TrimSpace(leaseID) == "" {
-		return ErrLeaseNotFound
+		return queue.ErrLeaseNotFound
 	}
 
 	now := s.now()
@@ -2922,12 +2925,12 @@ LIMIT 1;
 `, leaseID).Scan(&item.id, &item.route, &item.target, &state, &item.attempt, &leaseUntilNanos)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrLeaseNotFound
+			return queue.ErrLeaseNotFound
 		}
 		return err
 	}
-	if state != string(StateLeased) {
-		return ErrLeaseNotFound
+	if state != string(queue.StateLeased) {
+		return queue.ErrLeaseNotFound
 	}
 	if leaseUntilNanos.Valid {
 		item.leaseUntil = time.Unix(0, leaseUntilNanos.Int64).UTC()
@@ -2937,12 +2940,12 @@ LIMIT 1;
 	}
 
 	if err := fn(ctx, conn, item); err != nil {
-		if errors.Is(err, ErrLeaseExpired) {
+		if errors.Is(err, queue.ErrLeaseExpired) {
 			if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
 				return err
 			}
 			committed = true
-			return ErrLeaseExpired
+			return queue.ErrLeaseExpired
 		}
 		return err
 	}
@@ -2954,7 +2957,7 @@ LIMIT 1;
 	return nil
 }
 
-func (s *SQLiteStore) requeueExpiredLeases(ctx context.Context, conn *sql.Conn, now time.Time) error {
+func (s *Store) requeueExpiredLeases(ctx context.Context, conn *sql.Conn, now time.Time) error {
 	_, err := conn.ExecContext(ctx, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
@@ -2962,15 +2965,15 @@ WHERE state = ?
   AND lease_until IS NOT NULL
   AND lease_until <= ?;
 `,
-		string(StateQueued),
+		string(queue.StateQueued),
 		now.UnixNano(),
-		string(StateLeased),
+		string(queue.StateLeased),
 		now.UnixNano(),
 	)
 	return err
 }
 
-func (s *SQLiteStore) shouldSweepExpiredLeases(now time.Time) bool {
+func (s *Store) shouldSweepExpiredLeases(now time.Time) bool {
 	nowNanos := now.UnixNano()
 	interval := defaultSQLiteLeaseSweepInterval
 	if s.pollInterval > 0 && s.pollInterval < interval {
@@ -2983,33 +2986,33 @@ func (s *SQLiteStore) shouldSweepExpiredLeases(now time.Time) bool {
 	return atomic.CompareAndSwapInt64(&s.lastLeaseSweepNanos, lastNanos, nowNanos)
 }
 
-func (s *SQLiteStore) requeueLease(ctx context.Context, conn *sql.Conn, id string, _ string, _ string, _ int) error {
+func (s *Store) requeueLease(ctx context.Context, conn *sql.Conn, id string, _ string, _ string, _ int) error {
 	_, err := conn.ExecContext(ctx, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
 WHERE id = ?;
 `,
-		string(StateQueued),
+		string(queue.StateQueued),
 		s.now().UnixNano(),
 		id,
 	)
 	return err
 }
 
-func (s *SQLiteStore) now() time.Time {
+func (s *Store) now() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.nowFn()
 }
 
-func (s *SQLiteStore) signal() {
+func (s *Store) signal() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	close(s.notify)
 	s.notify = make(chan struct{})
 }
 
-func (s *SQLiteStore) waitCh() <-chan struct{} {
+func (s *Store) waitCh() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.notify
@@ -3022,8 +3025,8 @@ const (
 	sqliteTxClassDequeue
 )
 
-func (s *SQLiteStore) RuntimeMetrics() StoreRuntimeMetrics {
-	out := StoreRuntimeMetrics{Backend: "sqlite"}
+func (s *Store) RuntimeMetrics() queue.StoreRuntimeMetrics {
+	out := queue.StoreRuntimeMetrics{Backend: "sqlite"}
 	if s == nil || s.metrics == nil {
 		return out
 	}
@@ -3041,25 +3044,25 @@ func (s *SQLiteStore) RuntimeMetrics() StoreRuntimeMetrics {
 	checkpointTotal := s.metrics.checkpointTotal
 	checkpointErrorTotal := s.metrics.checkpointErrorTotal
 
-	out.Common = StoreCommonRuntimeMetrics{
-		OperationDurationSeconds: []StoreOperationDurationRuntimeMetric{
+	out.Common = queue.StoreCommonRuntimeMetrics{
+		OperationDurationSeconds: []queue.StoreOperationDurationRuntimeMetric{
 			{Operation: "write_tx", DurationSeconds: writeDuration},
 			{Operation: "dequeue_tx", DurationSeconds: dequeueDuration},
 			{Operation: "checkpoint", DurationSeconds: checkpointDuration},
 		},
-		OperationTotal: []StoreOperationCounterRuntimeMetric{
+		OperationTotal: []queue.StoreOperationCounterRuntimeMetric{
 			{Operation: "tx_commit", Total: txCommitTotal},
 			{Operation: "tx_rollback", Total: txRollbackTotal},
 			{Operation: "checkpoint", Total: checkpointTotal},
 			{Operation: "retry", Total: retryTotal},
 		},
-		ErrorsTotal: []StoreOperationErrorRuntimeMetric{
+		ErrorsTotal: []queue.StoreOperationErrorRuntimeMetric{
 			{Operation: "begin_tx", Kind: "busy", Total: busyTotal},
 			{Operation: "checkpoint", Kind: "error", Total: checkpointErrorTotal},
 		},
 	}
 
-	sqliteMetrics := &SQLiteRuntimeMetrics{
+	sqliteMetrics := &queue.SQLiteRuntimeMetrics{
 		WriteDurationSeconds:      writeDuration,
 		DequeueDurationSeconds:    dequeueDuration,
 		CheckpointDurationSeconds: checkpointDuration,
@@ -3074,7 +3077,7 @@ func (s *SQLiteStore) RuntimeMetrics() StoreRuntimeMetrics {
 	return out
 }
 
-func (s *SQLiteStore) beginImmediateWithRetry(ctx context.Context, conn *sql.Conn) (time.Time, error) {
+func (s *Store) beginImmediateWithRetry(ctx context.Context, conn *sql.Conn) (time.Time, error) {
 	const maxAttempts = 3
 	const baseBackoff = 2 * time.Millisecond
 
@@ -3096,7 +3099,7 @@ func (s *SQLiteStore) beginImmediateWithRetry(ctx context.Context, conn *sql.Con
 	return time.Time{}, errors.New("sqlite: begin immediate retry exhausted")
 }
 
-func (s *SQLiteStore) commitTx(ctx context.Context, conn *sql.Conn, startedAt time.Time, class sqliteTxClass) error {
+func (s *Store) commitTx(ctx context.Context, conn *sql.Conn, startedAt time.Time, class sqliteTxClass) error {
 	if _, err := conn.ExecContext(ctx, "COMMIT;"); err != nil {
 		s.observeSQLiteError(err)
 		s.observeSQLiteTx(class, startedAt, false)
@@ -3106,7 +3109,7 @@ func (s *SQLiteStore) commitTx(ctx context.Context, conn *sql.Conn, startedAt ti
 	return nil
 }
 
-func (s *SQLiteStore) rollbackTx(ctx context.Context, conn *sql.Conn, startedAt time.Time, class sqliteTxClass) {
+func (s *Store) rollbackTx(ctx context.Context, conn *sql.Conn, startedAt time.Time, class sqliteTxClass) {
 	if _, err := conn.ExecContext(ctx, "ROLLBACK;"); err != nil {
 		s.observeSQLiteError(err)
 		return
@@ -3114,7 +3117,7 @@ func (s *SQLiteStore) rollbackTx(ctx context.Context, conn *sql.Conn, startedAt 
 	s.observeSQLiteTx(class, startedAt, false)
 }
 
-func (s *SQLiteStore) observeSQLiteTx(class sqliteTxClass, startedAt time.Time, committed bool) {
+func (s *Store) observeSQLiteTx(class sqliteTxClass, startedAt time.Time, committed bool) {
 	if s == nil || s.metrics == nil {
 		return
 	}
@@ -3139,7 +3142,7 @@ func (s *SQLiteStore) observeSQLiteTx(class sqliteTxClass, startedAt time.Time, 
 	}
 }
 
-func (s *SQLiteStore) observeSQLiteError(err error) {
+func (s *Store) observeSQLiteError(err error) {
 	if s == nil || s.metrics == nil || err == nil {
 		return
 	}
@@ -3151,7 +3154,7 @@ func (s *SQLiteStore) observeSQLiteError(err error) {
 	s.metrics.mu.Unlock()
 }
 
-func (s *SQLiteStore) incSQLiteRetry() {
+func (s *Store) incSQLiteRetry() {
 	if s == nil || s.metrics == nil {
 		return
 	}
@@ -3160,7 +3163,7 @@ func (s *SQLiteStore) incSQLiteRetry() {
 	s.metrics.mu.Unlock()
 }
 
-func (s *SQLiteStore) observeSQLiteCheckpoint(duration time.Duration, err error) {
+func (s *Store) observeSQLiteCheckpoint(duration time.Duration, err error) {
 	if s == nil || s.metrics == nil {
 		return
 	}
@@ -3181,7 +3184,7 @@ func (s *SQLiteStore) observeSQLiteCheckpoint(duration time.Duration, err error)
 	s.metrics.checkpointDuration.observe(seconds)
 }
 
-func (s *SQLiteStore) checkpointPassive() error {
+func (s *Store) checkpointPassive() error {
 	startedAt := time.Now()
 	var busyPages int
 	var walPages int
@@ -3192,7 +3195,7 @@ func (s *SQLiteStore) checkpointPassive() error {
 	return err
 }
 
-func (s *SQLiteStore) startCheckpointLoop() {
+func (s *Store) startCheckpointLoop() {
 	if s == nil || s.checkpointInterval <= 0 {
 		return
 	}
@@ -3223,7 +3226,7 @@ func (s *SQLiteStore) startCheckpointLoop() {
 	}()
 }
 
-func (s *SQLiteStore) stopCheckpointLoop() {
+func (s *Store) stopCheckpointLoop() {
 	if s == nil {
 		return
 	}
@@ -3313,7 +3316,7 @@ func mapQueueInsertError(err error) error {
 		return nil
 	}
 	if isSQLiteConstraintError(err) {
-		return ErrEnvelopeExists
+		return queue.ErrEnvelopeExists
 	}
 	return err
 }
@@ -3352,4 +3355,27 @@ func isSQLiteMissingCounterError(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "no such table: queue_counters")
+}
+
+// backend implements hookaido.QueueBackend for the SQLite queue.
+type backend struct{}
+
+func (backend) Name() string { return "sqlite" }
+
+func (backend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() error, error) {
+	store, err := NewStore(
+		cfg.DSN,
+		WithQueueLimits(cfg.QueueMaxDepth, cfg.QueueDropPolicy),
+		WithRetention(cfg.RetentionMaxAge, cfg.RetentionPruneInterval),
+		WithDeliveredRetention(cfg.DeliveredRetentionMaxAge),
+		WithDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, store.Close, nil
+}
+
+func init() {
+	hookaido.RegisterQueueBackend(backend{})
 }

@@ -29,15 +29,13 @@ import (
 	"github.com/nuetzliches/hookaido/internal/admin"
 	"github.com/nuetzliches/hookaido/internal/config"
 	"github.com/nuetzliches/hookaido/internal/dispatcher"
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 	"github.com/nuetzliches/hookaido/internal/ingress"
 	"github.com/nuetzliches/hookaido/internal/pullapi"
 	"github.com/nuetzliches/hookaido/internal/queue"
 	"github.com/nuetzliches/hookaido/internal/router"
 	"github.com/nuetzliches/hookaido/internal/secrets"
 	"github.com/nuetzliches/hookaido/internal/workerapi"
-	workerapipb "github.com/nuetzliches/hookaido/internal/workerapi/proto"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 )
 
 const backlogTrendCaptureInterval = time.Minute
@@ -126,8 +124,13 @@ func run() int {
 
 	var shutdownTracing func(context.Context) error
 	if compiled.Observability.TracingEnabled {
+		tp, ok := hookaido.LookupTracingProvider("otel")
+		if !ok {
+			runtimeLogger.Error("tracing_not_available", slog.String("reason", "otel module not compiled in"))
+			return 1
+		}
 		var err error
-		shutdownTracing, err = initTracing(context.Background(), compiled.Observability, func(err error) {
+		shutdownTracing, err = tp.Init(context.Background(), compiled.Observability, version, func(err error) {
 			appMetrics.incTracingExportErrors()
 			runtimeLogger.Error("tracing_export_failed", slog.Any("err", err))
 		})
@@ -1801,13 +1804,6 @@ func startServers(
 		appMetrics.observePullExtend(route, statusCode, leaseID, extendBy, leaseExpired)
 	}
 
-	workerHandler := workerapi.NewServer(pullHandler)
-	workerHandler.ResolveRoute = state.resolvePull
-	workerHandler.Authorize = state.authorizeWorker
-	if compiled.PullAPI.MaxBatch > 0 {
-		workerHandler.MaxLeaseBatch = compiled.PullAPI.MaxBatch
-	}
-
 	adminH := admin.NewServer(store)
 	adminH.Authorize = state.authorizeAdmin
 	adminH.ResolveTrendSignalConfig = func() queue.BacklogTrendSignalConfig {
@@ -1973,14 +1969,21 @@ func startServers(
 	}
 
 	if strings.TrimSpace(compiled.PullAPI.GRPCListen) != "" {
-		grpcOpts := make([]grpc.ServerOption, 0, 1)
+		wt, ok := hookaido.LookupWorkerTransport("grpc")
+		if !ok {
+			runtimeLogger.Error("grpc_worker_not_available", slog.String("reason", "grpc module not compiled in"))
+			closeEntries()
+			return nil, fmt.Errorf("grpc worker transport not available (not compiled in)")
+		}
+
+		var grpcTLS *tls.Config
 		if compiled.PullAPI.TLS.Enabled {
-			tlsCfg, err := buildTLSConfig(compiled.PullAPI.TLS)
+			var err error
+			grpcTLS, err = buildTLSConfig(compiled.PullAPI.TLS)
 			if err != nil {
 				closeEntries()
 				return nil, fmt.Errorf("pull_api.grpc_listen tls: %w", err)
 			}
-			grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
 		}
 		grpcLn, err := net.Listen("tcp", compiled.PullAPI.GRPCListen)
 		if err != nil {
@@ -1988,10 +1991,22 @@ func startServers(
 			return nil, fmt.Errorf("pull_api.grpc_listen %q: %w", compiled.PullAPI.GRPCListen, err)
 		}
 		listeners = append(listeners, grpcLn)
-		grpcSrv := grpc.NewServer(grpcOpts...)
-		workerapipb.RegisterWorkerServiceServer(grpcSrv, workerHandler)
-		serveGRPCOnListener(runtimeLogger, "pull_worker_grpc", grpcSrv, grpcLn, cancel)
-		servers = append(servers, grpcServerHandle{server: grpcSrv})
+
+		wtCfg := hookaido.WorkerTransportConfig{
+			TLSConfig:     grpcTLS,
+			PullServer:    pullHandler,
+			ResolveRoute:  state.resolvePull,
+			Authorize:     state.authorizeWorker,
+			MaxLeaseBatch: compiled.PullAPI.MaxBatch,
+		}
+
+		go func() {
+			if err := wt.Serve(grpcLn, wtCfg); err != nil {
+				runtimeLogger.Error("grpc_server_error", slog.Any("err", err))
+				cancel()
+			}
+		}()
+		servers = append(servers, workerTransportHandle{stop: wt.Stop})
 	}
 
 	if compiled.Observability.Metrics.Enabled {
@@ -2051,29 +2066,15 @@ type shutdownServer interface {
 	Shutdown(ctx context.Context) error
 }
 
-type grpcServerHandle struct {
-	server *grpc.Server
+type workerTransportHandle struct {
+	stop func(context.Context) error
 }
 
-func (h grpcServerHandle) Shutdown(ctx context.Context) error {
-	if h.server == nil {
+func (h workerTransportHandle) Shutdown(ctx context.Context) error {
+	if h.stop == nil {
 		return nil
 	}
-
-	done := make(chan struct{})
-	go func() {
-		h.server.GracefulStop()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		h.server.Stop()
-		<-done
-		return ctx.Err()
-	}
+	return h.stop(ctx)
 }
 
 func mountPrefix(prefix string, next http.Handler) http.Handler {
@@ -2141,22 +2142,6 @@ func listenWithTLS(addr string, tlsCfg config.TLSConfig) (net.Listener, error) {
 	return tls.NewListener(ln, cfg), nil
 }
 
-func serveGRPCOnListener(logger *slog.Logger, name string, srv *grpc.Server, ln net.Listener, cancel func()) {
-	go func() {
-		err := srv.Serve(ln)
-		if err == nil || errors.Is(err, grpc.ErrServerStopped) {
-			return
-		}
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Error("grpc_server_error", slog.String("name", name), slog.Any("err", err))
-		if cancel != nil {
-			cancel()
-		}
-	}()
-}
-
 func resolvePostgresDSN(flagValue string) string {
 	if dsn := strings.TrimSpace(flagValue); dsn != "" {
 		return dsn
@@ -2166,44 +2151,50 @@ func resolvePostgresDSN(flagValue string) string {
 
 func newQueueStore(compiled config.Compiled, dbPath, postgresDSN string) (queue.Store, string, func() error, error) {
 	backend := queueBackendForCompiled(compiled)
+	if backend == "mixed" {
+		return nil, backend, nil, errors.New("mixed route queue backends are not supported yet")
+	}
+
+	b, ok := hookaido.LookupQueueBackend(backend)
+	if !ok {
+		available := strings.Join(hookaido.QueueBackendNames(), ", ")
+		return nil, backend, nil, fmt.Errorf("queue backend %q is not available (not compiled in); available backends: %s", backend, available)
+	}
+
+	dsn := ""
 	switch backend {
 	case "sqlite":
-		store, err := queue.NewSQLiteStore(
-			dbPath,
-			queue.WithSQLiteQueueLimits(compiled.QueueLimits.MaxDepth, compiled.QueueLimits.DropPolicy),
-			queue.WithSQLiteRetention(compiled.QueueRetention.MaxAge, compiled.QueueRetention.PruneInterval),
-			queue.WithSQLiteDeliveredRetention(compiled.DeliveredRetention.MaxAge),
-			queue.WithSQLiteDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
-		)
-		if err != nil {
-			return nil, backend, nil, err
-		}
-		return store, backend, store.Close, nil
-	case "memory":
-		store := queue.NewMemoryStore(
-			queue.WithQueueLimits(compiled.QueueLimits.MaxDepth, compiled.QueueLimits.DropPolicy),
-			queue.WithQueueRetention(compiled.QueueRetention.MaxAge, compiled.QueueRetention.PruneInterval),
-			queue.WithDeliveredRetention(compiled.DeliveredRetention.MaxAge),
-			queue.WithDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
-		)
-		return store, backend, func() error { return nil }, nil
+		dsn = dbPath
 	case "postgres":
-		store, err := queue.NewPostgresStore(
-			postgresDSN,
-			queue.WithPostgresQueueLimits(compiled.QueueLimits.MaxDepth, compiled.QueueLimits.DropPolicy),
-			queue.WithPostgresRetention(compiled.QueueRetention.MaxAge, compiled.QueueRetention.PruneInterval),
-			queue.WithPostgresDeliveredRetention(compiled.DeliveredRetention.MaxAge),
-			queue.WithPostgresDLQRetention(compiled.DLQRetention.MaxAge, compiled.DLQRetention.MaxDepth),
-		)
-		if err != nil {
-			return nil, backend, nil, err
-		}
-		return store, backend, store.Close, nil
-	case "mixed":
-		return nil, backend, nil, errors.New("mixed route queue backends are not supported yet")
-	default:
-		return nil, backend, nil, fmt.Errorf("unsupported queue backend %q", backend)
+		dsn = postgresDSN
 	}
+
+	cfg := hookaido.QueueBackendConfig{
+		DSN:                      dsn,
+		QueueMaxDepth:            compiled.QueueLimits.MaxDepth,
+		QueueDropPolicy:          compiled.QueueLimits.DropPolicy,
+		RetentionMaxAge:          compiled.QueueRetention.MaxAge,
+		RetentionPruneInterval:   compiled.QueueRetention.PruneInterval,
+		DeliveredRetentionMaxAge: compiled.DeliveredRetention.MaxAge,
+		DLQRetentionMaxAge:       compiled.DLQRetention.MaxAge,
+		DLQRetentionMaxDepth:     compiled.DLQRetention.MaxDepth,
+	}
+
+	store, closer, err := b.OpenStore(cfg)
+	if err != nil {
+		return nil, backend, nil, err
+	}
+
+	qs, ok := store.(queue.Store)
+	if !ok {
+		return nil, backend, nil, fmt.Errorf("queue backend %q returned a store that does not implement queue.Store", backend)
+	}
+
+	if closer == nil {
+		closer = func() error { return nil }
+	}
+
+	return qs, backend, closer, nil
 }
 
 func queueBackendForCompiled(compiled config.Compiled) string {
@@ -2752,4 +2743,26 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func wrapTracingHandler(enabled bool, name string, h http.Handler) http.Handler {
+	if !enabled {
+		return h
+	}
+	tp, ok := hookaido.LookupTracingProvider("otel")
+	if !ok {
+		return h
+	}
+	return tp.WrapHandler(name, h)
+}
+
+func tracingHTTPClient(enabled bool) *http.Client {
+	if !enabled {
+		return nil
+	}
+	tp, ok := hookaido.LookupTracingProvider("otel")
+	if !ok {
+		return nil
+	}
+	return tp.HTTPClient()
 }

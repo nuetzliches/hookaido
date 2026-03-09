@@ -1,4 +1,4 @@
-package queue
+package queue_test
 
 import (
 	"os"
@@ -7,34 +7,38 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/modules/postgres"
+	"github.com/nuetzliches/hookaido/modules/sqlite"
 )
 
 type storeFactory struct {
 	name string
-	new  func(t *testing.T, now *time.Time) Store
+	new  func(t *testing.T, now *time.Time) queue.Store
 }
 
 func contractStoreFactories() []storeFactory {
 	out := []storeFactory{
 		{
 			name: "memory",
-			new: func(t *testing.T, now *time.Time) Store {
+			new: func(t *testing.T, now *time.Time) queue.Store {
 				t.Helper()
-				return NewMemoryStore(
-					WithNowFunc(func() time.Time { return now.UTC() }),
+				return queue.NewMemoryStore(
+					queue.WithNowFunc(func() time.Time { return now.UTC() }),
 				)
 			},
 		},
 		{
 			name: "sqlite",
-			new: func(t *testing.T, now *time.Time) Store {
+			new: func(t *testing.T, now *time.Time) queue.Store {
 				t.Helper()
 				dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-				s, err := NewSQLiteStore(
+				s, err := sqlite.NewStore(
 					dbPath,
-					WithSQLiteNowFunc(func() time.Time { return now.UTC() }),
-					WithSQLitePollInterval(5*time.Millisecond),
-					WithSQLiteCheckpointInterval(0),
+					sqlite.WithNowFunc(func() time.Time { return now.UTC() }),
+					sqlite.WithPollInterval(5*time.Millisecond),
+					sqlite.WithCheckpointInterval(0),
 				)
 				if err != nil {
 					t.Fatalf("new sqlite store: %v", err)
@@ -49,12 +53,12 @@ func contractStoreFactories() []storeFactory {
 	if dsn != "" {
 		out = append(out, storeFactory{
 			name: "postgres",
-			new: func(t *testing.T, now *time.Time) Store {
+			new: func(t *testing.T, now *time.Time) queue.Store {
 				t.Helper()
-				s, err := NewPostgresStore(
+				s, err := postgres.NewStore(
 					dsn,
-					WithPostgresNowFunc(func() time.Time { return now.UTC() }),
-					WithPostgresPollInterval(5*time.Millisecond),
+					postgres.WithNowFunc(func() time.Time { return now.UTC() }),
+					postgres.WithPollInterval(5*time.Millisecond),
 				)
 				if err != nil {
 					t.Fatalf("new postgres store: %v", err)
@@ -75,14 +79,14 @@ func TestStoreContract_DequeueAck(t *testing.T) {
 			store := factory.new(t, &now)
 
 			for _, id := range []string{"evt_1", "evt_2"} {
-				if err := store.Enqueue(Envelope{ID: id, Route: "/r", Target: "pull"}); err != nil {
+				if err := store.Enqueue(queue.Envelope{ID: id, Route: "/r", Target: "pull"}); err != nil {
 					t.Fatalf("enqueue %s: %v", id, err)
 				}
 			}
 
 			got := make([]string, 0, 2)
 			for i := 0; i < 2; i++ {
-				resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
+				resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 30 * time.Second})
 				if err != nil {
 					t.Fatalf("dequeue %d: %v", i+1, err)
 				}
@@ -110,10 +114,10 @@ func TestStoreContract_NackDelayRequeue(t *testing.T) {
 			now := time.Date(2026, 2, 14, 21, 5, 0, 0, time.UTC)
 			store := factory.new(t, &now)
 
-			if err := store.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+			if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
-			resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
 			if err != nil {
 				t.Fatalf("dequeue: %v", err)
 			}
@@ -124,7 +128,7 @@ func TestStoreContract_NackDelayRequeue(t *testing.T) {
 				t.Fatalf("nack: %v", err)
 			}
 
-			resp, err = store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			resp, err = store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
 			if err != nil {
 				t.Fatalf("dequeue before delay: %v", err)
 			}
@@ -133,7 +137,7 @@ func TestStoreContract_NackDelayRequeue(t *testing.T) {
 			}
 
 			now = now.Add(3 * time.Second)
-			resp, err = store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			resp, err = store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
 			if err != nil {
 				t.Fatalf("dequeue after delay: %v", err)
 			}
@@ -156,12 +160,12 @@ func TestStoreContract_BacklogTrendCaptureList(t *testing.T) {
 			now := time.Date(2026, 2, 16, 10, 0, 0, 0, time.UTC)
 			store := factory.new(t, &now)
 
-			trendStore, ok := store.(BacklogTrendStore)
+			trendStore, ok := store.(queue.BacklogTrendStore)
 			if !ok {
 				t.Skip("store does not implement BacklogTrendStore")
 			}
 
-			seed := []Envelope{
+			seed := []queue.Envelope{
 				{ID: "evt_1", Route: "/r1", Target: "pull"},
 				{ID: "evt_2", Route: "/r1", Target: "pull"},
 				{ID: "evt_3", Route: "/r2", Target: "deliver"},
@@ -172,7 +176,7 @@ func TestStoreContract_BacklogTrendCaptureList(t *testing.T) {
 				}
 			}
 
-			dequeued, err := store.Dequeue(DequeueRequest{
+			dequeued, err := store.Dequeue(queue.DequeueRequest{
 				Route:    "/r1",
 				Target:   "pull",
 				Batch:    1,
@@ -192,7 +196,7 @@ func TestStoreContract_BacklogTrendCaptureList(t *testing.T) {
 				t.Fatalf("capture backlog trend sample: %v", err)
 			}
 
-			global, err := trendStore.ListBacklogTrend(BacklogTrendListRequest{
+			global, err := trendStore.ListBacklogTrend(queue.BacklogTrendListRequest{
 				Since: now.Add(-time.Minute),
 				Until: now.Add(time.Minute),
 				Limit: 10,
@@ -216,7 +220,7 @@ func TestStoreContract_BacklogTrendCaptureList(t *testing.T) {
 				t.Fatalf("global dead=%d, want 1", got)
 			}
 
-			routeOnly, err := trendStore.ListBacklogTrend(BacklogTrendListRequest{
+			routeOnly, err := trendStore.ListBacklogTrend(queue.BacklogTrendListRequest{
 				Route: "/r1",
 				Since: now.Add(-time.Minute),
 				Until: now.Add(time.Minute),
@@ -247,10 +251,10 @@ func TestStoreContract_ExtendLease(t *testing.T) {
 			now := time.Date(2026, 2, 14, 21, 10, 0, 0, time.UTC)
 			store := factory.new(t, &now)
 
-			if err := store.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+			if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
-			resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 2 * time.Second})
+			resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 2 * time.Second})
 			if err != nil {
 				t.Fatalf("dequeue: %v", err)
 			}
@@ -279,10 +283,10 @@ func TestStoreContract_MarkDeadAndRequeue(t *testing.T) {
 			now := time.Date(2026, 2, 14, 21, 15, 0, 0, time.UTC)
 			store := factory.new(t, &now)
 
-			if err := store.Enqueue(Envelope{ID: "evt_dead", Route: "/r", Target: "pull"}); err != nil {
+			if err := store.Enqueue(queue.Envelope{ID: "evt_dead", Route: "/r", Target: "pull"}); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
-			resp, err := store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
 			if err != nil {
 				t.Fatalf("dequeue: %v", err)
 			}
@@ -293,7 +297,7 @@ func TestStoreContract_MarkDeadAndRequeue(t *testing.T) {
 				t.Fatalf("mark dead: %v", err)
 			}
 
-			dead, err := store.ListDead(DeadListRequest{Route: "/r", Limit: 10})
+			dead, err := store.ListDead(queue.DeadListRequest{Route: "/r", Limit: 10})
 			if err != nil {
 				t.Fatalf("list dead: %v", err)
 			}
@@ -304,7 +308,7 @@ func TestStoreContract_MarkDeadAndRequeue(t *testing.T) {
 				t.Fatalf("dead id=%q, want evt_dead", dead.Items[0].ID)
 			}
 
-			requeueResp, err := store.RequeueDead(DeadRequeueRequest{IDs: []string{"evt_dead"}})
+			requeueResp, err := store.RequeueDead(queue.DeadRequeueRequest{IDs: []string{"evt_dead"}})
 			if err != nil {
 				t.Fatalf("requeue dead: %v", err)
 			}
@@ -312,7 +316,7 @@ func TestStoreContract_MarkDeadAndRequeue(t *testing.T) {
 				t.Fatalf("requeued=%d, want 1", requeueResp.Requeued)
 			}
 
-			resp, err = store.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+			resp, err = store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
 			if err != nil {
 				t.Fatalf("dequeue requeued: %v", err)
 			}

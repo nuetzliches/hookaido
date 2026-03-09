@@ -1,5 +1,6 @@
 GOEXE := $(shell go env GOEXE)
 BINARY := hookaido$(GOEXE)
+BINARY_MINIMAL := hookaido-minimal$(GOEXE)
 BINDIR := bin
 BENCH_DIR := .bench
 PULL_BENCH_FLAGS := -run '^$$' -bench '^BenchmarkPull' -benchmem -benchtime=3s -count=5 -cpu 1
@@ -55,11 +56,15 @@ ADAPTIVE_MAX_READY_LAG_DELTA_SECONDS ?= 10
 ADAPTIVE_MAX_OLDEST_QUEUED_AGE_DELTA_SECONDS ?= 10
 ADAPTIVE_LAG_MIN_ACCEPTED ?= 100
 
-.PHONY: build test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation adaptive-ab-guardrail-check adaptive-ab-mixed-guardrail adaptive-ab-lag-guardrail-check adaptive-ab-mixed-lag-guardrail release-check dist dist-signed dist-verify
+.PHONY: build build-minimal test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation adaptive-ab-guardrail-check adaptive-ab-mixed-guardrail adaptive-ab-lag-guardrail-check adaptive-ab-mixed-lag-guardrail release-check dist dist-signed dist-verify
 
 build:
 	@mkdir -p "$(BINDIR)"
 	go build -o "$(BINDIR)/$(BINARY)" ./cmd/hookaido
+
+build-minimal:
+	@mkdir -p "$(BINDIR)"
+	go build -o "$(BINDIR)/$(BINARY_MINIMAL)" ./cmd/hookaido-minimal
 
 test:
 	go test ./...
@@ -84,7 +89,7 @@ proto-worker:
 	[ -x "$$PROTOC_GO_BIN" ] || { echo "protoc-gen-go is required (install: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11)"; exit 1; }; \
 	[ -x "$$PROTOC_GRPC_BIN" ] || { echo "protoc-gen-go-grpc is required (install: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1)"; exit 1; }; \
 	PATH="$$GO_BIN_DIR:$$PATH"; \
-	cd internal/workerapi/proto && "$$BUF_BIN" generate
+	cd modules/grpcworker/proto && "$$BUF_BIN" generate
 
 bench-pull:
 	@mkdir -p "$(BENCH_DIR)"

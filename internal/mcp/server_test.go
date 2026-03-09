@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/nuetzliches/hookaido/internal/queue"
+	_ "github.com/nuetzliches/hookaido/modules/postgres"
+	"github.com/nuetzliches/hookaido/modules/sqlite"
 )
 
 func TestHandleRequest_ToolsList(t *testing.T) {
@@ -626,7 +628,7 @@ func TestToolMutationAuditEventMessagesPublishIncludesAdminProxyRollbackMetadata
 func TestToolMutationAuditEventMessagesCancelIncludesIDMetadata(t *testing.T) {
 	var audit bytes.Buffer
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -701,7 +703,7 @@ func TestToolMutationAuditEventMessagesCancelIncludesIDMetadata(t *testing.T) {
 func TestToolMutationAuditEventMessagesCancelByFilterIncludesMetadata(t *testing.T) {
 	var audit bytes.Buffer
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -778,7 +780,7 @@ func TestToolMutationAuditEventMessagesCancelByFilterIncludesMetadata(t *testing
 func TestToolMutationAuditEventMessagesRequeueByFilterPreviewIncludesMetadata(t *testing.T) {
 	var audit bytes.Buffer
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -1273,7 +1275,7 @@ func TestToolAdminHealthIncludesAdminDiagnostics(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "Hookaidofile")
 	dbPath := filepath.Join(tmp, "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -2038,7 +2040,7 @@ func TestToolAdminHealthTracingConfigSurface(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "Hookaidofile")
 	dbPath := filepath.Join(tmp, "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -2084,7 +2086,7 @@ func TestToolAdminHealthTracingPropagatesRuntimeDiagnostics(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "Hookaidofile")
 	dbPath := filepath.Join(tmp, "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -2282,7 +2284,7 @@ func TestToolConfigDiffInvalidCandidate(t *testing.T) {
 
 func TestToolMessagesList(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -2354,7 +2356,7 @@ pull_api { auth token "raw:t" }
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -2419,7 +2421,7 @@ pull_api { auth token "raw:t" }
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -3170,7 +3172,7 @@ func TestToolConfigApplyWriteAndReloadRollback(t *testing.T) {
 
 func TestToolMessagesCancel(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -3228,7 +3230,7 @@ func TestToolMessagesCancelRequiresReason(t *testing.T) {
 
 func TestToolMessagesRequeue(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -3276,7 +3278,7 @@ func TestToolMessagesRequeue(t *testing.T) {
 
 func TestToolMessagesResume(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -3351,7 +3353,7 @@ defaults {
 				t.Fatalf("write config: %v", err)
 			}
 
-			store, err := queue.NewSQLiteStore(dbPath)
+			store, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("new sqlite store: %v", err)
 			}
@@ -3403,7 +3405,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -3491,7 +3493,7 @@ func TestToolIDMutationsConfigUnavailableFailOpenWhenPolicyDisabledInSQLiteMode(
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -3558,7 +3560,7 @@ defaults {
 				t.Fatalf("write config: %v", err)
 			}
 
-			store, err := queue.NewSQLiteStore(dbPath)
+			store, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("new sqlite store: %v", err)
 			}
@@ -3587,7 +3589,7 @@ defaults {
 				t.Fatalf("expected fail-closed policy error text, got %#v", resp.Content)
 			}
 
-			verifyStore, err := queue.NewSQLiteStore(dbPath)
+			verifyStore, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("reopen sqlite store: %v", err)
 			}
@@ -3635,7 +3637,7 @@ func TestToolMessagesFilterMutationsConfigUnavailableFailOpenWhenPolicyDisabledI
 				t.Fatalf("write config: %v", err)
 			}
 
-			store, err := queue.NewSQLiteStore(dbPath)
+			store, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("new sqlite store: %v", err)
 			}
@@ -3668,7 +3670,7 @@ func TestToolMessagesFilterMutationsConfigUnavailableFailOpenWhenPolicyDisabledI
 				t.Fatalf("expected %s=1, got %#v", tc.changedKey, out[tc.changedKey])
 			}
 
-			verifyStore, err := queue.NewSQLiteStore(dbPath)
+			verifyStore, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("reopen sqlite store: %v", err)
 			}
@@ -3696,7 +3698,7 @@ func TestToolMessagesPublish(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -3772,7 +3774,7 @@ func TestToolAttemptsListManagedSelectorSQLite(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -5128,7 +5130,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -5167,7 +5169,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -5286,7 +5288,7 @@ defaults {
 				t.Fatalf("write config: %v", err)
 			}
 
-			store, err := queue.NewSQLiteStore(dbPath)
+			store, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("new sqlite store: %v", err)
 			}
@@ -5315,7 +5317,7 @@ defaults {
 				t.Fatalf("expected managed-selector-required text, got %#v", resp.Content)
 			}
 
-			verifyStore, err := queue.NewSQLiteStore(dbPath)
+			verifyStore, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("reopen sqlite store: %v", err)
 			}
@@ -5565,7 +5567,7 @@ defaults {
 				t.Fatalf("write config: %v", err)
 			}
 
-			store, err := queue.NewSQLiteStore(dbPath)
+			store, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("new sqlite store: %v", err)
 			}
@@ -5595,7 +5597,7 @@ defaults {
 				t.Fatalf("expected scoped managed actor denied text, got %#v", resp.Content)
 			}
 
-			verifyStore, err := queue.NewSQLiteStore(dbPath)
+			verifyStore, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("reopen sqlite store: %v", err)
 			}
@@ -5639,7 +5641,7 @@ defaults {
 				t.Fatalf("write config: %v", err)
 			}
 
-			store, err := queue.NewSQLiteStore(dbPath)
+			store, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("new sqlite store: %v", err)
 			}
@@ -9188,7 +9190,7 @@ func TestToolMessagesPublishRequiresReason(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9224,7 +9226,7 @@ func TestToolMessagesPublishRejectsOversizedAuditFields(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9296,7 +9298,7 @@ func TestToolMessagesPublishRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9394,7 +9396,7 @@ func TestToolMessagesPublishRejectsPayloadOverRouteMaxBody(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9433,7 +9435,7 @@ func TestToolMessagesPublishRejectsHeadersOverRouteMaxHeaders(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9476,7 +9478,7 @@ func TestToolMessagesPublishRejectsMixedSelectorModesInSQLiteMode(t *testing.T) 
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9519,7 +9521,7 @@ func TestToolMessagesPublishRejectsMissingTargetWithAllowedTargetsDetail(t *test
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9556,7 +9558,7 @@ func TestToolMessagesPublishRejectsInvalidTargetWithAllowedTargetsDetail(t *test
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9711,7 +9713,7 @@ pull_api { auth token "raw:t" }
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9769,7 +9771,7 @@ pull_api { auth token "raw:t" }
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9806,7 +9808,7 @@ func TestToolMessagesPublishPreflightValidationPreventsPartialEnqueueInSQLiteMod
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9835,7 +9837,7 @@ func TestToolMessagesPublishPreflightValidationPreventsPartialEnqueueInSQLiteMod
 		t.Fatalf("expected missing-route error text, got %#v", resp.Content)
 	}
 
-	store, err = queue.NewSQLiteStore(dbPath)
+	store, err = sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("reopen sqlite store: %v", err)
 	}
@@ -9869,7 +9871,7 @@ func TestToolMessagesPublishManagedEndpointRequiresTargetWhenAmbiguous(t *testin
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9903,7 +9905,7 @@ func TestToolMessagesPublishDuplicateID(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9943,7 +9945,7 @@ func TestToolMessagesPublishDuplicateIDPrecheckPreventsPartialEnqueueInSQLiteMod
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -9975,7 +9977,7 @@ func TestToolMessagesPublishDuplicateIDPrecheckPreventsPartialEnqueueInSQLiteMod
 		t.Fatalf("expected indexed duplicate-id error text, got %#v", resp.Content)
 	}
 
-	store, err = queue.NewSQLiteStore(dbPath)
+	store, err = sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("reopen sqlite store: %v", err)
 	}
@@ -10008,7 +10010,7 @@ func TestToolMessagesPublishRouteMustStartWithSlash(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10050,7 +10052,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10094,7 +10096,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10137,7 +10139,7 @@ pull_api { auth token "raw:t" }
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10179,7 +10181,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10217,7 +10219,7 @@ func TestToolMessagesPublishRespectsRoutePublishPolicyInSQLiteMode(t *testing.T)
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10255,7 +10257,7 @@ func TestToolMessagesPublishRespectsRoutePublishDirectPolicyInSQLiteMode(t *test
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10297,7 +10299,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10352,7 +10354,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10398,7 +10400,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10441,7 +10443,7 @@ defaults {
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -10967,7 +10969,7 @@ pull_api { auth token "raw:t" }
 
 func TestToolBacklogTopQueued(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -11042,7 +11044,7 @@ func TestToolBacklogTopQueued(t *testing.T) {
 
 func TestToolBacklogOldestQueued(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -11118,7 +11120,7 @@ func TestToolBacklogOldestQueued(t *testing.T) {
 func TestToolBacklogAgingSummary(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
 	now := time.Now().UTC().Truncate(time.Second)
-	store, err := queue.NewSQLiteStore(dbPath, queue.WithSQLiteNowFunc(func() time.Time { return now }))
+	store, err := sqlite.NewStore(dbPath, sqlite.WithNowFunc(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -11269,7 +11271,7 @@ func TestToolBacklogTrends(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	store, err := queue.NewSQLiteStore(dbPath, queue.WithSQLiteNowFunc(func() time.Time { return nowVar }))
+	store, err := sqlite.NewStore(dbPath, sqlite.WithNowFunc(func() time.Time { return nowVar }))
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -11387,7 +11389,7 @@ defaults {
 
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	nowVar := now
-	store, err := queue.NewSQLiteStore(dbPath, queue.WithSQLiteNowFunc(func() time.Time { return nowVar }))
+	store, err := sqlite.NewStore(dbPath, sqlite.WithNowFunc(func() time.Time { return nowVar }))
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12075,7 +12077,7 @@ func TestToolManagementEndpointUpsertRejectsActiveBacklogWhenSQLiteContextAvaila
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12123,7 +12125,7 @@ func TestToolManagementEndpointDeleteRejectsActiveBacklogWhenSQLiteContextAvaila
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12352,7 +12354,7 @@ func TestToolManagementEndpointDeleteRejectsActiveBacklogWhenMemoryContextAvaila
 
 func TestToolMessagesCancelByFilter(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12392,7 +12394,7 @@ func TestToolMessagesCancelByFilter(t *testing.T) {
 
 func TestToolMessagesCancelByFilterRejectsUnknownFields(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12598,7 +12600,7 @@ pull_api { auth token "raw:t" }
 		t.Fatalf("write config: %v", err)
 	}
 
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12650,7 +12652,7 @@ pull_api { auth token "raw:t" }
 
 func TestToolMessagesFilterManagedSelectorBadRequest(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12669,7 +12671,7 @@ func TestToolMessagesFilterManagedSelectorBadRequest(t *testing.T) {
 
 func TestToolMessagesRequeueByFilter(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12706,7 +12708,7 @@ func TestToolMessagesRequeueByFilter(t *testing.T) {
 
 func TestToolMessagesCancelByFilterPreviewOnly(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12764,7 +12766,7 @@ func TestToolMessagesCancelByFilterPreviewOnly(t *testing.T) {
 
 func TestToolMessagesRequeueByFilterPreviewOnly(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12822,7 +12824,7 @@ func TestToolMessagesRequeueByFilterPreviewOnly(t *testing.T) {
 
 func TestToolMessagesResumeByFilterPreviewOnly(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -12862,7 +12864,7 @@ func TestToolMessagesResumeByFilterPreviewOnly(t *testing.T) {
 
 func TestToolDLQRequeue(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(dbPath)
+	store, err := sqlite.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}

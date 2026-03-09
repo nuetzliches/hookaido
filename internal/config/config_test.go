@@ -8,6 +8,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	// Blank imports register queue backends via init() so the compiler can
+	// validate queue.backend values against the registry.
+	_ "github.com/nuetzliches/hookaido/internal/queue"
+	_ "github.com/nuetzliches/hookaido/modules/postgres"
+	_ "github.com/nuetzliches/hookaido/modules/sqlite"
 )
 
 func TestParseFormat_PreservesPreamble(t *testing.T) {
@@ -3628,7 +3634,7 @@ pull_api { auth token "raw:t" }
 	}
 	found := false
 	for _, e := range res.Errors {
-		if strings.Contains(e, "queue.backend must be one of") {
+		if strings.Contains(e, "is not available") && strings.Contains(e, "redis") {
 			found = true
 			break
 		}
@@ -3657,7 +3663,7 @@ pull_api { auth token "raw:t" }
 	}
 	found := false
 	for _, e := range res.Errors {
-		if strings.Contains(e, "queue.backend must be one of") {
+		if strings.Contains(e, "is not available") && strings.Contains(e, "redis") {
 			found = true
 			break
 		}

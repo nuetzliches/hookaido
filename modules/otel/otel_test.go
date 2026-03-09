@@ -1,4 +1,4 @@
-package app
+package otel
 
 import (
 	"path/filepath"

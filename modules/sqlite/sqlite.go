@@ -1359,7 +1359,8 @@ LIMIT ?;
 	}
 	defer rows.Close()
 
-	ids := make([]string, 0, batch)
+	const dequeueCandidatePrealloc = 16
+	ids := make([]string, 0, dequeueCandidatePrealloc)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {

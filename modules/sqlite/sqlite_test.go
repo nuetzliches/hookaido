@@ -363,6 +363,32 @@ func TestStore_AckBatchExpiredRequeues(t *testing.T) {
 	}
 }
 
+func TestStore_DequeueClampsOversizedBatch(t *testing.T) {
+	s := newStoreForTest(t, time.Now)
+
+	for i := 0; i < 120; i++ {
+		receivedAt := time.Unix(int64(i), 0)
+		if err := s.Enqueue(queue.Envelope{
+			ID:         fmt.Sprintf("evt_%03d", i),
+			Route:      "/r",
+			Target:     "pull",
+			State:      queue.StateQueued,
+			ReceivedAt: receivedAt,
+			NextRunAt:  receivedAt,
+		}); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+
+	resp, err := s.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1000, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(resp.Items) != 100 {
+		t.Fatalf("expected clamped batch size of 100, got %d", len(resp.Items))
+	}
+}
+
 func TestStore_ListDead(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now

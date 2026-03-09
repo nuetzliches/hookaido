@@ -26,7 +26,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
-          go-version: "1.25.x"
+          go-version-file: go.mod
+          check-latest: true
       - name: Compute Safe Version Fragment
         id: version_meta
         run: |

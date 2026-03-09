@@ -791,7 +791,7 @@ func (s *Server) managementRouteHasActiveBacklog(compiled config.Compiled, route
 
 	switch backend := compiledQueueBackend(compiled); {
 	case backend == "sqlite":
-		store, err := s.openSQLiteStore()
+		store, err := s.openQueueStore()
 		if err != nil {
 			return false, false, false, nil
 		}

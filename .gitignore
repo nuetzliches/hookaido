@@ -30,3 +30,4 @@ hookaido.db-wal
 # Local artifacts (keys, binaries, etc.)
 /.artifacts/
 /.bench/
+hookaido

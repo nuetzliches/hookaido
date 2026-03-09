@@ -17,6 +17,7 @@ import (
 
 	"github.com/nuetzliches/hookaido/internal/ingress"
 	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/modules/sqlite"
 )
 
 const (
@@ -355,10 +356,10 @@ func newPullBenchStore(b *testing.B, backend string) (queue.Store, func()) {
 		return s, func() {}
 	case "sqlite":
 		dbPath := filepath.Join(b.TempDir(), "hookaido-bench.db")
-		s, err := queue.NewSQLiteStore(
+		s, err := sqlite.NewStore(
 			dbPath,
-			queue.WithSQLiteCheckpointInterval(0),
-			queue.WithSQLitePollInterval(2*time.Millisecond),
+			sqlite.WithCheckpointInterval(0),
+			sqlite.WithPollInterval(2*time.Millisecond),
 		)
 		if err != nil {
 			b.Fatalf("new sqlite store: %v", err)

@@ -17,6 +17,8 @@ import (
 	"github.com/nuetzliches/hookaido/internal/admin"
 	"github.com/nuetzliches/hookaido/internal/config"
 	"github.com/nuetzliches/hookaido/internal/queue"
+	_ "github.com/nuetzliches/hookaido/modules/postgres"
+	_ "github.com/nuetzliches/hookaido/modules/sqlite"
 	"google.golang.org/grpc/metadata"
 )
 

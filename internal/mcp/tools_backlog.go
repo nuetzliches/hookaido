@@ -44,7 +44,7 @@ func (s *Server) toolBacklogTopQueued(args map[string]any) (any, error) {
 		return s.callAdminJSON(compiled, http.MethodGet, "/backlog/top_queued", query, nil, nil, defaultAdminProxyTimeout)
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func (s *Server) toolBacklogOldestQueued(args map[string]any) (any, error) {
 		return s.callAdminJSON(compiled, http.MethodGet, "/backlog/oldest_queued", query, nil, nil, defaultAdminProxyTimeout)
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (s *Server) toolBacklogAgingSummary(args map[string]any) (any, error) {
 		return s.callAdminJSON(compiled, http.MethodGet, "/backlog/aging_summary", query, nil, nil, defaultAdminProxyTimeout)
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ func (s *Server) toolBacklogTrends(args map[string]any) (any, error) {
 
 	signalCfg := s.resolveTrendSignalConfig()
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}

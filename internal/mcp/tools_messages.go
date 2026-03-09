@@ -62,7 +62,7 @@ func (s *Server) toolMessagesList(args map[string]any) (any, error) {
 	}
 	req.Route = resolvedRoute
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (s *Server) toolAttemptsList(args map[string]any) (any, error) {
 	}
 	req.Route = resolvedRoute
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func (s *Server) toolMessagesCancel(args map[string]any) (any, error) {
 		return withAuditPrincipal(out, s.auditPrincipal()), nil
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ func (s *Server) toolMessagesRequeue(args map[string]any) (any, error) {
 		return withAuditPrincipal(out, s.auditPrincipal()), nil
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func (s *Server) toolMessagesResume(args map[string]any) (any, error) {
 		return withAuditPrincipal(out, s.auditPrincipal()), nil
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +347,7 @@ func (s *Server) toolMessagesPublish(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -705,7 +705,7 @@ func (s *Server) toolMessagesCancelByFilter(args map[string]any) (any, error) {
 	}
 	req.Route = resolvedRoute
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -792,7 +792,7 @@ func (s *Server) toolMessagesRequeueByFilter(args map[string]any) (any, error) {
 	}
 	req.Route = resolvedRoute
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -878,7 +878,7 @@ func (s *Server) toolMessagesResumeByFilter(args map[string]any) (any, error) {
 	}
 	req.Route = resolvedRoute
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}

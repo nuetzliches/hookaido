@@ -1,13 +1,15 @@
-package queue
+package postgres
 
 import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nuetzliches/hookaido/internal/queue"
 )
 
-func TestNewPostgresStore_EmptyDSN(t *testing.T) {
-	_, err := NewPostgresStore("   ")
+func TestNewStore_EmptyDSN(t *testing.T) {
+	_, err := NewStore("   ")
 	if err == nil {
 		t.Fatalf("expected error for empty dsn")
 	}
@@ -16,19 +18,19 @@ func TestNewPostgresStore_EmptyDSN(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_RuntimeMetrics_OperationAndErrorCounters(t *testing.T) {
-	store := &PostgresStore{metrics: newPostgresRuntimeMetrics()}
+func TestStore_RuntimeMetrics_OperationAndErrorCounters(t *testing.T) {
+	store := &Store{metrics: newPostgresRuntimeMetrics()}
 
 	store.observeStoreOperation("enqueue", time.Now().Add(-10*time.Millisecond), nil)
-	store.observeStoreOperation("enqueue", time.Now().Add(-5*time.Millisecond), ErrQueueFull)
-	store.observeStoreOperation("dequeue", time.Now().Add(-3*time.Millisecond), ErrLeaseNotFound)
+	store.observeStoreOperation("enqueue", time.Now().Add(-5*time.Millisecond), queue.ErrQueueFull)
+	store.observeStoreOperation("dequeue", time.Now().Add(-3*time.Millisecond), queue.ErrLeaseNotFound)
 
 	runtime := store.RuntimeMetrics()
 	if runtime.Backend != "postgres" {
 		t.Fatalf("backend = %q, want postgres", runtime.Backend)
 	}
 
-	durationByOperation := make(map[string]HistogramSnapshot)
+	durationByOperation := make(map[string]queue.HistogramSnapshot)
 	for _, metric := range runtime.Common.OperationDurationSeconds {
 		durationByOperation[metric.Operation] = metric.DurationSeconds
 	}
@@ -63,8 +65,8 @@ func TestPostgresStore_RuntimeMetrics_OperationAndErrorCounters(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_RuntimeMetrics_NilStore(t *testing.T) {
-	var store *PostgresStore
+func TestStore_RuntimeMetrics_NilStore(t *testing.T) {
+	var store *Store
 
 	runtime := store.RuntimeMetrics()
 	if runtime.Backend != "postgres" {

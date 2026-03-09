@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/modules/sqlite"
 )
 
 func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
@@ -356,11 +357,11 @@ func TestMetricsHandler_SQLiteStoreRuntimeMetrics(t *testing.T) {
 	now := time.Unix(500, 0).UTC()
 	nowVar := now
 	dbPath := filepath.Join(t.TempDir(), "hookaido.db")
-	store, err := queue.NewSQLiteStore(
+	store, err := sqlite.NewStore(
 		dbPath,
-		queue.WithSQLiteNowFunc(func() time.Time { return nowVar }),
-		queue.WithSQLiteQueueLimits(10000, "reject"),
-		queue.WithSQLiteCheckpointInterval(0),
+		sqlite.WithNowFunc(func() time.Time { return nowVar }),
+		sqlite.WithQueueLimits(10000, "reject"),
+		sqlite.WithCheckpointInterval(0),
 	)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)

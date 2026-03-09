@@ -39,7 +39,7 @@ func (s *Server) toolDLQList(args map[string]any) (any, error) {
 		return s.callAdminJSON(compiled, http.MethodGet, "/dlq", query, nil, nil, defaultAdminProxyTimeout)
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (s *Server) toolDLQRequeue(args map[string]any) (any, error) {
 		return withAuditPrincipal(out, s.auditPrincipal()), nil
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func (s *Server) toolDLQDelete(args map[string]any) (any, error) {
 		return withAuditPrincipal(out, s.auditPrincipal()), nil
 	}
 
-	store, err := s.openSQLiteStore()
+	store, err := s.openQueueStore()
 	if err != nil {
 		return nil, err
 	}

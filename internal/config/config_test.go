@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
-	// Blank import registers queue backends (sqlite, memory, postgres) via init()
-	// so the compiler can validate queue.backend values against the registry.
+	// Blank imports register queue backends via init() so the compiler can
+	// validate queue.backend values against the registry.
 	_ "github.com/nuetzliches/hookaido/internal/queue"
+	_ "github.com/nuetzliches/hookaido/modules/postgres"
+	_ "github.com/nuetzliches/hookaido/modules/sqlite"
 )
 
 func TestParseFormat_PreservesPreamble(t *testing.T) {

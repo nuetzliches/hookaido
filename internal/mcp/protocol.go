@@ -25,6 +25,7 @@ import (
 
 	"github.com/nuetzliches/hookaido/internal/backlog"
 	"github.com/nuetzliches/hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 	"github.com/nuetzliches/hookaido/internal/queue"
 	"github.com/nuetzliches/hookaido/internal/secrets"
 )
@@ -1984,7 +1985,7 @@ func (s *Server) toolAdminHealth(args map[string]any) (any, error) {
 		}
 	} else if dbExists && dbReadable {
 		localQueue["checked"] = true
-		store, err := s.openSQLiteStore()
+		store, err := s.openQueueStore()
 		if err != nil {
 			localQueue["error"] = err.Error()
 		} else {
@@ -2671,7 +2672,14 @@ func (s *Server) resolveConfigPath(args map[string]any) (string, error) {
 	return p, nil
 }
 
-func (s *Server) openSQLiteStore() (*queue.SQLiteStore, error) {
+// closableStore combines queue.Store with a Close method for per-request
+// store lifecycle management.
+type closableStore interface {
+	queue.Store
+	Close() error
+}
+
+func (s *Server) openQueueStore() (closableStore, error) {
 	p := strings.TrimSpace(s.DBPath)
 	if p == "" {
 		return nil, errors.New("db path is not configured")
@@ -2686,7 +2694,19 @@ func (s *Server) openSQLiteStore() (*queue.SQLiteStore, error) {
 	if info.IsDir() {
 		return nil, fmt.Errorf("db path %q is a directory", p)
 	}
-	return queue.NewSQLiteStore(p)
+	b, ok := hookaido.LookupQueueBackend("sqlite")
+	if !ok {
+		return nil, errors.New("sqlite queue backend is not available (not compiled in)")
+	}
+	raw, _, err := b.OpenStore(hookaido.QueueBackendConfig{DSN: p})
+	if err != nil {
+		return nil, err
+	}
+	cs, ok := raw.(closableStore)
+	if !ok {
+		return nil, errors.New("queue backend does not support close")
+	}
+	return cs, nil
 }
 
 type idMutationPolicyContext struct {

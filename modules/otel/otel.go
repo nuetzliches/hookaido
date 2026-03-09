@@ -1,4 +1,4 @@
-package app
+package otel
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/nuetzliches/hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -20,7 +21,20 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
-func initTracing(ctx context.Context, obs config.ObservabilityConfig, onError func(error)) (func(context.Context) error, error) {
+func init() {
+	hookaido.RegisterTracingProvider(&otelModule{})
+}
+
+type otelModule struct{}
+
+func (m *otelModule) Name() string { return "otel" }
+
+func (m *otelModule) Init(ctx context.Context, cfg any, version string, onError func(error)) (func(context.Context) error, error) {
+	obs, ok := cfg.(config.ObservabilityConfig)
+	if !ok {
+		return nil, fmt.Errorf("otel: expected config.ObservabilityConfig, got %T", cfg)
+	}
+
 	opts := make([]otlptracehttp.Option, 0, 10)
 	if obs.TracingCollector != "" {
 		opts = append(opts, otlptracehttp.WithEndpointURL(obs.TracingCollector))
@@ -77,10 +91,16 @@ func initTracing(ctx context.Context, obs config.ObservabilityConfig, onError fu
 	if err != nil {
 		return nil, err
 	}
+
+	svcVersion := version
+	if svcVersion == "" {
+		svcVersion = "unknown"
+	}
+
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName("hookaido"),
-			semconv.ServiceVersion(version),
+			semconv.ServiceVersion(svcVersion),
 		),
 	)
 	if err != nil {
@@ -103,17 +123,11 @@ func initTracing(ctx context.Context, obs config.ObservabilityConfig, onError fu
 	return tp.Shutdown, nil
 }
 
-func wrapTracingHandler(enabled bool, name string, h http.Handler) http.Handler {
-	if !enabled {
-		return h
-	}
+func (m *otelModule) WrapHandler(name string, h http.Handler) http.Handler {
 	return otelhttp.NewHandler(h, name)
 }
 
-func tracingHTTPClient(enabled bool) *http.Client {
-	if !enabled {
-		return nil
-	}
+func (m *otelModule) HTTPClient() *http.Client {
 	return &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}

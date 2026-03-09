@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package hookaido.worker.v1;
 
-option go_package = "github.com/nuetzliches/hookaido/internal/workerapi/proto;workerapipb";
+option go_package = "github.com/nuetzliches/hookaido/modules/grpcworker/proto;workerapipb";
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";

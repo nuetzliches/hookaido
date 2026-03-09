@@ -36,9 +36,6 @@ import (
 	"github.com/nuetzliches/hookaido/internal/router"
 	"github.com/nuetzliches/hookaido/internal/secrets"
 	"github.com/nuetzliches/hookaido/internal/workerapi"
-	workerapipb "github.com/nuetzliches/hookaido/internal/workerapi/proto"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 )
 
 const backlogTrendCaptureInterval = time.Minute
@@ -127,8 +124,13 @@ func run() int {
 
 	var shutdownTracing func(context.Context) error
 	if compiled.Observability.TracingEnabled {
+		tp, ok := hookaido.LookupTracingProvider("otel")
+		if !ok {
+			runtimeLogger.Error("tracing_not_available", slog.String("reason", "otel module not compiled in"))
+			return 1
+		}
 		var err error
-		shutdownTracing, err = initTracing(context.Background(), compiled.Observability, func(err error) {
+		shutdownTracing, err = tp.Init(context.Background(), compiled.Observability, version, func(err error) {
 			appMetrics.incTracingExportErrors()
 			runtimeLogger.Error("tracing_export_failed", slog.Any("err", err))
 		})
@@ -1802,13 +1804,6 @@ func startServers(
 		appMetrics.observePullExtend(route, statusCode, leaseID, extendBy, leaseExpired)
 	}
 
-	workerHandler := workerapi.NewServer(pullHandler)
-	workerHandler.ResolveRoute = state.resolvePull
-	workerHandler.Authorize = state.authorizeWorker
-	if compiled.PullAPI.MaxBatch > 0 {
-		workerHandler.MaxLeaseBatch = compiled.PullAPI.MaxBatch
-	}
-
 	adminH := admin.NewServer(store)
 	adminH.Authorize = state.authorizeAdmin
 	adminH.ResolveTrendSignalConfig = func() queue.BacklogTrendSignalConfig {
@@ -1974,14 +1969,21 @@ func startServers(
 	}
 
 	if strings.TrimSpace(compiled.PullAPI.GRPCListen) != "" {
-		grpcOpts := make([]grpc.ServerOption, 0, 1)
+		wt, ok := hookaido.LookupWorkerTransport("grpc")
+		if !ok {
+			runtimeLogger.Error("grpc_worker_not_available", slog.String("reason", "grpc module not compiled in"))
+			closeEntries()
+			return nil, fmt.Errorf("grpc worker transport not available (not compiled in)")
+		}
+
+		var grpcTLS *tls.Config
 		if compiled.PullAPI.TLS.Enabled {
-			tlsCfg, err := buildTLSConfig(compiled.PullAPI.TLS)
+			var err error
+			grpcTLS, err = buildTLSConfig(compiled.PullAPI.TLS)
 			if err != nil {
 				closeEntries()
 				return nil, fmt.Errorf("pull_api.grpc_listen tls: %w", err)
 			}
-			grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
 		}
 		grpcLn, err := net.Listen("tcp", compiled.PullAPI.GRPCListen)
 		if err != nil {
@@ -1989,10 +1991,22 @@ func startServers(
 			return nil, fmt.Errorf("pull_api.grpc_listen %q: %w", compiled.PullAPI.GRPCListen, err)
 		}
 		listeners = append(listeners, grpcLn)
-		grpcSrv := grpc.NewServer(grpcOpts...)
-		workerapipb.RegisterWorkerServiceServer(grpcSrv, workerHandler)
-		serveGRPCOnListener(runtimeLogger, "pull_worker_grpc", grpcSrv, grpcLn, cancel)
-		servers = append(servers, grpcServerHandle{server: grpcSrv})
+
+		wtCfg := hookaido.WorkerTransportConfig{
+			TLSConfig:     grpcTLS,
+			PullServer:    pullHandler,
+			ResolveRoute:  state.resolvePull,
+			Authorize:     state.authorizeWorker,
+			MaxLeaseBatch: compiled.PullAPI.MaxBatch,
+		}
+
+		go func() {
+			if err := wt.Serve(grpcLn, wtCfg); err != nil {
+				runtimeLogger.Error("grpc_server_error", slog.Any("err", err))
+				cancel()
+			}
+		}()
+		servers = append(servers, workerTransportHandle{stop: wt.Stop})
 	}
 
 	if compiled.Observability.Metrics.Enabled {
@@ -2052,29 +2066,15 @@ type shutdownServer interface {
 	Shutdown(ctx context.Context) error
 }
 
-type grpcServerHandle struct {
-	server *grpc.Server
+type workerTransportHandle struct {
+	stop func(context.Context) error
 }
 
-func (h grpcServerHandle) Shutdown(ctx context.Context) error {
-	if h.server == nil {
+func (h workerTransportHandle) Shutdown(ctx context.Context) error {
+	if h.stop == nil {
 		return nil
 	}
-
-	done := make(chan struct{})
-	go func() {
-		h.server.GracefulStop()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		h.server.Stop()
-		<-done
-		return ctx.Err()
-	}
+	return h.stop(ctx)
 }
 
 func mountPrefix(prefix string, next http.Handler) http.Handler {
@@ -2140,22 +2140,6 @@ func listenWithTLS(addr string, tlsCfg config.TLSConfig) (net.Listener, error) {
 		return nil, err
 	}
 	return tls.NewListener(ln, cfg), nil
-}
-
-func serveGRPCOnListener(logger *slog.Logger, name string, srv *grpc.Server, ln net.Listener, cancel func()) {
-	go func() {
-		err := srv.Serve(ln)
-		if err == nil || errors.Is(err, grpc.ErrServerStopped) {
-			return
-		}
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Error("grpc_server_error", slog.String("name", name), slog.Any("err", err))
-		if cancel != nil {
-			cancel()
-		}
-	}()
 }
 
 func resolvePostgresDSN(flagValue string) string {
@@ -2759,4 +2743,26 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func wrapTracingHandler(enabled bool, name string, h http.Handler) http.Handler {
+	if !enabled {
+		return h
+	}
+	tp, ok := hookaido.LookupTracingProvider("otel")
+	if !ok {
+		return h
+	}
+	return tp.WrapHandler(name, h)
+}
+
+func tracingHTTPClient(enabled bool) *http.Client {
+	if !enabled {
+		return nil
+	}
+	tp, ok := hookaido.LookupTracingProvider("otel")
+	if !ok {
+		return nil
+	}
+	return tp.HTTPClient()
 }

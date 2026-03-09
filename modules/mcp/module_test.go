@@ -1,4 +1,4 @@
-package app
+package mcp
 
 import (
 	"reflect"

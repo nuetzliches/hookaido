@@ -10,7 +10,9 @@ package hookaido
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
+	"net/http"
 	"time"
 )
 
@@ -56,23 +58,50 @@ type QueueBackendConfig struct {
 	DLQRetentionMaxDepth int
 }
 
-// TracingProvider sets up distributed tracing.
+// TracingProvider sets up distributed tracing and provides HTTP instrumentation.
 type TracingProvider interface {
 	Module
 
-	// Setup configures the tracing provider using the given configuration.
-	// The cfg value is expected to be a config.ObservabilityConfig but typed as
-	// any to avoid import cycles. Returns a shutdown function.
-	Setup(cfg any) (shutdown func(context.Context) error, err error)
+	// Init configures the tracing provider. The cfg value is expected to be
+	// a config.ObservabilityConfig (typed as any to avoid import cycles).
+	// Returns a shutdown function.
+	Init(ctx context.Context, cfg any, version string, onError func(error)) (shutdown func(context.Context) error, err error)
+
+	// WrapHandler wraps an HTTP handler with trace instrumentation.
+	WrapHandler(name string, h http.Handler) http.Handler
+
+	// HTTPClient returns an HTTP client with trace propagation, or nil.
+	HTTPClient() *http.Client
+}
+
+// WorkerTransportConfig holds configuration for starting a worker transport.
+type WorkerTransportConfig struct {
+	// TLSConfig is the optional TLS configuration for the transport.
+	// When non-nil the transport wraps the listener with TLS.
+	TLSConfig *tls.Config
+
+	// PullServer is the underlying pull API server (typed as any; must be
+	// *pullapi.Server to avoid an import cycle with the registry package).
+	PullServer any
+
+	// ResolveRoute maps a pull endpoint to a route name.
+	ResolveRoute func(endpoint string) (route string, ok bool)
+
+	// Authorize checks if a worker request is authorized.
+	Authorize func(ctx context.Context, endpoint string) bool
+
+	// MaxLeaseBatch limits batch size for lease operations.
+	MaxLeaseBatch int
 }
 
 // WorkerTransport provides a pull-worker transport (e.g. gRPC).
 type WorkerTransport interface {
 	Module
 
-	// Serve starts the transport, accepting connections on the given listener.
-	// The handler value must implement the pull handler interface.
-	Serve(listener net.Listener, handler any) error
+	// Serve starts the transport on the given listener with the provided
+	// configuration. This call blocks until the transport is stopped or the
+	// listener closes.
+	Serve(listener net.Listener, cfg WorkerTransportConfig) error
 
 	// Stop gracefully shuts down the transport.
 	Stop(ctx context.Context) error
@@ -81,4 +110,9 @@ type WorkerTransport interface {
 // MCPProvider supplies MCP (Model Context Protocol) server capabilities.
 type MCPProvider interface {
 	Module
+
+	// ServeCommand handles the "mcp" CLI subcommand.
+	// args are the arguments after "hookaido mcp" (e.g. ["serve", "--config", "..."]).
+	// Returns the process exit code.
+	ServeCommand(args []string) int
 }

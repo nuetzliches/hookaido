@@ -1,4 +1,4 @@
-package app
+package mcp
 
 import (
 	"context"
@@ -7,10 +7,19 @@ import (
 	"os"
 	"strings"
 
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 	"github.com/nuetzliches/hookaido/internal/mcp"
 )
 
-func mcpCmd(args []string) int {
+func init() {
+	hookaido.RegisterMCPProvider(&mcpModule{})
+}
+
+type mcpModule struct{}
+
+func (m *mcpModule) Name() string { return "mcp" }
+
+func (m *mcpModule) ServeCommand(args []string) int {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "missing subcommand: serve")
 		return 2

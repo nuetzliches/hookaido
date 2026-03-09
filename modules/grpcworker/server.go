@@ -1,4 +1,4 @@
-package workerapi
+package grpcworker
 
 import (
 	"context"
@@ -8,7 +8,8 @@ import (
 
 	"github.com/nuetzliches/hookaido/internal/pullapi"
 	"github.com/nuetzliches/hookaido/internal/queue"
-	workerapipb "github.com/nuetzliches/hookaido/internal/workerapi/proto"
+	"github.com/nuetzliches/hookaido/internal/workerapi"
+	workerapipb "github.com/nuetzliches/hookaido/modules/grpcworker/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -22,7 +23,7 @@ type Server struct {
 
 	Pull          *pullapi.Server
 	ResolveRoute  func(endpoint string) (route string, ok bool)
-	Authorize     Authorizer
+	Authorize     workerapi.Authorizer
 	MaxLeaseBatch int
 }
 

@@ -12,7 +12,8 @@ import (
 	"github.com/nuetzliches/hookaido/internal/pullapi"
 	"github.com/nuetzliches/hookaido/internal/queue"
 	"github.com/nuetzliches/hookaido/internal/workerapi"
-	workerapipb "github.com/nuetzliches/hookaido/internal/workerapi/proto"
+	"github.com/nuetzliches/hookaido/modules/grpcworker"
+	workerapipb "github.com/nuetzliches/hookaido/modules/grpcworker/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -28,7 +29,7 @@ func startWorkerClient(
 ) (workerapipb.WorkerServiceClient, func()) {
 	t.Helper()
 
-	ws := workerapi.NewServer(pull)
+	ws := grpcworker.NewServer(pull)
 	ws.ResolveRoute = pull.ResolveRoute
 	ws.Authorize = authorize
 

@@ -3,6 +3,8 @@ package app
 import (
 	"fmt"
 	"os"
+
+	"github.com/nuetzliches/hookaido/internal/hookaido"
 )
 
 var (
@@ -23,7 +25,12 @@ func Main(args []string) int {
 	case "config":
 		return configCmd(args[2:])
 	case "mcp":
-		return mcpCmd(args[2:])
+		providers := hookaido.MCPProviders()
+		if len(providers) == 0 {
+			fmt.Fprintln(os.Stderr, "mcp: not available (not compiled in)")
+			return 2
+		}
+		return providers[0].ServeCommand(args[2:])
 	case "verify-release":
 		return verifyReleaseCmd(args[2:])
 	case "version":

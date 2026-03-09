@@ -39,6 +39,8 @@ jobs:
 
       - name: Run govulncheck
         run: govulncheck ./...
+        env:
+          GOTOOLCHAIN: auto
 
   fuzz:
     if: github.event_name != 'pull_request'

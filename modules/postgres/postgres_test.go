@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -506,4 +508,313 @@ func TestMapPostgresInsertError(t *testing.T) {
 			t.Fatalf("mapPostgresInsertError(generic) = %v, want %v", got, orig)
 		}
 	})
+}
+
+// --- Integration tests (DSN-gated) ---
+
+func requirePostgresDSN(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("HOOKAIDO_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("HOOKAIDO_TEST_POSTGRES_DSN not set")
+	}
+	return dsn
+}
+
+// cleanupStore truncates all tables so each integration test starts clean.
+func cleanupStore(t *testing.T, s *Store) {
+	t.Helper()
+	for _, table := range []string{"queue_items", "delivery_attempts", "backlog_trend_samples"} {
+		if _, err := s.db.Exec("DELETE FROM " + table); err != nil {
+			t.Fatalf("cleanup %s: %v", table, err)
+		}
+	}
+}
+
+func TestIntegration_SchemaInit(t *testing.T) {
+	dsn := requirePostgresDSN(t)
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	expectedTables := []string{"queue_items", "delivery_attempts", "backlog_trend_samples"}
+	for _, table := range expectedTables {
+		var exists bool
+		err := store.db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.tables
+				WHERE table_name = $1
+			)
+		`, table).Scan(&exists)
+		if err != nil {
+			t.Fatalf("checking table %s: %v", table, err)
+		}
+		if !exists {
+			t.Fatalf("table %s does not exist after schema init", table)
+		}
+	}
+}
+
+func TestIntegration_EnqueueDequeueRoundTrip(t *testing.T) {
+	dsn := requirePostgresDSN(t)
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	cleanupStore(t, store)
+
+	env := queue.Envelope{
+		ID:      "roundtrip_evt_1",
+		Route:   "/webhooks",
+		Target:  "https://example.com/hook",
+		Payload: []byte(`{"event":"test"}`),
+		Headers: map[string]string{"Content-Type": "application/json", "X-Custom": "value"},
+	}
+
+	if err := store.Enqueue(env); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	resp, err := store.Dequeue(queue.DequeueRequest{
+		Route:    "/webhooks",
+		Target:   "https://example.com/hook",
+		Batch:    1,
+		LeaseTTL: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("dequeue items = %d, want 1", len(resp.Items))
+	}
+
+	got := resp.Items[0]
+	if got.ID != env.ID {
+		t.Fatalf("ID = %q, want %q", got.ID, env.ID)
+	}
+	if got.Route != env.Route {
+		t.Fatalf("Route = %q, want %q", got.Route, env.Route)
+	}
+	if got.Target != env.Target {
+		t.Fatalf("Target = %q, want %q", got.Target, env.Target)
+	}
+	if string(got.Payload) != string(env.Payload) {
+		t.Fatalf("Payload = %q, want %q", got.Payload, env.Payload)
+	}
+	if got.Headers["Content-Type"] != "application/json" {
+		t.Fatalf("Headers[Content-Type] = %q, want %q", got.Headers["Content-Type"], "application/json")
+	}
+	if got.Headers["X-Custom"] != "value" {
+		t.Fatalf("Headers[X-Custom] = %q, want %q", got.Headers["X-Custom"], "value")
+	}
+	if got.State != queue.StateLeased {
+		t.Fatalf("State = %q, want %q", got.State, queue.StateLeased)
+	}
+	if got.Attempt != 1 {
+		t.Fatalf("Attempt = %d, want 1", got.Attempt)
+	}
+	if got.LeaseID == "" {
+		t.Fatal("LeaseID should be set after dequeue")
+	}
+}
+
+func TestIntegration_QueueLimits(t *testing.T) {
+	dsn := requirePostgresDSN(t)
+
+	store, err := NewStore(dsn, WithQueueLimits(2, "reject"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	cleanupStore(t, store)
+
+	if err := store.Enqueue(queue.Envelope{
+		ID: "qlimit_1", Route: "/limits", Target: "pull", Payload: []byte("{}"),
+	}); err != nil {
+		t.Fatalf("Enqueue 1: %v", err)
+	}
+
+	if err := store.Enqueue(queue.Envelope{
+		ID: "qlimit_2", Route: "/limits", Target: "pull", Payload: []byte("{}"),
+	}); err != nil {
+		t.Fatalf("Enqueue 2: %v", err)
+	}
+
+	err = store.Enqueue(queue.Envelope{
+		ID: "qlimit_3", Route: "/limits", Target: "pull", Payload: []byte("{}"),
+	})
+	if !errors.Is(err, queue.ErrQueueFull) {
+		t.Fatalf("Enqueue 3: got %v, want ErrQueueFull", err)
+	}
+}
+
+func TestIntegration_BacklogTrendCapture(t *testing.T) {
+	dsn := requirePostgresDSN(t)
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	cleanupStore(t, store)
+
+	if err := store.Enqueue(queue.Envelope{
+		ID: "trend_evt_1", Route: "/trend", Target: "pull", Payload: []byte("{}"),
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	captureTime := time.Now().UTC()
+	if err := store.CaptureBacklogTrendSample(captureTime); err != nil {
+		t.Fatalf("CaptureBacklogTrendSample: %v", err)
+	}
+
+	resp, err := store.ListBacklogTrend(queue.BacklogTrendListRequest{
+		Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("ListBacklogTrend: %v", err)
+	}
+	if len(resp.Items) == 0 {
+		t.Fatal("expected at least 1 trend sample, got 0")
+	}
+
+	// Find the sample matching our capture time (global aggregate, route="" target="").
+	found := false
+	for _, s := range resp.Items {
+		if s.CapturedAt.Equal(captureTime) {
+			found = true
+			if s.Queued < 1 {
+				t.Fatalf("Queued = %d, want >= 1", s.Queued)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no trend sample found at capture time %v", captureTime)
+	}
+}
+
+func TestIntegration_ConcurrentDequeue(t *testing.T) {
+	dsn := requirePostgresDSN(t)
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	cleanupStore(t, store)
+
+	if err := store.Enqueue(queue.Envelope{
+		ID: "concurrent_evt_1", Route: "/concurrent", Target: "pull", Payload: []byte("{}"),
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	const goroutines = 10
+	results := make(chan int, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			resp, err := store.Dequeue(queue.DequeueRequest{
+				Route:    "/concurrent",
+				Target:   "pull",
+				Batch:    1,
+				LeaseTTL: 30 * time.Second,
+			})
+			if err != nil {
+				results <- 0
+				return
+			}
+			results <- len(resp.Items)
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	successCount := 0
+	for n := range results {
+		successCount += n
+	}
+	if successCount != 1 {
+		t.Fatalf("exactly 1 goroutine should dequeue the item, got %d", successCount)
+	}
+}
+
+func TestIntegration_RetentionPruning(t *testing.T) {
+	dsn := requirePostgresDSN(t)
+
+	// Use a very short retention and prune interval so pruning triggers.
+	store, err := NewStore(dsn,
+		WithRetention(1*time.Millisecond, 1*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	cleanupStore(t, store)
+
+	// Enqueue items with old received_at timestamps by using WithNowFunc.
+	oldTime := time.Now().Add(-1 * time.Hour).UTC()
+
+	// Directly insert old items using the DB.
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("prune_evt_%d", i)
+		headersJSON, _ := encodeStringMapJSON(nil)
+		traceJSON, _ := encodeStringMapJSON(nil)
+		_, err := store.db.Exec(`
+			INSERT INTO queue_items (
+				id, route, target, state, received_at, attempt, next_run_at,
+				payload, headers_json, trace_json, schema_version
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`,
+			id, "/prune", "pull", string(queue.StateQueued), oldTime, 0, oldTime,
+			[]byte("{}"), headersJSON, traceJSON, 1,
+		)
+		if err != nil {
+			t.Fatalf("insert old item %d: %v", i, err)
+		}
+	}
+
+	// Verify items exist.
+	var countBefore int
+	if err := store.db.QueryRow(`
+		SELECT COUNT(*) FROM queue_items WHERE route = '/prune'
+	`).Scan(&countBefore); err != nil {
+		t.Fatalf("count before prune: %v", err)
+	}
+	if countBefore != 3 {
+		t.Fatalf("count before prune = %d, want 3", countBefore)
+	}
+
+	// Reset lastPrune so maybePrune fires immediately, then trigger via Enqueue.
+	store.mu.Lock()
+	store.lastPrune = time.Time{}
+	store.mu.Unlock()
+
+	// Trigger prune by calling Enqueue (which calls maybePrune internally).
+	if err := store.Enqueue(queue.Envelope{
+		ID: "prune_trigger", Route: "/prune", Target: "pull", Payload: []byte("{}"),
+	}); err != nil {
+		t.Fatalf("trigger Enqueue: %v", err)
+	}
+
+	// The old items should be pruned; only the new trigger item should remain.
+	var countAfter int
+	if err := store.db.QueryRow(`
+		SELECT COUNT(*) FROM queue_items WHERE route = '/prune'
+	`).Scan(&countAfter); err != nil {
+		t.Fatalf("count after prune: %v", err)
+	}
+	if countAfter != 1 {
+		t.Fatalf("count after prune = %d, want 1 (only the trigger item)", countAfter)
+	}
 }

@@ -443,7 +443,6 @@ func TestHandleDelivery_RecordAttemptErrorDoesNotBlockAck(t *testing.T) {
 // drainableStore returns one envelope per Dequeue call, with configurable delivery delay.
 type drainableStore struct {
 	stubPushStore
-	mu       sync.Mutex
 	dequeued int32
 }
 

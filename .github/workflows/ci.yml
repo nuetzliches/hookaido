@@ -52,8 +52,6 @@ jobs:
           check-latest: true
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2
 
   release-package-dryrun:
     runs-on: ubuntu-latest

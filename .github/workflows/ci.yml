@@ -27,7 +27,33 @@ jobs:
           go-version-file: go.mod
           check-latest: true
       - name: Test
-        run: go test ./...
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            go test -race -coverprofile=coverage.out ./...
+          else
+            go test ./...
+          fi
+        shell: bash
+      - name: Upload coverage
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2
 
   release-package-dryrun:
     runs-on: ubuntu-latest

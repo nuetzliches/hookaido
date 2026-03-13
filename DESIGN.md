@@ -1,6 +1,6 @@
-# Hookaido Design (MVP Core)
+# Hookaido Design Specification
 
-Status: draft, canonical English spec.
+Status: canonical English spec.
 
 ## Goals
 - Single binary, sane defaults, minimal config.
@@ -12,8 +12,8 @@ Status: draft, canonical English spec.
 - Avoid proprietary runtime dependencies; external services must be optional.
 - Add a `LICENSE` file (OSI-approved) before the first public release.
 
-## Non-Goals (MVP Core)
-- Full management API (applications/endpoints/messages).
+## Non-Goals
+- Full management API — *superseded: Admin API now provides application/endpoint lifecycle and message management.*
 - Built-in workers for pull mode (operator provides workers).
 - Arbitrary transformation plugins.
 
@@ -45,8 +45,8 @@ pull_api {
 }
 ```
 
-### Config Blocks (MVP)
-The full DSL will evolve, but MVP should support these blocks with sane defaults:
+### Config Blocks
+The DSL supports these blocks with sane defaults:
 
 Global:
 - `ingress { listen, tls?, rate_limit? }`
@@ -83,7 +83,7 @@ Per-route:
 - `publish.managed on|off` (optional; defaults `on`; when `off`, endpoint-scoped managed publish path rejects this route)
 - `queue "sqlite|memory|postgres"` shorthand or block `queue { backend "sqlite|memory|postgres" }` (defaults to SQLite; runtime currently uses one backend process-wide, so mixed route backends are rejected)
 - `pull { path, auth? }` (pull mode; excludes `deliver`)
-- `deliver "https://..." { retry?, timeout?, sign ... }` (push mode; optional in MVP core)
+- `deliver "https://..." { retry?, timeout?, sign ... }` (push mode; optional)
   - signing directives: `sign hmac <secret-ref>` or repeated `sign hmac secret_ref <ID>`, optional `sign signature_header <name>`, optional `sign timestamp_header <name>`, optional `sign secret_selection <newest_valid|oldest_valid>` (requires `sign hmac secret_ref ...`)
   - `sign signature_header` / `sign timestamp_header` require `sign hmac`
   - signing headers default to `X-Hookaido-Signature` and `X-Hookaido-Timestamp`; names must be valid header tokens and must differ
@@ -138,7 +138,7 @@ Compile constraints:
 - Path match uses URL path only (query ignored).
 - `"/path"` matches `/path` and `/path/...` (segment boundary), but not `/path-foo`.
 - Route paths can be quoted or unquoted, but must start with `/`.
-- Route paths must be unique (path is the queue key in MVP).
+- Route paths must be unique (path is the queue key).
 - `match.host` matches the request host (case-insensitive, port ignored); supports exact hosts, `*`, and `*.example.com` (subdomains only, apex excluded).
 - `match.method` matches the HTTP method (case-insensitive; defaults to POST when omitted).
 - `match.header` matches exact header values (name is case-insensitive).
@@ -253,7 +253,7 @@ Notes:
 - Batch-nack returns `200` with `{ "succeeded", "conflicts?" }` and uses `409` (`code=lease_conflict`) when one or more leases are invalid/expired.
 - Duplicate retries of already successful `nack`/`dead` operations may be counted as successful idempotent no-ops.
 
-Status codes (MVP):
+Status codes:
 - 200 (dequeue; may return `items: []`)
 - 204 (single-lease ack/nack/extend)
 - 400 (invalid JSON body; unknown fields or trailing JSON documents are rejected)
@@ -272,7 +272,7 @@ Error body (non-2xx):
 - Base URL: `admin_api.listen` + optional `admin_api.prefix`.
 - Auth (optional): bearer token allowlist via `admin_api { auth token "env:..." }`.
 
-Endpoints (MVP):
+Endpoints:
 - `GET /healthz`
 - `GET /healthz?details=1` (JSON health diagnostics; includes queue rollups, queued age/lag indicators, top route/target backlog buckets, persisted-trend `trend_signals` evaluated with `defaults.trend_signals` policy, explicit `operator_actions` playbooks, ingress counters including adaptive-backpressure diagnostics and rejection-by-reason counters, tracing counters when runtime metrics are available, and memory-store pressure diagnostics when backend=`memory`)
 - `GET /backlog/top_queued` (operator backlog drill-down from queue stats `top_queued`; query params: `route`, `target`, `limit` (default 100, max 1000); when provided, `route` must be an absolute Hookaido route path starting with `/`; response includes bounded-source/truncation indicators)
@@ -364,7 +364,7 @@ Egress policy notes:
 - Admin API and Pull API are logically separated; separate listeners by default.
 - TLS client auth: `tls.client_auth` values are `none`, `request`, `require`, `verify_if_given`, `require_and_verify` (`require` is the default when `client_ca` is set).
 
-### Outbound Deliver Signing (MVP)
+### Outbound Deliver Signing
 - Configure per-target signing in `deliver` blocks with `sign hmac <secret-ref>`.
 - `sign hmac` supports direct refs (`env:...`, `file:...`, `vault:...`, `raw:...`) and indirection via one or more `sign hmac secret_ref <ID>` entries from the top-level `secrets` block.
 - `sign secret_selection` controls multi-`secret_ref` selection: `newest_valid` (default) or `oldest_valid`; it requires `sign hmac secret_ref ...` entries.
@@ -375,7 +375,7 @@ Egress policy notes:
 - Signature is `hex(HMAC-SHA256(secret, canonical))`.
 - Dispatcher writes timestamp and signature headers on each outbound request (`X-Hookaido-Timestamp`, `X-Hookaido-Signature` by default).
 
-### Secret References (MVP)
+### Secret References
 To keep configs diff-friendly, prefer referencing secrets by ID:
 - `secret "S1" { value "env:MY_SECRET" valid_from "..." valid_until "..." }`
 - `auth hmac ... secret_ref "S1" { ... }`
@@ -407,7 +407,7 @@ Secret rotation semantics:
 - `hookaido config validate --config ./Hookaidofile --format json|text`
 
 ## MCP Integration (Optional RFC)
-This section defines an optional MCP server for AI-assisted operations. It is not required for MVP runtime behavior.
+This section defines an optional MCP server for AI-assisted operations. It is not required for core runtime behavior.
 
 Goals:
 - Expose stable, typed operations to AI agents instead of shell-only workflows.
@@ -506,9 +506,6 @@ Backend note:
 }
 ```
 
-## Implementation Roadmap (Suggested)
-1. Implement DSL parsing + validation for minimal pull routes and `pull_api` listener.
-2. Implement in-memory queue with correct lease semantics + unit tests.
-3. Implement Pull API handlers (dequeue/ack/nack/extend) + integration tests.
-4. Add SQLite backend (WAL) + crash recovery tests.
-5. Add ingress enqueue path + E2E slice.
+## Roadmap
+
+See [BACKLOG.md](BACKLOG.md) for current priorities and [STATUS.md](STATUS.md) for progress tracking.

@@ -23,7 +23,7 @@ Hookaido receives webhooks at the edge, queues them durably, and delivers them t
 
 | Problem                                                     | Hookaido                                                                     |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Webhooks hit your app directly — downtime means lost events | Durable SQLite/WAL queue absorbs traffic; your services consume when ready   |
+| Webhooks hit your app directly — downtime means lost events | Durable SQLite/WAL or PostgreSQL queue absorbs traffic; your services consume when ready   |
 | Retry logic scattered across services                       | Exponential backoff, jitter, DLQ, and lease-based delivery — configured once |
 | DMZ security headaches                                      | Pull mode by default: internal services fetch from the DMZ, no inbound holes |
 | Complex multi-service deployment                            | Single binary, one config file, `go build` and run                           |
@@ -31,7 +31,8 @@ Hookaido receives webhooks at the edge, queues them durably, and delivers them t
 
 ## Key Features
 
-- **Durable queue** — SQLite/WAL persistence with at-least-once delivery. In-memory mode for development.
+- **Durable queue** — SQLite/WAL or PostgreSQL persistence with at-least-once delivery. In-memory mode for development.
+- **gRPC Worker API** — Lease-based pull transport for internal workers (`dequeue`, `ack`, `nack`, `extend`).
 - **Pull & push modes** — Pull API for DMZ-safe consumption, push dispatcher with concurrency control.
 - **Hot reload** — Change config, send `SIGHUP` or use `--watch`. No restarts for most changes.
 - **Ingress security** — HMAC signature verification, Basic auth, forward auth callouts, rate limiting.
@@ -64,7 +65,7 @@ docker run -p 8080:8080 -p 9443:9443 \
   ghcr.io/nuetzliches/hookaido:latest
 ```
 
-For immutable deployments, pin to a release tag (for example `:v1.0.3`) or digest.
+For immutable deployments, pin to a release tag (for example `:v2.0.0`) or digest.
 
 **Run locally:**
 
@@ -142,7 +143,7 @@ graph LR
     end
     subgraph DMZ
         ING[Ingress :8080]
-        Q[(SQLite Queue)]
+        Q[(SQLite / Postgres Queue)]
         ING --> Q
     end
     subgraph Internal Network
@@ -193,7 +194,7 @@ Exposes queue state, config inspection, health diagnostics, and backlog analysis
 Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance attestations:
 
 ```bash
-./hookaido verify-release --checksums hookaido_v1.0.3_checksums.txt \
+./hookaido verify-release --checksums hookaido_v2.0.0_checksums.txt \
   --public-key release-signing-key.pub \
   --require-provenance
 ```

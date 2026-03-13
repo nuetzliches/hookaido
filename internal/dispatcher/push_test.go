@@ -259,6 +259,7 @@ func (d staticDeliverer) Deliver(_ context.Context, _ Delivery) Result {
 }
 
 type stubPushStore struct {
+	mu              sync.Mutex
 	ackLeaseID      string
 	nackLeaseID     string
 	nackDelay       time.Duration
@@ -281,11 +282,15 @@ func (s *stubPushStore) Dequeue(_ queue.DequeueRequest) (queue.DequeueResponse, 
 }
 
 func (s *stubPushStore) Ack(leaseID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.ackLeaseID = leaseID
 	return s.ackErr
 }
 
 func (s *stubPushStore) Nack(leaseID string, delay time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.nackLeaseID = leaseID
 	s.nackDelay = delay
 	return s.nackErr
@@ -296,6 +301,8 @@ func (s *stubPushStore) Extend(_ string, _ time.Duration) error {
 }
 
 func (s *stubPushStore) MarkDead(leaseID string, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.markDeadLeaseID = leaseID
 	s.markDeadReason = reason
 	return s.markDeadErr
@@ -350,6 +357,8 @@ func (s *stubPushStore) Stats() (queue.Stats, error) {
 }
 
 func (s *stubPushStore) RecordAttempt(attempt queue.DeliveryAttempt) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.attempts = append(s.attempts, attempt)
 	return s.recordAttemptErr
 }
@@ -938,20 +947,27 @@ func TestRunRoute_MissingTargetNacksWithBackoff(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if store.nackLeaseID == "lease-missing-target" {
+		store.mu.Lock()
+		leaseID := store.nackLeaseID
+		store.mu.Unlock()
+		if leaseID == "lease-missing-target" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if store.nackLeaseID != "lease-missing-target" {
+	store.mu.Lock()
+	gotLeaseID := store.nackLeaseID
+	gotDelay := store.nackDelay
+	store.mu.Unlock()
+	if gotLeaseID != "lease-missing-target" {
 		close(d.stopCh)
 		<-done
 		t.Fatal("expected missing target lease to be nacked")
 	}
-	if store.nackDelay != time.Second {
+	if gotDelay != time.Second {
 		close(d.stopCh)
 		<-done
-		t.Fatalf("expected missing target nack delay=1s, got %s", store.nackDelay)
+		t.Fatalf("expected missing target nack delay=1s, got %s", gotDelay)
 	}
 
 	close(d.stopCh)

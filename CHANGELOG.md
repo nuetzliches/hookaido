@@ -11,60 +11,94 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 
+- Modular architecture with module registry and build variants for compile-time feature selection.
+
+### Fixed
+
+- SQLite dequeue allocation hardening: candidate collection no longer preallocates slice capacity directly from request-sized batch input, while preserving the existing hard cap of 100 items per dequeue.
+
+## [1.5.1] - 2026-02-16
+
+### Changed
+
+- SQLite dequeue leasing now uses a bulk lease update per batch (single `UPDATE` with per-item lease IDs) instead of per-item update statements, reducing pull-path transaction roundtrips under sustained backlog.
+- SQLite dequeue for `batch=1` now leases the next candidate via a single CTE-based `UPDATE ... RETURNING` statement, avoiding extra select/update roundtrips on the hottest pull path.
+- SQLite dequeue now throttles expired-lease sweep updates to a short fixed interval instead of sweeping on every dequeue call, reducing write-path contention and pull saturation overhead under sustained worker polling.
+- SQLite batch lease operations now use set-based batch lookup and bulk item mutation inside the single write transaction, reducing SQL roundtrips and allocations on Pull batch ack paths.
+- SQLite single-lease Pull mutations (`ack`/`nack`/`extend`/`mark dead`) now use a lease-id fast path to reduce per-request allocations while preserving lease-expired requeue semantics.
+
+### Fixed
+
+- SQLite pull ack hot-path contention under sustained pull traffic: `Ack` now uses a direct lease-scoped update/delete path with expired-lease fallback requeue, reducing write-lock time and queue-full backpressure spikes at high ingest rates.
+
+## [1.5.0] - 2026-02-15
+
+### Added
+
 - Postgres queue backend (`queue { backend postgres }` / `queue postgres`) with durable queue semantics parity (lease lifecycle, message management, attempts, retention, and batch lease mutation support) plus runtime wiring via `hookaido run --postgres-dsn` (or `HOOKAIDO_POSTGRES_DSN`).
-- Prometheus queue saturation gauges: `hookaido_queue_oldest_queued_age_seconds`, `hookaido_queue_ready_lag_seconds`, and `hookaido_queue_total` on `/metrics` (alongside `hookaido_queue_depth{state}`) for direct lag/age alerting without Admin health JSON scraping.
-- Memory-backend observability on `/metrics`: `hookaido_store_memory_items{state}`, `hookaido_store_memory_retained_bytes{state}`, `hookaido_store_memory_retained_bytes_total`, and `hookaido_store_memory_evictions_total{reason}`.
-- Ingress rejection breakdown counters via `hookaido_ingress_rejected_by_reason_total{reason,status}` now include `memory_pressure` (`status="503"`) for memory-backend pressure rejects.
 - Delivery dead-letter reason attribution via `hookaido_delivery_dead_by_reason_total{reason}` (`max_retries`, `no_retry`, `policy_denied`, `unspecified`, `other`) plus matching health diagnostics field `delivery.dead_by_reason`.
 - Pull API `POST {endpoint}/ack` and `POST {endpoint}/nack` now support batch form via `lease_ids` (up to 100 IDs per request), returning aggregate success/conflict output for high-throughput worker lease operations.
-- Optional gRPC worker listener via `pull_api.grpc_listen`: starts WorkerService (`Dequeue`, `Ack`, `Nack`, `Extend`) on shared Pull operation semantics, applies `pull_api.tls` for TLS/mTLS, enforces dedicated-listener conflict guards, and keeps Pull token auth parity (global + per-route override).
-- Backend-agnostic store runtime metric families on `/metrics`: `hookaido_store_operation_seconds{backend,operation}` (histogram), `hookaido_store_operation_total{backend,operation}`, and `hookaido_store_errors_total{backend,operation,kind}` to support backend-neutral dashboards and future PostgreSQL wiring.
-- Reproducible Pull benchmark workflow docs (`docs/performance.md`) plus Make targets for baseline/current capture and `benchstat` diff (`bench-pull-baseline`, `bench-pull`, `bench-pull-compare`).
-- Isolated Extend benchmarking targets (`bench-pull-extend`, `bench-pull-extend-compare`) for lower-variance validation of active-lease Pull `extend` changes.
-- Sustained-drain Pull benchmarking targets (`bench-pull-drain-baseline`, `bench-pull-drain`, `bench-pull-drain-compare`) focused on dequeue + batch `ack` with `batch=15`.
-- Pull contention benchmarking targets (`bench-pull-contention-baseline`, `bench-pull-contention`, `bench-pull-contention-compare`) focused on parallel duplicate-retry `ack`/`nack` paths.
-- Mixed ingress+drain Pull benchmarking targets (`bench-pull-mixed-baseline`, `bench-pull-mixed`, `bench-pull-mixed-compare`) with per-backend tail-latency metrics (`p95_ms`, `p99_ms`) plus rejection/error counters.
-- Mixed ingress+drain Push saturation benchmarking targets (`bench-push-mixed-baseline`, `bench-push-mixed`, `bench-push-mixed-compare`) via `BenchmarkPushIngressDrainSaturation` with `ingress_rejects` and `deliveries` metrics.
-- Push skewed-target saturation benchmarking targets (`bench-push-skewed-baseline`, `bench-push-skewed`, `bench-push-skewed-compare`) via `BenchmarkPushIngressDrainSkewedTargets` with `ingress_rejects`, `deliveries_fast`, and `deliveries_slow`.
-- Push saturation benchmarks now also emit reject-reason splits (`ingress_rejects_queue_full`, `ingress_rejects_adaptive_backpressure`, `ingress_rejects_memory_pressure`, `ingress_rejects_other`) for clearer ingress-vs-drain tuning under load.
-- Push saturation/skewed benchmarks now emit ingress tail-latency metrics (`p95_ms`, `p99_ms`) for queue-pressure tuning based on latency guardrails, not only throughput/reject counters.
-- Adaptive backpressure production tuning guide (`docs/adaptive-backpressure.md`) with data-driven starting profiles (`balanced`, `latency_first`, `throughput_first`), metric-driven decision matrix, and rollout guardrails for enterprise workloads.
-- Reproducible adaptive backpressure A/B runtime harness (`scripts/adaptive-ab.sh`) plus Make targets (`adaptive-ab`, `adaptive-ab-all`, `adaptive-ab-pull`, `adaptive-ab-mixed`) to capture `final-metrics.txt`/`final-health.json`/`monitor-output.log` artifacts, generate side-by-side comparison tables for `adaptive off` vs `on`, and report Pull contention metrics (`hookaido_pull_acked_total`, `hookaido_pull_ack_conflict_total`, `hookaido_pull_nack_conflict_total`, `pull_ack_conflict_ratio_percent`).
-- Calibrated mixed saturation target (`make adaptive-ab-mixed-saturation`) for issue validation (`#53/#54/#55`) with fixed high-pressure profile (`duration=30s`, `ingress_workers=256`, `mixed_drain_workers=8`, `dequeue_batch=5`, `queue_max_depth=2000`).
-- Mixed Pull ACK conflict guardrail workflow for issue `#55`: `scripts/adaptive-guardrail.sh` and Make targets (`adaptive-ab-guardrail-check`, `adaptive-ab-mixed-guardrail`) validate aggregate `pull_ack_conflict_ratio_percent` thresholds and emit per-route drill-down tables from final metrics.
-- Queue lag/age guardrail workflow for issue `#56`: `scripts/adaptive-lag-guardrail.sh` and Make targets (`adaptive-ab-lag-guardrail-check`, `adaptive-ab-mixed-lag-guardrail`) validate `queue_ready_lag_seconds`/`queue_oldest_queued_age_seconds` absolute and on-off delta thresholds from adaptive A/B summaries.
+- Backend-agnostic store runtime metric families on `/metrics`: `hookaido_store_operation_seconds{backend,operation}` (histogram), `hookaido_store_operation_total{backend,operation}`, and `hookaido_store_errors_total{backend,operation,kind}` to support backend-neutral dashboards.
+- Adaptive backpressure production tuning guide (`docs/adaptive-backpressure.md`) with data-driven starting profiles and metric-driven decision matrix.
+- Reproducible adaptive backpressure A/B runtime harness (`scripts/adaptive-ab.sh`) plus Make targets for side-by-side comparison of `adaptive off` vs `on` configurations.
+- Mixed Pull ACK conflict guardrail workflow and queue lag/age guardrail workflow for adaptive backpressure validation.
 - Metrics schema marker `hookaido_metrics_schema_info{schema="1.3.0"}` for dashboard compatibility gating across mixed Hookaido versions.
 
 ### Changed
 
-- Adaptive backpressure policy decision for v1.5 is now explicit in docs: keep runtime default `enabled off`, with recommended opt-in enterprise starting profile (`min_total 400`, `queued_percent 88`, `ready_lag 45s`, `oldest_queued_age 90s`, `sustained_growth on`) and same-host-only interpretation guardrails for benchmark evidence.
+- Adaptive backpressure policy decision for v1.5 is now explicit in docs: keep runtime default `enabled off`, with recommended opt-in enterprise starting profile and same-host-only interpretation guardrails for benchmark evidence.
 - MCP queue tool backend routing now treats non-SQLite backends (`memory`, `postgres`) as Admin-proxy mode; local SQLite access remains only for `queue.backend sqlite`.
-- Worker gRPC scope is now explicitly fixed to pull-worker lease transport (`dequeue`/`ack`/`nack`/`extend`) and documented as out-of-scope for admin/publish/control-plane and MCP lease mutation tools.
 - SQLite runtime instrumentation now populates both backend-agnostic store metric families and legacy `hookaido_store_sqlite_*` series for compatibility during dashboard migration.
-- PostgreSQL store runtime now populates backend-agnostic store metric families (`hookaido_store_operation_seconds`, `hookaido_store_operation_total`, `hookaido_store_errors_total`) with normalized error kinds for queue/store operations.
-- Memory backend now emits explicit `ErrMemoryPressure` admission rejects when retained (non-active) memory footprint crosses pressure guard thresholds; ingress surfaces these as HTTP `503` with rejection reason `memory_pressure` instead of generic store-unavailable.
-- Admin health diagnostics (`GET /healthz?details=1`) now include ingress `rejected_by_reason` and memory-store runtime diagnostics (`items_by_state`, retained bytes, eviction counters, and memory pressure state) when the memory backend is active.
-- Postgres backend now implements backlog trend snapshot capture/listing (`BacklogTrendStore`), enabling stable `/admin/backlog/trends` responses under normal runtime operation instead of backend-unsupported `503` responses.
-- Ingress rejection breakdown metric `hookaido_ingress_rejected_by_reason_total{reason,status}` for bounded-cardinality attribution across queue pressure, adaptive backpressure, auth, routing, policy, and fallback reject paths.
-- SQLite dequeue leasing now uses a bulk lease update per batch (single `UPDATE` with per-item lease IDs) instead of per-item update statements, reducing pull-path transaction roundtrips under sustained backlog.
-- SQLite dequeue for `batch=1` now leases the next candidate via a single CTE-based `UPDATE ... RETURNING` statement, avoiding extra select/update roundtrips on the hottest pull path.
-- SQLite dequeue now throttles expired-lease sweep updates to a short fixed interval (10ms) instead of sweeping on every dequeue call, reducing write-path contention and pull saturation overhead under sustained worker polling.
-- Batch Pull `ack`/`nack`/`mark dead` lease handling now executes as true store-side batches (`MemoryStore`: single lock scope, `SQLiteStore`: single write transaction), avoiding per-lease transaction loops under high worker throughput.
-- SQLite batch lease operations now use set-based batch lookup and bulk item mutation (`id IN (...)`) inside the single write transaction, reducing SQL roundtrips and allocations on Pull batch ack paths.
-- SQLite single-lease Pull mutations (`ack`/`nack`/`extend`/`mark dead`) now use a lease-id fast path (direct mutation query + conflict resolution fallback) to reduce per-request allocations while preserving lease-expired requeue semantics.
+- PostgreSQL store runtime now populates backend-agnostic store metric families with normalized error kinds for queue/store operations.
+- Postgres backend now implements backlog trend snapshot capture/listing, enabling stable `/admin/backlog/trends` responses instead of backend-unsupported `503` responses.
+- Batch Pull `ack`/`nack`/`mark dead` lease handling now executes as true store-side batches, avoiding per-lease transaction loops under high worker throughput.
 - Pull API now treats recent duplicate retries of successful `ack`/`nack` lease operations as idempotent success, reducing avoidable `lease_conflict` churn under high retry/parallel worker pressure.
-- Push dispatcher runtime now uses route-shared dequeue workers across all push routes (single- and multi-target), enforcing `deliver_concurrency` as a shared route budget and allowing idle-target capacity to drain active-target backlog under saturation.
-- Push route workers now lease small dequeue micro-batches (single-target routes: bounded by route concurrency, capped at 4; multi-target routes: capped at 2) to balance throughput and fairness under saturation.
-- Push dispatcher now applies batched lease mutations (`ack`/`nack`/`mark dead`) on single-target routes when the backend supports `LeaseBatchStore`, with automatic fallback to per-lease mutations and multi-target safety guardrails to avoid skewed-route regressions.
-- Push single-target lease mutations now batch up to the route dequeue micro-batch size (capped at 4) instead of a fixed size of 2, reducing store roundtrips on saturated single-target routes.
-- Push dispatcher lease TTL now scales with route dequeue micro-batch size, reducing avoidable lease-expiry conflicts/requeues when single route workers process slow target batches sequentially.
+- Push dispatcher runtime now uses route-shared dequeue workers across all push routes (single- and multi-target), enforcing `deliver_concurrency` as a shared route budget.
+- Push route workers now lease small dequeue micro-batches to balance throughput and fairness under saturation.
+- Push dispatcher now applies batched lease mutations on single-target routes when the backend supports `LeaseBatchStore`, with automatic fallback and multi-target safety guardrails.
+- Push single-target lease mutations now batch up to the route dequeue micro-batch size, reducing store roundtrips on saturated single-target routes.
+- Push dispatcher lease TTL now scales with route dequeue micro-batch size, reducing avoidable lease-expiry conflicts/requeues.
 
 ### Fixed
 
 - Memory backend retention safety: with `delivered_retention` enabled, `queue_limits.max_depth` now also caps `queued + leased + delivered` items so sustained pull/ack traffic cannot grow delivered retention unbounded in RAM.
 - Push retry exhaustion semantics now align with docs: `deliver.retry.max` is treated as maximum retry attempts (not total attempts), so `max 1` allows one retry before `max_retries` dead-lettering.
-- SQLite pull ack hot-path contention under sustained pull traffic: `Ack` now uses a direct lease-scoped update/delete path with expired-lease fallback requeue, reducing write-lock time and queue-full backpressure spikes at high ingest rates.
-- SQLite dequeue candidate collection no longer preallocates slice capacity directly from request-sized batch input, while preserving the existing hard cap of 100 items per dequeue.
+
+## [1.4.0] - 2026-02-14
+
+### Added
+
+- Optional gRPC worker listener via `pull_api.grpc_listen`: starts WorkerService (`Dequeue`, `Ack`, `Nack`, `Extend`) on shared Pull operation semantics, applies `pull_api.tls` for TLS/mTLS, enforces dedicated-listener conflict guards, and keeps Pull token auth parity (global + per-route override).
+
+### Changed
+
+- Worker gRPC scope is now explicitly fixed to pull-worker lease transport (`dequeue`/`ack`/`nack`/`extend`) and documented as out-of-scope for admin/publish/control-plane and MCP lease mutation tools.
+
+### Fixed
+
+- SQLite dequeue candidate helper now clamps batch size correctly inside the candidate collection path.
+
+## [1.3] - 2026-02-14
+
+### Added
+
+- Reproducible Pull benchmark workflow docs (`docs/performance.md`) plus Make targets for baseline/current capture and `benchstat` diff (`bench-pull-baseline`, `bench-pull`, `bench-pull-compare`).
+- Isolated Extend, sustained-drain, contention, and mixed ingress+drain Pull benchmarking targets for comprehensive pull-path performance validation.
+- Mixed ingress+drain Push saturation and push skewed-target saturation benchmarking targets with per-backend tail-latency metrics and reject-reason splits.
+
+## [1.2.0] - 2026-02-13
+
+### Added
+
+- Prometheus queue saturation gauges: `hookaido_queue_oldest_queued_age_seconds`, `hookaido_queue_ready_lag_seconds`, and `hookaido_queue_total` on `/metrics` for direct lag/age alerting without Admin health JSON scraping.
+- Memory-backend observability on `/metrics`: `hookaido_store_memory_items{state}`, `hookaido_store_memory_retained_bytes{state}`, `hookaido_store_memory_retained_bytes_total`, and `hookaido_store_memory_evictions_total{reason}`.
+- Ingress rejection breakdown counters via `hookaido_ingress_rejected_by_reason_total{reason,status}` including `memory_pressure` for memory-backend pressure rejects.
+
+### Changed
+
+- Memory backend now emits explicit `ErrMemoryPressure` admission rejects when retained memory footprint crosses pressure guard thresholds; ingress surfaces these as HTTP `503` with rejection reason `memory_pressure` instead of generic store-unavailable.
+- Admin health diagnostics now include ingress `rejected_by_reason` and memory-store runtime diagnostics when the memory backend is active.
+- Ingress rejection breakdown metric `hookaido_ingress_rejected_by_reason_total{reason,status}` for bounded-cardinality attribution across queue pressure, adaptive backpressure, auth, routing, policy, and fallback reject paths.
 
 ## [1.1.0] - 2026-02-12
 
@@ -91,6 +125,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Docker image build metadata flags now target the correct package variables, so `hookaido version --long` reports release metadata correctly in container builds.
 - `config validate` now rejects invalid secret-reference schemes (`pull_api/admin_api auth token`, `pull.auth token`, direct `auth hmac` secrets, direct `deliver sign hmac`, and `secrets.value`) instead of failing later at runtime start.
 - Docs landing page links now use MkDocs directory URLs (`/page/`) so GitHub Pages navigation no longer points to missing `*.md` endpoints.
+
+## [1.0.3] - 2026-02-10
+
+### Added
+
+- GHCR container publishing documentation and Dependabot configuration for automated dependency updates.
+
+## [1.0.2] - 2026-02-10
+
+### Added
+
+- Container publish workflow with corrected ldflags for release metadata.
+- Package-level Go documentation for `pkg.go.dev`.
+
+### Fixed
+
+- Admin API now bounds strict JSON request body size to prevent unbounded memory consumption.
+
+## [1.0.1] - 2026-02-10
+
+### Fixed
+
+- Go module path corrected to match repository path for proper module resolution.
 
 ## [1.0.0] - 2026-02-10
 
@@ -146,3 +203,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - MCP Admin-proxy best-effort rollback on partial publish failures.
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
+
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/nuetzliches/hookaido/compare/v1.5.1...v2.0.0
+[1.5.1]: https://github.com/nuetzliches/hookaido/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/nuetzliches/hookaido/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/nuetzliches/hookaido/compare/v1.3...v1.4.0
+[1.3]: https://github.com/nuetzliches/hookaido/compare/v1.2.0...v1.3
+[1.2.0]: https://github.com/nuetzliches/hookaido/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/nuetzliches/hookaido/compare/v1.0.3...v1.1.0
+[1.0.3]: https://github.com/nuetzliches/hookaido/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/nuetzliches/hookaido/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/nuetzliches/hookaido/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/nuetzliches/hookaido/releases/tag/v1.0.0

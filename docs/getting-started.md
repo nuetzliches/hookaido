@@ -189,6 +189,8 @@ curl http://127.0.0.1:2019/healthz?details=1
 | `hookaido config fmt`      | Format the Hookaidofile         |
 | `hookaido config validate` | Validate config (exit code 0/1) |
 | `hookaido mcp serve`       | Start MCP server (AI tooling)   |
+| `hookaido config diff`     | Show differences between two config files |
+| `hookaido verify-release`  | Verify release artifact checksums and signatures |
 | `hookaido version`         | Print version                   |
 
 ### `hookaido run` Flags

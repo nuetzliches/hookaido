@@ -630,7 +630,6 @@ func (s *Store) enqueueWithLimit(env queue.Envelope, headersJSON any, traceJSON 
 				s.queueLikelyFull.Store(true)
 				return queue.ErrQueueFull
 			}
-			count--
 		} else {
 			s.queueLikelyFull.Store(true)
 			return queue.ErrQueueFull
@@ -2881,81 +2880,8 @@ WHERE 1 = 1`
 
 type leaseItem struct {
 	id         string
-	route      string
-	target     string
-	attempt    int
 	expired    bool
 	leaseUntil time.Time
-}
-
-func (s *Store) withLease(leaseID string, fn func(ctx context.Context, conn *sql.Conn, item leaseItem) error) error {
-	if strings.TrimSpace(leaseID) == "" {
-		return queue.ErrLeaseNotFound
-	}
-
-	now := s.now()
-
-	ctx := context.Background()
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	startedAt, err := s.beginImmediateWithRetry(ctx, conn)
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
-		}
-		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassWrite)
-	}()
-
-	var item leaseItem
-	var state string
-	var leaseUntilNanos sql.NullInt64
-
-	err = conn.QueryRowContext(ctx, `
-SELECT id, route, target, state, attempt, lease_until
-FROM queue_items
-WHERE lease_id = ?
-LIMIT 1;
-`, leaseID).Scan(&item.id, &item.route, &item.target, &state, &item.attempt, &leaseUntilNanos)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return queue.ErrLeaseNotFound
-		}
-		return err
-	}
-	if state != string(queue.StateLeased) {
-		return queue.ErrLeaseNotFound
-	}
-	if leaseUntilNanos.Valid {
-		item.leaseUntil = time.Unix(0, leaseUntilNanos.Int64).UTC()
-		if !now.Before(item.leaseUntil) {
-			item.expired = true
-		}
-	}
-
-	if err := fn(ctx, conn, item); err != nil {
-		if errors.Is(err, queue.ErrLeaseExpired) {
-			if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
-				return err
-			}
-			committed = true
-			return queue.ErrLeaseExpired
-		}
-		return err
-	}
-
-	if err := s.commitTx(ctx, conn, startedAt, sqliteTxClassWrite); err != nil {
-		return err
-	}
-	committed = true
-	return nil
 }
 
 func (s *Store) requeueExpiredLeases(ctx context.Context, conn *sql.Conn, now time.Time) error {
@@ -3275,21 +3201,6 @@ func newHexID(prefix string) string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return prefix + hex.EncodeToString(b[:])
-}
-
-func newHexIDs(prefix string, count int) []string {
-	if count <= 0 {
-		return nil
-	}
-	raw := make([]byte, count*8)
-	_, _ = rand.Read(raw)
-
-	out := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		start := i * 8
-		out = append(out, prefix+hex.EncodeToString(raw[start:start+8]))
-	}
-	return out
 }
 
 func normalizeUniqueIDs(ids []string) []string {

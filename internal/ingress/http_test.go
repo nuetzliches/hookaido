@@ -13,14 +13,32 @@ import (
 	"time"
 
 	"github.com/nuetzliches/hookaido/internal/queue"
-	"github.com/nuetzliches/hookaido/internal/router"
 )
+
+// matchPath mirrors the MVP routing rule used in internal/app: exact match
+// or prefix match on a segment boundary. Inlined here to avoid a cross-package
+// dependency on the app package (which would create an import cycle).
+func matchPath(requestPath, routePath string) bool {
+	if routePath == "" {
+		return false
+	}
+	if routePath == "/" {
+		return true
+	}
+	if requestPath == routePath {
+		return true
+	}
+	if strings.HasPrefix(requestPath, routePath) && len(requestPath) > len(routePath) && requestPath[len(routePath)] == '/' {
+		return true
+	}
+	return false
+}
 
 func TestIngress_ResolvedRouteIsEnqueued(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -49,7 +67,7 @@ func TestIngress_DeliverTargetsFanout(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -115,13 +133,13 @@ func TestIngress_MethodNotAllowed(t *testing.T) {
 		if r.Method != http.MethodPost {
 			return "", false
 		}
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
 	}
 	srv.AllowedMethodsFor = func(r *http.Request, requestPath string) []string {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return []string{http.MethodPost}
 		}
 		return nil
@@ -142,7 +160,7 @@ func TestIngress_RateLimited(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -175,7 +193,7 @@ func TestIngress_AdaptiveBackpressureRejected(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -236,7 +254,7 @@ func TestIngress_HMACAuth_ReplayRejected(t *testing.T) {
 	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -283,7 +301,7 @@ func TestIngress_BasicAuth(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -320,7 +338,7 @@ func TestIngress_ForwardAuth_Denied(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -360,7 +378,7 @@ func TestIngress_ForwardAuth_CopiesHeadersToEnqueuedEnvelope(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -402,7 +420,7 @@ func TestIngress_HeadersTooLargeRejected(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false
@@ -436,7 +454,7 @@ func TestIngress_ForwardAuthCopiedHeadersTooLargeRejected(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.ResolveRoute = func(_ *http.Request, requestPath string) (string, bool) {
-		if router.MatchPath(requestPath, "/webhooks/github") {
+		if matchPath(requestPath, "/webhooks/github") {
 			return "/webhooks/github", true
 		}
 		return "", false

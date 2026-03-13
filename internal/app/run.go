@@ -33,7 +33,6 @@ import (
 	"github.com/nuetzliches/hookaido/internal/ingress"
 	"github.com/nuetzliches/hookaido/internal/pullapi"
 	"github.com/nuetzliches/hookaido/internal/queue"
-	"github.com/nuetzliches/hookaido/internal/router"
 	"github.com/nuetzliches/hookaido/internal/secrets"
 	"github.com/nuetzliches/hookaido/internal/workerapi"
 )
@@ -432,7 +431,7 @@ func (s *runtimeState) resolveIngress(r *http.Request, requestPath string) (stri
 	}
 
 	for _, rt := range s.routes {
-		if !router.MatchPath(requestPath, rt.Path) {
+		if !matchPath(requestPath, rt.Path) {
 			continue
 		}
 		if !matchHosts(reqHost, rt.Match.Hosts) {
@@ -471,7 +470,7 @@ func (s *runtimeState) allowedMethodsFor(r *http.Request, requestPath string) []
 	var out []string
 
 	for _, rt := range s.routes {
-		if !router.MatchPath(requestPath, rt.Path) {
+		if !matchPath(requestPath, rt.Path) {
 			continue
 		}
 		if !matchHosts(reqHost, rt.Match.Hosts) {

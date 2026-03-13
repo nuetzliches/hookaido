@@ -1,4 +1,4 @@
-package router
+package app
 
 import "testing"
 
@@ -112,9 +112,9 @@ func TestMatchPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MatchPath(tt.requestPath, tt.routePath)
+			got := matchPath(tt.requestPath, tt.routePath)
 			if got != tt.want {
-				t.Errorf("MatchPath(%q, %q) = %v, want %v",
+				t.Errorf("matchPath(%q, %q) = %v, want %v",
 					tt.requestPath, tt.routePath, got, tt.want)
 			}
 		})

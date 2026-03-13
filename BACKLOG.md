@@ -4,7 +4,7 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority
 
-- [ ] **Remove or integrate internal/router** — Router interface is defined but unused; routing lives in `app/run.go`. Either wire the interface or remove the dead package.
+- [x] **~~Remove or integrate internal/router~~** — Moved to Completed.
 - [ ] **Improve workerapi test coverage** — 175 test lines vs 1,380 prod lines. Add integration tests for gRPC transport edge cases.
 - [x] **~~Mixed-workload tail latency playbook~~** — Moved to Completed.
 - [x] **~~Drain fairness under saturation~~** — Moved to Completed.
@@ -33,6 +33,7 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## Completed (move here when done)
 
+- [x] **Remove or integrate internal/router** — Dead `Router` interface removed; `MatchPath` relocated as unexported helper in `internal/app`. Test-only copy inlined in `internal/ingress/http_test.go`.
 - [x] **Phase 1a: Extract shared backlog analytics** — Move duplicated backlog analysis types, constants, and algorithms from `admin/http.go` and `mcp/server.go` into `internal/backlog/`. Both packages import the shared package. Design: `docs/plans/2026-03-08-modular-architecture-design.md`.
 - [x] **Phase 1b: Split mcp/server.go** — Break 8,406-line god file into protocol.go, tools_messages.go, tools_dlq.go, tools_config.go, tools_backlog.go. No behavior change.
 - [x] **Phase 1c: Split admin/http.go** — Break 5,285-line god file into handler groups, parameter parsing, routing. No behavior change.

@@ -987,11 +987,6 @@ func (s *Server) lookupManagementEndpoint(application, endpointName string) (Man
 	return ManagementEndpoint{}, false
 }
 
-func (s *Server) lookupManagementEndpointByRoute(route string) (string, string, bool) {
-	application, endpointName, managed, _ := s.lookupManagementEndpointByRouteStatus(route)
-	return application, endpointName, managed
-}
-
 type managedRouteOwnershipStatus struct {
 	Application        string
 	EndpointName       string
@@ -1079,11 +1074,6 @@ func (s *Server) lookupManagementEndpointByRouteStatusFromPolicy(route string) (
 		return "", "", false, true
 	}
 	return application, endpointName, true, true
-}
-
-func (s *Server) lookupManagementEndpointByRouteStatus(route string) (string, string, bool, bool) {
-	status := s.lookupManagementEndpointByRouteOwnershipStatus(route)
-	return status.Application, status.EndpointName, status.Managed, status.Available
 }
 
 func (s *Server) scopedManagedMutationByIDs(ids []string, allowedStates map[queue.State]struct{}) (bool, error) {

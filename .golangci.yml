@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    errcheck:
+      exclude-functions:
+        - os.RemoveAll
+    staticcheck:
+      checks:
+        - all
+        - "-SA1019" # deprecated API usage — reviewed case-by-case via nolint
+        - "-ST1000" # package comments — not enforced project-wide
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # Deprecated gRPC APIs — supported throughout 1.x per upstream commitment.
+      - linters: [staticcheck]
+        text: "SA1019:.*grpc"

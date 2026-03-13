@@ -582,10 +582,7 @@ func (d *PushDispatcher) recordAttempt(logger *slog.Logger, attempt queue.Delive
 
 func shouldRetry(res Result) bool {
 	if res.Err != nil {
-		if errors.Is(res.Err, ErrPolicyDenied) {
-			return false
-		}
-		return true
+		return !errors.Is(res.Err, ErrPolicyDenied)
 	}
 	code := res.StatusCode
 	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests {

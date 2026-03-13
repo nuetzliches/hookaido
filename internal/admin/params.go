@@ -279,11 +279,14 @@ func (s *Server) observePublishRejected(code string, scoped bool) {
 }
 
 func (s *Server) publishMaxBodyBytes(route string) int64 {
+	if s == nil {
+		return defaultMaxBodyBytes
+	}
 	maxBody := s.MaxBodyBytes
 	if maxBody <= 0 {
 		maxBody = defaultMaxBodyBytes
 	}
-	if s != nil && s.LimitsForRoute != nil {
+	if s.LimitsForRoute != nil {
 		if routeMaxBody, _ := s.LimitsForRoute(strings.TrimSpace(route)); routeMaxBody > 0 {
 			maxBody = routeMaxBody
 		}
@@ -292,11 +295,14 @@ func (s *Server) publishMaxBodyBytes(route string) int64 {
 }
 
 func (s *Server) publishMaxHeaderBytes(route string) int {
+	if s == nil {
+		return defaultMaxHeaderBytes
+	}
 	maxHeaders := s.MaxHeaderBytes
 	if maxHeaders <= 0 {
 		maxHeaders = defaultMaxHeaderBytes
 	}
-	if s != nil && s.LimitsForRoute != nil {
+	if s.LimitsForRoute != nil {
 		if _, routeMaxHeaders := s.LimitsForRoute(strings.TrimSpace(route)); routeMaxHeaders > 0 {
 			maxHeaders = routeMaxHeaders
 		}

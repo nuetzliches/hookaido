@@ -905,13 +905,7 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 						continue
 					}
 
-					signing.SecretVersions = append(signing.SecretVersions, DeliverSigningSecretVersion{
-						ID:         sc.ID,
-						ValueRef:   sc.ValueRef,
-						ValidFrom:  sc.ValidFrom,
-						ValidUntil: sc.ValidUntil,
-						HasUntil:   sc.HasUntil,
-					})
+					signing.SecretVersions = append(signing.SecretVersions, DeliverSigningSecretVersion(sc))
 				}
 				if len(signing.SecretVersions) > 0 {
 					signing.Enabled = true

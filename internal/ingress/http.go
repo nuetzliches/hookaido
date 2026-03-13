@@ -206,11 +206,6 @@ func (s *Server) observeReject(route string, statusCode int, reason string) {
 	}
 }
 
-func copyHeaders(h http.Header, maxBytes int) map[string]string {
-	out, _ := copyHeadersWithExtra(h, maxBytes, nil)
-	return out
-}
-
 func copyHeadersWithExtra(h http.Header, maxBytes int, extra map[string]string) (map[string]string, bool) {
 	if maxBytes <= 0 {
 		return nil, len(h) == 0 && len(extra) == 0

@@ -18,13 +18,6 @@ func newLogger(level string) (*slog.Logger, error) {
 	return l, err
 }
 
-func newLoggerWithLevel(level slog.Level) *slog.Logger {
-	h := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: level,
-	})
-	return slog.New(h)
-}
-
 func newLoggerToSink(level, output, path string) (*slog.Logger, io.Closer, error) {
 	lvl, err := parseLogLevel(level)
 	if err != nil {

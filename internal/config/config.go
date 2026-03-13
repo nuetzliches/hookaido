@@ -788,9 +788,7 @@ func ValidateWithResultOptions(cfg *Config, options ValidationOptions) Validatio
 	if !res.OK || !options.SecretPreflight {
 		return res
 	}
-	for _, errMsg := range validateSecretPreflight(compiled) {
-		res.Errors = append(res.Errors, errMsg)
-	}
+	res.Errors = append(res.Errors, validateSecretPreflight(compiled)...)
 	if len(res.Errors) > 0 {
 		res.OK = false
 	}

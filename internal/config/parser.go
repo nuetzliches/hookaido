@@ -413,21 +413,6 @@ func (p *parser) parseDefaultsBlock() (*DefaultsBlock, error) {
 	return out, nil
 }
 
-func isDefaultsDirective(name string) bool {
-	switch strings.TrimSpace(name) {
-	case "max_body",
-		"max_headers",
-		"egress",
-		"publish_policy",
-		"deliver",
-		"trend_signals",
-		"adaptive_backpressure":
-		return true
-	default:
-		return false
-	}
-}
-
 func (p *parser) parseVarsBlock() (*VarsBlock, error) {
 	if _, err := p.expect(tokLBrace, "expected '{' after vars"); err != nil {
 		return nil, err

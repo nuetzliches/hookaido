@@ -10,7 +10,7 @@ graph TB
 
     subgraph DMZ["Hookaido (DMZ)"]
         ING[Ingress :8080]
-        Q[(Queue - SQLite)]
+        Q[(Queue - SQLite / Postgres)]
         PULL[Pull API :9443]
         ADM[Admin API :2019]
         ING --> Q

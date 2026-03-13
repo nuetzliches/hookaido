@@ -116,7 +116,7 @@ Verifies webhook signatures with replay protection (timestamp + nonce + toleranc
 }
 ```
 
-String-to-sign: `TIMESTAMP + "\n" + METHOD + "\n" + PATH + "\n" + hex(sha256(body))`
+String-to-sign: `METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + hex(sha256(body))`
 
 Verification tries all secrets valid at the request timestamp (from the timestamp header), not just wall-clock time. This allows safe key rotation with overlapping validity windows.
 

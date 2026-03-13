@@ -1,23 +1,8 @@
 # Backlog
 
-Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and roughly ordered within each tier.
+Prioritized work items for Hookaido. Items are grouped by priority tier and roughly ordered within each tier.
 
-## P0 - High Priority (v2.0 — Modular Architecture)
-
-- [ ] **Phase 1a: Extract shared backlog analytics** — Move duplicated backlog analysis types, constants, and algorithms from `admin/http.go` and `mcp/server.go` into `internal/backlog/`. Both packages import the shared package. Design: `docs/plans/2026-03-08-modular-architecture-design.md`.
-- [ ] **Phase 1b: Split mcp/server.go** — Break 8,406-line god file into protocol.go, tools_messages.go, tools_dlq.go, tools_config.go, tools_backlog.go. No behavior change.
-- [ ] **Phase 1c: Split admin/http.go** — Break 5,285-line god file into handler groups, parameter parsing, routing. No behavior change.
-- [ ] **Phase 2a: Module registry** — Create `internal/hookaido/` with typed module interfaces (QueueBackend, TracingProvider, MCPProvider, WorkerTransport) and registration functions.
-- [ ] **Phase 2b: Wire queue backend registry** — `app/run.go` selects queue backend through registry instead of direct constructor calls. Backends register from current location.
-- [ ] **Phase 2c: Config parser backend validation** — Parser validates backend names against registry. Unknown backends produce actionable error ("not compiled in").
-- [ ] **Phase 3a: Extract sqlite module** — Move SQLite backend from `internal/queue/` to `modules/sqlite/` with init() registration.
-- [ ] **Phase 3b: Extract postgres module** — Move Postgres backend to `modules/postgres/`.
-- [ ] **Phase 3c: Extract grpcworker module** — Move workerapi to `modules/grpcworker/`.
-- [ ] **Phase 3d: Extract otel module** — Extract OpenTelemetry setup from `app/run.go` to `modules/otel/`.
-- [ ] **Phase 3e: Extract mcp module** — Move MCP server to `modules/mcp/` (already split in Phase 1b).
-- [ ] **Phase 4: Build variants** — Standard main.go (all modules), minimal main.go (core only), Makefile targets for build/build-minimal/build-custom.
-
-## P1 - Medium Priority (v1.x / v2.0)
+## P1 - Medium Priority
 
 - [ ] **Remove or integrate internal/router** — Router interface is defined but unused; routing lives in `app/run.go`. Either wire the interface or remove the dead package.
 - [ ] **Improve workerapi test coverage** — 175 test lines vs 1,380 prod lines. Add integration tests for gRPC transport edge cases.
@@ -34,7 +19,6 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 ## P2 - Nice to Have (v2.0+)
 
 - [ ] **xhookaido build tool** — CLI tool for building custom Hookaido binaries with selected modules (like xcaddy). Deferred until module system is stable.
-- [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.
 - [x] **~~Documentation UX refresh~~** — Moved to Completed.
@@ -49,6 +33,19 @@ Prioritized work items for Hookaido v1.x. Items are grouped by priority tier and
 
 ## Completed (move here when done)
 
+- [x] **Phase 1a: Extract shared backlog analytics** — Move duplicated backlog analysis types, constants, and algorithms from `admin/http.go` and `mcp/server.go` into `internal/backlog/`. Both packages import the shared package. Design: `docs/plans/2026-03-08-modular-architecture-design.md`.
+- [x] **Phase 1b: Split mcp/server.go** — Break 8,406-line god file into protocol.go, tools_messages.go, tools_dlq.go, tools_config.go, tools_backlog.go. No behavior change.
+- [x] **Phase 1c: Split admin/http.go** — Break 5,285-line god file into handler groups, parameter parsing, routing. No behavior change.
+- [x] **Phase 2a: Module registry** — Create `internal/hookaido/` with typed module interfaces (QueueBackend, TracingProvider, MCPProvider, WorkerTransport) and registration functions.
+- [x] **Phase 2b: Wire queue backend registry** — `app/run.go` selects queue backend through registry instead of direct constructor calls. Backends register from current location.
+- [x] **Phase 2c: Config parser backend validation** — Parser validates backend names against registry. Unknown backends produce actionable error ("not compiled in").
+- [x] **Phase 3a: Extract sqlite module** — Move SQLite backend from `internal/queue/` to `modules/sqlite/` with init() registration.
+- [x] **Phase 3b: Extract postgres module** — Move Postgres backend to `modules/postgres/`.
+- [x] **Phase 3c: Extract grpcworker module** — Move workerapi to `modules/grpcworker/`.
+- [x] **Phase 3d: Extract otel module** — Extract OpenTelemetry setup from `app/run.go` to `modules/otel/`.
+- [x] **Phase 3e: Extract mcp module** — Move MCP server to `modules/mcp/` (already split in Phase 1b).
+- [x] **Phase 4: Build variants** — Standard main.go (all modules), minimal main.go (core only), Makefile targets for build/build-minimal/build-custom.
+- [x] **Branding: project logo** — Create a production-ready Hookaido logo (SVG + PNG variants) and define basic usage guidance (light/dark backgrounds, minimum size, spacing).
 - [x] **Queue lag/age recovery tuning (#56)** — Added lag/age regression acceptance guardrails (`scripts/adaptive-lag-guardrail.sh`, `adaptive-ab-lag-guardrail-check`, `adaptive-ab-mixed-lag-guardrail`) and completed runtime tuning for push drain (`routeMutationBatch` up to dequeue micro-batch size, lease TTL scaling by micro-batch) with mixed saturation revalidation pass (`run 20260215-003728`).
 - [x] **Delivery dead-letter growth tuning (#57)** — Completed attribution + runtime + regression-gate path: dead reason metrics/health diagnostics (`#62`), dead-growth E2E saturation guardrail (`#64`), retry max semantics fix (`#65`), and mixed saturation revalidation with `hookaido_delivery_dead_total=0` (`run 20260215-003728`).
 - [x] **Mixed Pull ACK conflict guardrail (#55)** — Added reproducible guardrail validation via `scripts/adaptive-guardrail.sh` + Make targets (`adaptive-ab-guardrail-check`, `adaptive-ab-mixed-guardrail`) with acceptance thresholds on `pull_ack_conflict_ratio_percent` and per-route drill-down tables from `final-metrics.txt` for mixed A/B regression checks.

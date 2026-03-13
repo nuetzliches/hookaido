@@ -82,7 +82,7 @@ Or with explicit build metadata:
 
 ```bash
 docker build \
-  --build-arg VERSION=v0.1.0 \
+  --build-arg VERSION=v2.0.0 \
   --build-arg COMMIT=$(git rev-parse --short HEAD) \
   --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
   -t hookaido:local .

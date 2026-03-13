@@ -1,0 +1,22 @@
+# Postgres test instance for integration tests.
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d --wait
+#   HOOKAIDO_TEST_POSTGRES_DSN="postgres://hookaido_test:hookaido_test@localhost:5433/hookaido_test?sslmode=disable" make test
+#   docker compose -f docker-compose.test.yml down
+
+services:
+  postgres-test:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: hookaido_test
+      POSTGRES_PASSWORD: hookaido_test
+      POSTGRES_DB: hookaido_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hookaido_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10

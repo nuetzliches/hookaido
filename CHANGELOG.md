@@ -7,6 +7,28 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-03-14
+
+### Added
+
+- CI pipeline hardening: race detector on Linux test runs, golangci-lint (errcheck, staticcheck, unused, ineffassign), and coverage profile artifact upload.
+- `.golangci.yml` (v2) with `std-error-handling` exclusion preset for idiomatic Go patterns.
+- Binary-level E2E tests: build hookaido as subprocess, test ingress-to-pull round-trip, config validate/fmt, and invalid config rejection.
+- Unit tests for 5 previously untested packages: path matching, rate limiter, module registry, backlog analysis, and worker API bearer-token auth.
+- Extended Postgres test coverage: unit tests for options/helpers/error-mapping and DSN-gated integration tests with `docker-compose.test.yml`.
+
+### Changed
+
+- MCP server split into focused files: `runtime_control.go` (729 lines) and `admin_proxy.go` (1,091 lines) extracted from `protocol.go`; test file split into `runtime_control_test.go` and `admin_proxy_test.go`.
+- Removed dead `internal/router` package; `matchPath` relocated to `internal/app` as package-private helper.
+- Dockerfile Go version aligned with `go.mod` (`golang:1.25-alpine`).
+
+### Fixed
+
+- Possible nil pointer dereference in Admin API publish body/header size resolution (`internal/admin/params.go`).
+- Data race in push dispatcher test stub (`stubPushStore`) detected by `-race` flag.
+- HMAC canonical string order in `docs/ingress.md` now matches code (METHOD first, not TIMESTAMP).
+
 ## [2.0.0] - 2026-03-09
 
 ### Added
@@ -204,7 +226,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/nuetzliches/hookaido/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/nuetzliches/hookaido/compare/v1.5.1...v2.0.0
 [1.5.1]: https://github.com/nuetzliches/hookaido/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/nuetzliches/hookaido/compare/v1.4.0...v1.5.0

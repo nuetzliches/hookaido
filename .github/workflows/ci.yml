@@ -51,7 +51,7 @@ jobs:
           go-version-file: go.mod
           check-latest: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
 
   release-package-dryrun:
     runs-on: ubuntu-latest

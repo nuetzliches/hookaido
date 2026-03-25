@@ -443,3 +443,89 @@ func TestHTTPDeliverer_EgressPolicyDeniesDelivery(t *testing.T) {
 		t.Fatal("expected request NOT to be sent when policy denies")
 	}
 }
+
+func TestHTTPDeliverer_CustomHeaders(t *testing.T) {
+	var gotAuth string
+	var gotCustom string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCustom = r.Header.Get("X-Custom")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDeliverer(srv.Client(), EgressPolicy{})
+	res := d.Deliver(context.Background(), Delivery{
+		Method: http.MethodPost,
+		URL:    srv.URL + "/hook",
+		Header: http.Header{},
+		Body:   []byte(`{"event":"push"}`),
+		CustomHeaders: []CustomHeader{
+			{Name: "Authorization", Value: "token secret-123"},
+			{Name: "X-Custom", Value: "static-value"},
+		},
+	})
+	if res.Err != nil {
+		t.Fatalf("deliver err: %v", res.Err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d", res.StatusCode)
+	}
+	if gotAuth != "token secret-123" {
+		t.Fatalf("Authorization header: got %q, want %q", gotAuth, "token secret-123")
+	}
+	if gotCustom != "static-value" {
+		t.Fatalf("X-Custom header: got %q, want %q", gotCustom, "static-value")
+	}
+}
+
+func TestHTTPDeliverer_CustomHeadersBeforeSigning(t *testing.T) {
+	// Custom headers must be set BEFORE HMAC signing, so they should NOT
+	// affect the HMAC signature. The signature is computed from method,
+	// path, timestamp, and body — NOT from request headers.
+	var gotSignature string
+	var gotAuth string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSignature = r.Header.Get("X-Hookaido-Signature")
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	const unixTS int64 = 1700000000
+	d := NewHTTPDeliverer(srv.Client(), EgressPolicy{})
+	d.Now = func() time.Time { return time.Unix(unixTS, 0).UTC() }
+
+	payload := []byte(`{"event":"deploy"}`)
+
+	// Deliver WITH custom headers + HMAC signing
+	res := d.Deliver(context.Background(), Delivery{
+		Method: http.MethodPost,
+		URL:    srv.URL + "/hook/deploy",
+		Header: http.Header{},
+		Body:   payload,
+		CustomHeaders: []CustomHeader{
+			{Name: "Authorization", Value: "token secret-123"},
+		},
+		Sign: &HMACSigningConfig{
+			SecretRef:       "raw:test-secret",
+			SignatureHeader: "X-Hookaido-Signature",
+			TimestampHeader: "X-Hookaido-Timestamp",
+		},
+	})
+	if res.Err != nil {
+		t.Fatalf("deliver err: %v", res.Err)
+	}
+	if gotAuth != "token secret-123" {
+		t.Fatalf("Authorization header: got %q, want %q", gotAuth, "token secret-123")
+	}
+
+	// Compute the expected signature WITHOUT custom headers — should match
+	wantTimestamp := strconv.FormatInt(unixTS, 10)
+	wantSignature := computeDeliverySignature(http.MethodPost, "/hook/deploy", wantTimestamp, payload, []byte("test-secret"))
+	if gotSignature != wantSignature {
+		t.Fatalf("signature mismatch: got %q, want %q (custom headers must NOT affect HMAC)", gotSignature, wantSignature)
+	}
+}

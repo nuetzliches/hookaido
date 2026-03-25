@@ -2890,6 +2890,17 @@ func (p *parser) parseRouteAuthHMACBlock(route *Route) error {
 			route.AuthHMACTolerance = v
 			route.AuthHMACToleranceQuoted = quoted
 			route.AuthHMACToleranceSet = true
+		case "provider":
+			if route.AuthHMACProviderSet {
+				return p.errAt(dirTok.pos, "duplicate route auth hmac provider")
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return err
+			}
+			route.AuthHMACProvider = v
+			route.AuthHMACProviderQuoted = quoted
+			route.AuthHMACProviderSet = true
 		default:
 			return p.errAt(dirTok.pos, "unknown route auth hmac directive %q", dirTok.text)
 		}
@@ -2900,7 +2911,7 @@ func (p *parser) parseRouteAuthHMACBlock(route *Route) error {
 
 func isRouteAuthHMACDirective(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "secret", "secret_ref", "signature_header", "timestamp_header", "nonce_header", "tolerance":
+	case "secret", "secret_ref", "signature_header", "timestamp_header", "nonce_header", "tolerance", "provider":
 		return true
 	default:
 		return false
@@ -3464,6 +3475,21 @@ func (p *parser) parseDeliverBlock() (*Deliver, error) {
 			default:
 				return nil, p.errAt(typTok.pos, "unknown deliver sign type %q", typTok.text)
 			}
+		case "header":
+			name, nameQuoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			value, valueQuoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.Headers = append(out.Headers, DeliverHeader{
+				Name:        name,
+				NameQuoted:  nameQuoted,
+				Value:       value,
+				ValueQuoted: valueQuoted,
+			})
 		default:
 			return nil, p.errAt(dirTok.pos, "unknown deliver directive %q", dirTok.text)
 		}
@@ -3550,7 +3576,7 @@ func (p *parser) parseRetryDirective() (*RetryBlock, error) {
 
 func isDeliverDirective(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "retry", "timeout", "sign":
+	case "retry", "timeout", "sign", "header":
 		return true
 	default:
 		return false

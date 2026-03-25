@@ -372,6 +372,10 @@ type Route struct {
 	AuthHMACTolerance       string
 	AuthHMACToleranceQuoted bool
 	AuthHMACToleranceSet    bool
+
+	AuthHMACProvider       string
+	AuthHMACProviderQuoted bool
+	AuthHMACProviderSet    bool
 }
 
 type MatchBlock struct {
@@ -580,6 +584,13 @@ type PublishPolicyBlock struct {
 	ActorPrefixQuoted []bool
 }
 
+type DeliverHeader struct {
+	Name        string
+	NameQuoted  bool
+	Value       string
+	ValueQuoted bool
+}
+
 type Deliver struct {
 	URL       string
 	URLQuoted bool
@@ -589,6 +600,8 @@ type Deliver struct {
 
 	TimeoutQuoted bool
 	TimeoutSet    bool
+
+	Headers []DeliverHeader
 
 	SignHMACSecret       string
 	SignHMACSecretQuoted bool

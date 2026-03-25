@@ -5,7 +5,9 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 ## P1 - Medium Priority
 
 - [x] **~~Remove or integrate internal/router~~** — Moved to Completed.
-- [ ] **Improve workerapi test coverage** — 175 test lines vs 1,380 prod lines. Add integration tests for gRPC transport edge cases.
+- [x] **~~Improve workerapi test coverage~~** — Moved to Completed.
+- [x] **~~Provider-compatible HMAC verification~~** — Moved to Completed.
+- [x] **~~Custom outbound headers in deliver blocks~~** — Moved to Completed.
 - [x] **~~Mixed-workload tail latency playbook~~** — Moved to Completed.
 - [x] **~~Drain fairness under saturation~~** — Moved to Completed.
 - [x] **~~Adaptive backpressure production tuning guide~~** — Moved to Completed.
@@ -32,6 +34,10 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 - [x] **~~Windows CI~~** — Moved to Completed.
 
 ## Completed (move here when done)
+
+- [x] **Improve workerapi test coverage** — 14 new test functions (57 sub-tests) in `modules/grpcworker/server_test.go` covering nil requests, blank endpoints, Pull-nil guards, invalid durations, lease ID normalization edge cases (both-set, all-empty, max-batch, dedup), error mapping (all status codes), route resolution fallback chain, custom MaxLeaseBatch, nack-dead via gRPC, nack-batch, and large-batch dequeue.
+- [x] **Provider-compatible HMAC verification** — `auth hmac { provider github; secret env:SECRET }` and `auth hmac { provider gitea; secret env:SECRET }` DSL surface with compile-time validation (mutual exclusivity with signature_header/timestamp_header/nonce_header/tolerance). GitHub verifies `X-Hub-Signature-256` (`sha256=hex(HMAC-SHA256(secret, body))`), Gitea/Forgejo verifies `X-Gitea-Signature` (`hex(HMAC-SHA256(secret, body))`). 14 config tests + 9 HMAC verification tests.
+- [x] **Custom outbound headers in deliver blocks** — `header "Name" "Value"` directive in deliver blocks with placeholder interpolation at compile time. Duplicate detection (case-insensitive), HTTP token validation, headers set on outbound requests before HMAC signing. 5 config tests + 2 dispatcher tests.
 
 - [x] **Remove or integrate internal/router** — Dead `Router` interface removed; `MatchPath` relocated as unexported helper in `internal/app`. Test-only copy inlined in `internal/ingress/http_test.go`.
 - [x] **Phase 1a: Extract shared backlog analytics** — Move duplicated backlog analysis types, constants, and algorithms from `admin/http.go` and `mcp/server.go` into `internal/backlog/`. Both packages import the shared package. Design: `docs/plans/2026-03-08-modular-architecture-design.md`.

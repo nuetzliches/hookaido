@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-03-25
+
 ### Added
 
 - Provider-compatible HMAC verification: `auth hmac { provider github; secret env:SECRET }` and `auth hmac { provider gitea; secret env:SECRET }` for GitHub (`X-Hub-Signature-256`) and Gitea/Forgejo (`X-Gitea-Signature`) webhook signature formats without timestamp/nonce replay protection.

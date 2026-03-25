@@ -15,12 +15,13 @@ RUN CGO_ENABLED=0 go build \
 
 # --- Runtime stage ---
 FROM alpine:3.23@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
-RUN apk add --no-cache ca-certificates tzdata && \
-    adduser -D -h /app hookaido
+RUN apk add --no-cache ca-certificates tzdata su-exec && \
+    adduser -D -u 1000 -h /app hookaido
 WORKDIR /app
 COPY --from=build /hookaido /usr/local/bin/hookaido
-USER hookaido
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 8080 9443 2019
 VOLUME ["/app/.data"]
-ENTRYPOINT ["hookaido"]
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["run", "--config", "/app/Hookaidofile", "--db", "/app/.data/hookaido.db"]

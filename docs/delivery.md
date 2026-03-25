@@ -111,6 +111,41 @@ defaults {
 `deliver_concurrency` is a shared per-route budget across all route targets.
 When a route has multiple targets, dispatcher workers are not pinned permanently to one target; idle-target capacity can drain backlog from active targets under saturation.
 
+## Custom Outbound Headers
+
+Add custom headers to outbound delivery requests with the `header` directive:
+
+```hcl
+/webhooks/github {
+  deliver "https://ci.internal/build" {
+    header "Authorization" "Bearer mytoken"
+    header "X-Source" "hookaido"
+    timeout 10s
+  }
+}
+```
+
+### Placeholder Support
+
+Header values support the same placeholder syntax as other config values:
+
+```hcl
+/webhooks/github {
+  deliver "https://ci.internal/build" {
+    header "Authorization" "token {env.FORGEJO_TOKEN}"
+    header "X-Environment" "{vars.DEPLOY_ENV}"
+  }
+}
+```
+
+Available placeholders: `{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`.
+
+### Validation Rules
+
+- Header names must be valid HTTP tokens (RFC 7230).
+- Duplicate header names (case-insensitive) are rejected at compile time.
+- Headers are set on outbound requests **before** HMAC signing — they do not affect the signature.
+
 ## Dead-Lettering
 
 Messages are moved to the DLQ when:
@@ -261,6 +296,9 @@ defaults {
 - Wildcards: `*` matches any host, `*.example.com` matches subdomains only.
 
 See [Security](security.md) for more on egress protection.
+
+!!! note "Docker and Private Networks"
+    The default `dns_rebind_protection on` may block delivery to private-network targets in Docker environments where DNS resolves to internal IPs. If your deliver targets are on private networks (e.g., `*.internal`, `10.x.x.x`), either add them to the `allow` list or set `dns_rebind_protection off` in your egress defaults.
 
 ---
 

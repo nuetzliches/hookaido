@@ -7,6 +7,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- Docker entrypoint volume ownership fix: container starts as root, `chown`s `/app/.data` to `hookaido` (UID 1000), then drops privileges via `su-exec`. Prevents `SQLITE_CANTOPEN` on first start with Docker volumes. Rootless-compatible (skips `chown` when run with `--user`).
+- Delivery docs: "Custom Outbound Headers" section documenting `header "Name" "Value"` syntax, placeholder interpolation, and validation rules. Docker/private-network `dns_rebind_protection` note added to Egress Policy section.
+
+### Changed
+
+- CI workflow version comments updated for precision across all pinned actions (`softprops/action-gh-release` v2.6.1, `golangci/golangci-lint-action` v9.2.0, `actions/upload-artifact` v7.0.0, `dependabot/fetch-metadata` v2.5.0, `actions/deploy-pages` v4.0.5).
+
 ## [2.1.0] - 2026-03-25
 
 ### Added

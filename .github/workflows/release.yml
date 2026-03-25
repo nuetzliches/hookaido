@@ -85,7 +85,7 @@ jobs:
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.attestation.json"
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.intoto.jsonl"
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           files: dist/*
           generate_release_notes: true

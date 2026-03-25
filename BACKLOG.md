@@ -4,9 +4,8 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority
 
-- [ ] **Entrypoint volume ownership fix** — Container runs as non-root `hookaido` (UID 1000) but Docker volumes are created as `root:root`, causing SQLite `SQLITE_CANTOPEN` on first start. Entrypoint should start as root, `chown` the data directory (`/app/.data`), then drop to the app user via `gosu`/`su-exec` (standard pattern used by Forgejo, PostgreSQL, Redis, etc.).
-
-- [ ] **Document `header` directive in delivery docs** — The `header "Name" "Value"` directive in deliver blocks is fully implemented (parser, compiler, runtime, tests) but missing from `docs/delivery.md`. The Delivery (Push) docs page only documents `retry`, `timeout`, and `sign` — custom outbound headers are not mentioned. Add syntax, placeholder support (`{env.VAR}`), and an example to the Deliver Blocks section. Also consider adding a note about `dns_rebind_protection` defaults in Docker/private-network environments to the Egress Policy section.
+- [x] **~~Entrypoint volume ownership fix~~** — Moved to Completed.
+- [x] **~~Document `header` directive in delivery docs~~** — Moved to Completed.
 
 - [x] **~~Remove or integrate internal/router~~** — Moved to Completed.
 - [x] **~~Improve workerapi test coverage~~** — Moved to Completed.
@@ -24,7 +23,7 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P2 - Nice to Have (v2.0+)
 
-- [ ] **CI: migrate deprecated Actions to Node.js 24** — `softprops/action-gh-release` runs on Node.js 20 (forced Node.js 24 default from June 2026). Also replace deprecated `actions/attest-sbom` with `actions/attest`.
+- [x] **~~CI: Node.js 24 Actions audit~~** — Moved to Completed.
 - [ ] **xhookaido build tool** — CLI tool for building custom Hookaido binaries with selected modules (like xcaddy). Deferred until module system is stable.
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.
@@ -40,7 +39,9 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## Completed (move here when done)
 
-- [x] **Improve workerapi test coverage** — 14 new test functions (57 sub-tests) in `modules/grpcworker/server_test.go` covering nil requests, blank endpoints, Pull-nil guards, invalid durations, lease ID normalization edge cases (both-set, all-empty, max-batch, dedup), error mapping (all status codes), route resolution fallback chain, custom MaxLeaseBatch, nack-dead via gRPC, nack-batch, and large-batch dequeue.
+- [x] **Entrypoint volume ownership fix** — Added `docker-entrypoint.sh` with root→chown→`su-exec` privilege drop pattern. Dockerfile updated: `su-exec` installed, UID pinned to 1000, `USER` removed, entrypoint wired. Rootless-compatible (skips chown when not root). Docker docs updated.
+- [x] **Document `header` directive in delivery docs** — Added "Custom Outbound Headers" section to `docs/delivery.md` with syntax, placeholder support (`{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`), and validation rules (HTTP token, case-insensitive dedup, pre-signing). Added Docker/private-network `dns_rebind_protection` note to Egress Policy section.
+- [x] **CI: Node.js 24 Actions audit** — Audited all 8 workflows. Pinned version comments updated for precision (`softprops/action-gh-release` v2.6.1, `golangci/golangci-lint-action` v9.2.0, `actions/upload-artifact` v7.0.0, `dependabot/fetch-metadata` v2.5.0, `actions/deploy-pages` v4.0.5). Most first-party actions already Node.js 24-ready; 4 community/pages actions still on Node.js 20 (no upstream update available yet). — 14 new test functions (57 sub-tests) in `modules/grpcworker/server_test.go` covering nil requests, blank endpoints, Pull-nil guards, invalid durations, lease ID normalization edge cases (both-set, all-empty, max-batch, dedup), error mapping (all status codes), route resolution fallback chain, custom MaxLeaseBatch, nack-dead via gRPC, nack-batch, and large-batch dequeue.
 - [x] **Provider-compatible HMAC verification** — `auth hmac { provider github; secret env:SECRET }` and `auth hmac { provider gitea; secret env:SECRET }` DSL surface with compile-time validation (mutual exclusivity with signature_header/timestamp_header/nonce_header/tolerance). GitHub verifies `X-Hub-Signature-256` (`sha256=hex(HMAC-SHA256(secret, body))`), Gitea/Forgejo verifies `X-Gitea-Signature` (`hex(HMAC-SHA256(secret, body))`). 14 config tests + 9 HMAC verification tests.
 - [x] **Custom outbound headers in deliver blocks** — `header "Name" "Value"` directive in deliver blocks with placeholder interpolation at compile time. Duplicate detection (case-insensitive), HTTP token validation, headers set on outbound requests before HMAC signing. 5 config tests + 2 dispatcher tests.
 

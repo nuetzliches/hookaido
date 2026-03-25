@@ -42,10 +42,11 @@ type HMACSigningSecretVersion struct {
 }
 
 type TargetConfig struct {
-	URL      string
-	Timeout  time.Duration
-	Retry    RetryConfig
-	SignHMAC *HMACSigningConfig
+	URL           string
+	Timeout       time.Duration
+	Retry         RetryConfig
+	SignHMAC      *HMACSigningConfig
+	CustomHeaders []CustomHeader
 }
 
 type RouteConfig struct {
@@ -333,13 +334,14 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 	}
 
 	delivery := Delivery{
-		ID:     env.ID,
-		Target: env.Target,
-		Method: http.MethodPost,
-		URL:    target.URL,
-		Header: header,
-		Body:   env.Payload,
-		Sign:   target.SignHMAC,
+		ID:            env.ID,
+		Target:        env.Target,
+		Method:        http.MethodPost,
+		URL:           target.URL,
+		Header:        header,
+		Body:          env.Payload,
+		CustomHeaders: target.CustomHeaders,
+		Sign:          target.SignHMAC,
 	}
 
 	timeout := target.Timeout

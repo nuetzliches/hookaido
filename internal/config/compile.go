@@ -213,6 +213,7 @@ type CompiledRoute struct {
 	AuthForward             ForwardAuthConfig
 	AuthHMACSecrets         []string
 	AuthHMACSecretRefs      []string
+	AuthHMACProvider        string
 	AuthHMACSignatureHeader string
 	AuthHMACTimestampHeader string
 	AuthHMACNonceHeader     string
@@ -253,10 +254,16 @@ type QueryMatchConfig struct {
 	Value string
 }
 
+type CompiledDeliverHeader struct {
+	Name  string
+	Value string
+}
+
 type CompiledDeliver struct {
 	URL         string
 	Timeout     time.Duration
 	Retry       RetryConfig
+	Headers     []CompiledDeliverHeader
 	SigningHMAC DeliverSigningHMACConfig
 }
 
@@ -667,6 +674,19 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 			}
 			hmacSecrets = append(hmacSecrets, ref)
 		}
+		hmacProvider := ""
+		if r.AuthHMACProviderSet {
+			raw := strings.TrimSpace(resolveValue(r.AuthHMACProvider, fmt.Sprintf("route %q auth hmac provider", rPath), &res))
+			switch raw {
+			case "github", "gitea":
+				hmacProvider = raw
+			default:
+				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac provider %q must be one of: github, gitea", rPath, raw))
+			}
+			if r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet || r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet {
+				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac provider is mutually exclusive with signature_header, timestamp_header, nonce_header, and tolerance", rPath))
+			}
+		}
 		hmacSignatureHeader := ""
 		if r.AuthHMACSignatureHeaderSet {
 			raw := strings.TrimSpace(resolveValue(r.AuthHMACSignatureHeader, fmt.Sprintf("route %q auth hmac signature_header", rPath), &res))
@@ -710,11 +730,11 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				hmacTolerance = d
 			}
 		}
-		hasHMACOptions := r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet || r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet
+		hasHMACOptions := r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet || r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet || r.AuthHMACProviderSet
 		if hasHMACOptions && len(hmacSecrets) == 0 && len(hmacSecretRefs) == 0 {
 			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac options require at least one secret or secret_ref", rPath))
 		}
-		if len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0 {
+		if (len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0) && hmacProvider == "" {
 			effectiveSignatureHeader := hmacSignatureHeader
 			if effectiveSignatureHeader == "" {
 				effectiveSignatureHeader = defaultIngressHMACSignatureHeader
@@ -862,6 +882,36 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				retry = rCfg
 			}
 
+			var compiledHeaders []CompiledDeliverHeader
+			if len(d.Headers) > 0 {
+				seenHeaders := make(map[string]struct{}, len(d.Headers))
+				for k, h := range d.Headers {
+					name := strings.TrimSpace(resolveValue(h.Name, fmt.Sprintf("route %q deliver[%d].header[%d].name", rPath, j, k), &res))
+					value := resolveValue(h.Value, fmt.Sprintf("route %q deliver[%d].header[%d].value", rPath, j, k), &res)
+					if name == "" {
+						res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d].header[%d] name must not be empty", rPath, j, k))
+						deliverOK = false
+						continue
+					}
+					if !isMethodToken(name) {
+						res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d].header[%d] name %q must be a valid HTTP token", rPath, j, k, name))
+						deliverOK = false
+						continue
+					}
+					canonical := http.CanonicalHeaderKey(name)
+					if _, exists := seenHeaders[canonical]; exists {
+						res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d] duplicate header %q", rPath, j, canonical))
+						deliverOK = false
+						continue
+					}
+					seenHeaders[canonical] = struct{}{}
+					compiledHeaders = append(compiledHeaders, CompiledDeliverHeader{
+						Name:  canonical,
+						Value: value,
+					})
+				}
+			}
+
 			signing := DeliverSigningHMACConfig{}
 			if d.SignHMACSecretSet {
 				raw := strings.TrimSpace(resolveValue(d.SignHMACSecret, fmt.Sprintf("route %q deliver[%d].sign hmac", rPath, j), &res))
@@ -979,6 +1029,7 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				URL:         raw,
 				Timeout:     timeout,
 				Retry:       retry,
+				Headers:     compiledHeaders,
 				SigningHMAC: signing,
 			})
 		}
@@ -1123,6 +1174,7 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 			AuthForward:             forwardAuth,
 			AuthHMACSecrets:         hmacSecrets,
 			AuthHMACSecretRefs:      hmacSecretRefs,
+			AuthHMACProvider:        hmacProvider,
 			AuthHMACSignatureHeader: hmacSignatureHeader,
 			AuthHMACTimestampHeader: hmacTimestampHeader,
 			AuthHMACNonceHeader:     hmacNonceHeader,

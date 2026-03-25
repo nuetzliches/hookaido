@@ -936,6 +936,7 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		}
 
 		auth := ingress.NewHMACAuth(secs)
+		auth.Provider = rt.AuthHMACProvider
 		if strings.TrimSpace(rt.AuthHMACSignatureHeader) != "" {
 			auth.SignatureHeader = rt.AuthHMACSignatureHeader
 		}
@@ -2698,6 +2699,10 @@ func buildDispatchRoutes(compiled config.Compiled) []dispatcher.RouteConfig {
 					TimestampHeader: d.SigningHMAC.TimestampHeader,
 				}
 			}
+			var customHeaders []dispatcher.CustomHeader
+			for _, h := range d.Headers {
+				customHeaders = append(customHeaders, dispatcher.CustomHeader{Name: h.Name, Value: h.Value})
+			}
 			targets = append(targets, dispatcher.TargetConfig{
 				URL:     d.URL,
 				Timeout: d.Timeout,
@@ -2708,7 +2713,8 @@ func buildDispatchRoutes(compiled config.Compiled) []dispatcher.RouteConfig {
 					Cap:    d.Retry.Cap,
 					Jitter: d.Retry.Jitter,
 				},
-				SignHMAC: signing,
+				SignHMAC:      signing,
+				CustomHeaders: customHeaders,
 			})
 		}
 		routes = append(routes, dispatcher.RouteConfig{

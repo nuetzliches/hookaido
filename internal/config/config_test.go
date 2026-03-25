@@ -7056,6 +7056,231 @@ pull_api { auth token "raw:t" }
 	}
 }
 
+func TestParseFormat_AuthHMACProviderGitHub(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/webhooks/github" {
+  auth hmac {
+    provider github
+    secret env:GH_SECRET
+  }
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.Routes) != 1 {
+		t.Fatalf("expected one route, got %#v", cfg.Routes)
+	}
+	route := cfg.Routes[0]
+	if !route.AuthHMACBlockSet {
+		t.Fatalf("expected auth hmac block flag")
+	}
+	if !route.AuthHMACProviderSet || route.AuthHMACProvider != "github" {
+		t.Fatalf("expected provider github, got %q (set=%v)", route.AuthHMACProvider, route.AuthHMACProviderSet)
+	}
+	if len(route.AuthHMACSecrets) != 1 || route.AuthHMACSecrets[0] != "env:GH_SECRET" {
+		t.Fatalf("expected one secret, got %#v", route.AuthHMACSecrets)
+	}
+
+	out, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "auth hmac {") {
+		t.Fatalf("expected auth hmac block, got:\n%s", got)
+	}
+	if !strings.Contains(got, "provider github") {
+		t.Fatalf("expected provider github in format output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "secret env:GH_SECRET") {
+		t.Fatalf("expected secret in format output, got:\n%s", got)
+	}
+
+	// Round-trip: parse the formatted output again
+	cfg2, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	route2 := cfg2.Routes[0]
+	if !route2.AuthHMACProviderSet || route2.AuthHMACProvider != "github" {
+		t.Fatalf("round-trip: expected provider github, got %q (set=%v)", route2.AuthHMACProvider, route2.AuthHMACProviderSet)
+	}
+}
+
+func TestParseFormat_AuthHMACProviderGitea(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/webhooks/gitea" {
+  auth hmac {
+    provider "gitea"
+    secret "env:GITEA_SECRET"
+  }
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.Routes) != 1 {
+		t.Fatalf("expected one route, got %#v", cfg.Routes)
+	}
+	route := cfg.Routes[0]
+	if !route.AuthHMACProviderSet || route.AuthHMACProvider != "gitea" {
+		t.Fatalf("expected provider gitea, got %q (set=%v)", route.AuthHMACProvider, route.AuthHMACProviderSet)
+	}
+
+	out, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `provider "gitea"`) {
+		t.Fatalf("expected provider gitea in format output, got:\n%s", got)
+	}
+
+	// Round-trip
+	cfg2, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	route2 := cfg2.Routes[0]
+	if !route2.AuthHMACProviderSet || route2.AuthHMACProvider != "gitea" {
+		t.Fatalf("round-trip: expected provider gitea, got %q (set=%v)", route2.AuthHMACProvider, route2.AuthHMACProviderSet)
+	}
+}
+
+func TestCompile_AuthHMACProviderGitHub(t *testing.T) {
+	t.Setenv("GH_SECRET", "test-secret-value")
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/webhooks/github" {
+  auth hmac {
+    provider github
+    secret env:GH_SECRET
+  }
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+	if len(compiled.Routes) != 1 {
+		t.Fatalf("expected one route, got %#v", compiled.Routes)
+	}
+	route := compiled.Routes[0]
+	if route.AuthHMACProvider != "github" {
+		t.Fatalf("expected provider github, got %q", route.AuthHMACProvider)
+	}
+	if len(route.AuthHMACSecrets) != 1 {
+		t.Fatalf("expected one secret, got %d", len(route.AuthHMACSecrets))
+	}
+}
+
+func TestCompile_AuthHMACProviderMutualExclusivity(t *testing.T) {
+	tests := []struct {
+		name       string
+		directives string
+	}{
+		{
+			name:       "ProviderWithSignatureHeader",
+			directives: `provider github; signature_header "X-Custom"`,
+		},
+		{
+			name:       "ProviderWithTimestampHeader",
+			directives: `provider github; timestamp_header "X-Custom"`,
+		},
+		{
+			name:       "ProviderWithNonceHeader",
+			directives: `provider github; nonce_header "X-Custom"`,
+		},
+		{
+			name:       "ProviderWithTolerance",
+			directives: `provider github; tolerance "5m"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GH_SECRET", "test-secret-value")
+			in := []byte(fmt.Sprintf(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  auth hmac {
+    secret env:GH_SECRET
+    %s
+  }
+  pull { path "/e" }
+}
+`, tc.directives))
+			cfg, err := Parse(in)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			_, res := Compile(cfg)
+			if res.OK {
+				t.Fatalf("expected error, got ok")
+			}
+			found := false
+			for _, e := range res.Errors {
+				if strings.Contains(e, "provider is mutually exclusive") {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected mutual exclusivity error, got %#v", res.Errors)
+			}
+		})
+	}
+}
+
+func TestCompile_AuthHMACProviderInvalidValue(t *testing.T) {
+	t.Setenv("GH_SECRET", "test-secret-value")
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  auth hmac {
+    provider "stripe"
+    secret env:GH_SECRET
+  }
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, `provider "stripe" must be one of`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected invalid provider error, got %#v", res.Errors)
+	}
+}
+
 func TestCompile_AuthForwardBlockOptions(t *testing.T) {
 	in := []byte(`
 pull_api { auth token "raw:t" }
@@ -7936,5 +8161,214 @@ internal {
 	got := string(out)
 	if !strings.Contains(got, "publish.managed off") {
 		t.Fatalf("expected dot-notation in channel wrapper output, got:\n%s", got)
+	}
+}
+
+func TestParseFormat_DeliverCustomHeaders(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/hooks/deploy" {
+  deliver "https://gitea.internal/api/v1/repos/mirror-sync" {
+    header "Authorization" "token my-secret"
+    timeout "10s"
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `header "Authorization" "token my-secret"`) {
+		t.Fatalf("expected header directive in formatted output, got:\n%s", got)
+	}
+	if !strings.Contains(got, `timeout "10s"`) {
+		t.Fatalf("expected timeout directive in formatted output, got:\n%s", got)
+	}
+
+	// round-trip: parse the formatted output and re-format
+	cfg2, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	out2, err := Format(cfg2)
+	if err != nil {
+		t.Fatalf("re-format: %v", err)
+	}
+	if string(out) != string(out2) {
+		t.Fatalf("round-trip mismatch:\n--- first ---\n%s\n--- second ---\n%s", out, out2)
+	}
+}
+
+func TestParseFormat_DeliverCustomHeadersMultiple(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/hooks/deploy" {
+  deliver "https://gitea.internal/api" {
+    header "Authorization" "token abc"
+    header "X-Custom" "static-value"
+    header "X-Request-Source" "hookaido"
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(cfg.Routes))
+	}
+	if len(cfg.Routes[0].Deliveries) != 1 {
+		t.Fatalf("expected 1 deliver, got %d", len(cfg.Routes[0].Deliveries))
+	}
+	headers := cfg.Routes[0].Deliveries[0].Headers
+	if len(headers) != 3 {
+		t.Fatalf("expected 3 headers, got %d", len(headers))
+	}
+	if headers[0].Name != "Authorization" || headers[0].Value != "token abc" {
+		t.Fatalf("header[0]: got %q=%q", headers[0].Name, headers[0].Value)
+	}
+	if headers[1].Name != "X-Custom" || headers[1].Value != "static-value" {
+		t.Fatalf("header[1]: got %q=%q", headers[1].Name, headers[1].Value)
+	}
+	if headers[2].Name != "X-Request-Source" || headers[2].Value != "hookaido" {
+		t.Fatalf("header[2]: got %q=%q", headers[2].Name, headers[2].Value)
+	}
+
+	out, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `header "Authorization" "token abc"`) {
+		t.Fatalf("expected Authorization header, got:\n%s", got)
+	}
+	if !strings.Contains(got, `header "X-Custom" "static-value"`) {
+		t.Fatalf("expected X-Custom header, got:\n%s", got)
+	}
+	if !strings.Contains(got, `header "X-Request-Source" "hookaido"`) {
+		t.Fatalf("expected X-Request-Source header, got:\n%s", got)
+	}
+}
+
+func TestCompile_DeliverCustomHeaders(t *testing.T) {
+	t.Setenv("TEST_TOKEN", "secret-token-value")
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/hooks" {
+  deliver "https://api.internal/hook" {
+    header "Authorization" "token {env.TEST_TOKEN}"
+    header "X-Static" "plain-value"
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %v", res.Errors)
+	}
+	if len(compiled.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(compiled.Routes))
+	}
+	if len(compiled.Routes[0].Deliveries) != 1 {
+		t.Fatalf("expected 1 deliver, got %d", len(compiled.Routes[0].Deliveries))
+	}
+	headers := compiled.Routes[0].Deliveries[0].Headers
+	if len(headers) != 2 {
+		t.Fatalf("expected 2 compiled headers, got %d", len(headers))
+	}
+	if headers[0].Name != "Authorization" {
+		t.Fatalf("header[0] name: got %q", headers[0].Name)
+	}
+	if headers[0].Value != "token secret-token-value" {
+		t.Fatalf("header[0] value: got %q, want %q", headers[0].Value, "token secret-token-value")
+	}
+	if headers[1].Name != "X-Static" {
+		t.Fatalf("header[1] name: got %q", headers[1].Name)
+	}
+	if headers[1].Value != "plain-value" {
+		t.Fatalf("header[1] value: got %q", headers[1].Value)
+	}
+}
+
+func TestCompile_DeliverCustomHeadersDuplicateReject(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/hooks" {
+  deliver "https://api.internal/hook" {
+    header "Authorization" "token abc"
+    header "authorization" "token xyz"
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected compile error for duplicate headers")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "duplicate header") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected duplicate header error, got: %v", res.Errors)
+	}
+}
+
+func TestCompile_DeliverCustomHeadersInvalidName(t *testing.T) {
+	cases := []struct {
+		name      string
+		headerDSL string
+		errMsg    string
+	}{
+		{"empty name", `header "" "value"`, "must not be empty"},
+		{"invalid chars", `header "Bad Header" "value"`, "must be a valid HTTP token"},
+		{"colon in name", `header "X:Bad" "value"`, "must be a valid HTTP token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []byte(fmt.Sprintf(`
+pull_api { auth token "raw:t" }
+
+"/hooks" {
+  deliver "https://api.internal/hook" {
+    %s
+  }
+}
+`, tc.headerDSL))
+			cfg, err := Parse(in)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			_, res := Compile(cfg)
+			if res.OK {
+				t.Fatalf("expected compile error for %s", tc.name)
+			}
+			found := false
+			for _, e := range res.Errors {
+				if strings.Contains(e, tc.errMsg) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected error containing %q, got: %v", tc.errMsg, res.Errors)
+			}
+		})
 	}
 }

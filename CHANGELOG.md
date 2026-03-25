@@ -7,6 +7,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- Provider-compatible HMAC verification: `auth hmac { provider github; secret env:SECRET }` and `auth hmac { provider gitea; secret env:SECRET }` for GitHub (`X-Hub-Signature-256`) and Gitea/Forgejo (`X-Gitea-Signature`) webhook signature formats without timestamp/nonce replay protection.
+- Custom outbound headers in deliver blocks: `header "Name" "Value"` with placeholder interpolation (`{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`); case-insensitive duplicate detection at compile time.
+- WorkerAPI gRPC transport edge-case test coverage: 14 new tests (57 sub-tests) covering nil requests, blank endpoints, Pull-nil guards, lease ID normalization, error mapping, route resolution fallback, nack-dead, nack-batch, and large-batch dequeue.
+
 ## [2.0.1] - 2026-03-14
 
 ### Added

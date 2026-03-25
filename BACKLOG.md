@@ -4,6 +4,10 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority
 
+- [ ] **Entrypoint volume ownership fix** — Container runs as non-root `hookaido` (UID 1000) but Docker volumes are created as `root:root`, causing SQLite `SQLITE_CANTOPEN` on first start. Entrypoint should start as root, `chown` the data directory (`/app/.data`), then drop to the app user via `gosu`/`su-exec` (standard pattern used by Forgejo, PostgreSQL, Redis, etc.).
+
+- [ ] **Document `header` directive in delivery docs** — The `header "Name" "Value"` directive in deliver blocks is fully implemented (parser, compiler, runtime, tests) but missing from `docs/delivery.md`. The Delivery (Push) docs page only documents `retry`, `timeout`, and `sign` — custom outbound headers are not mentioned. Add syntax, placeholder support (`{env.VAR}`), and an example to the Deliver Blocks section. Also consider adding a note about `dns_rebind_protection` defaults in Docker/private-network environments to the Egress Policy section.
+
 - [x] **~~Remove or integrate internal/router~~** — Moved to Completed.
 - [x] **~~Improve workerapi test coverage~~** — Moved to Completed.
 - [x] **~~Provider-compatible HMAC verification~~** — Moved to Completed.
@@ -20,6 +24,7 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P2 - Nice to Have (v2.0+)
 
+- [ ] **CI: migrate deprecated Actions to Node.js 24** — `softprops/action-gh-release` runs on Node.js 20 (forced Node.js 24 default from June 2026). Also replace deprecated `actions/attest-sbom` with `actions/attest`.
 - [ ] **xhookaido build tool** — CLI tool for building custom Hookaido binaries with selected modules (like xcaddy). Deferred until module system is stable.
 - [x] **~~Vault secret adapter~~** — Moved to Completed.
 - [x] **~~Full code review and polish pass~~** — Moved to Completed.

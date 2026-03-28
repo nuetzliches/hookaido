@@ -157,7 +157,7 @@ func TestE2E_IngressPullRoundTrip(t *testing.T) {
 		t.Fatalf("stats: %v", err)
 	}
 	if stats.ByState[queue.StateQueued] != 0 {
-		t.Fatalf("queued items remainig: %d", stats.ByState[queue.StateQueued])
+		t.Fatalf("queued items remaining: %d", stats.ByState[queue.StateQueued])
 	}
 }
 

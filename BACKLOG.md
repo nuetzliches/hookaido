@@ -2,9 +2,22 @@
 
 Prioritized work items for Hookaido. Items are grouped by priority tier and roughly ordered within each tier.
 
-## P1 - Medium Priority
+## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-_No open items._
+- [ ] **Test coverage ≥80%** — Current total: 70.6%. Focus areas:
+  - `modules/postgres` (14.4%) — Integration tests for Postgres queue backend
+  - `modules/otel` (18.4%) — Unit tests for OpenTelemetry module wrapper
+  - `modules/mcp` (24.5%) — Unit tests for MCP module wrapper
+  - `internal/tools/release` (32.4%) — Release tooling tests
+  - `internal/app` (58.8%) — App startup/wiring tests
+  - `internal/release/sbom` (67.6%) — SBOM generator tests
+  - `internal/secrets` (70.8%) — Secret resolver edge cases
+  - `internal/pullapi` (73.6%) — Pull API handler coverage
+  - `internal/config` (77.3%) — Config parser edge cases
+  - `internal/mcp` (77.3%) — MCP server handler coverage
+- [ ] **Go Report Card A-** — Verify grade at https://goreportcard.com/report/github.com/nuetzliches/hookaido. Fix any lint/vet/fmt issues.
+- [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
+- [ ] **awesome-go PR** — Submit to [avelino/awesome-go](https://github.com/avelino/awesome-go) under "Messaging" category. Requires: ≥5 months history (eligible ~July 2026), coverage ≥80%, Go Report Card A-, pkg.go.dev docs.
 
 ## P2 - Nice to Have
 

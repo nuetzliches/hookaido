@@ -7,15 +7,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [2.2.0] - 2026-03-28
+
 ### Added
 
 - `deliver exec` directive: deliver webhook payloads by executing a local subprocess. Payload on stdin, metadata as env vars (`HOOKAIDO_ROUTE`, `HOOKAIDO_EVENT_ID`, `HOOKAIDO_CONTENT_TYPE`, `HOOKAIDO_ATTEMPT`, `HOOKAIDO_HEADER_*`), user-defined `env` vars from config. Exit code mapping for retry/DLQ semantics. Cross-platform via `os/exec`.
+- Documentation: new `docs/recipes.md` with four practical patterns (GitHub→Deploy Script, Stripe→Billing, Multi-Provider Fan-Out, CI/CD Job Queue). Exec delivery documented across configuration, delivery, ingress, and getting-started guides.
+
+### Fixed
+
 - Docker entrypoint volume ownership fix: container starts as root, `chown`s `/app/.data` to `hookaido` (UID 1000), then drops privileges via `su-exec`. Prevents `SQLITE_CANTOPEN` on first start with Docker volumes. Rootless-compatible (skips `chown` when run with `--user`).
-- Delivery docs: "Custom Outbound Headers" section documenting `header "Name" "Value"` syntax, placeholder interpolation, and validation rules. Docker/private-network `dns_rebind_protection` note added to Egress Policy section.
+- HMAC string-to-sign ordering in Hookaidofile comment corrected to match canonical format (`METHOD + PATH + TIMESTAMP + SHA256`).
 
 ### Changed
 
-- CI workflow version comments updated for precision across all pinned actions (`softprops/action-gh-release` v2.6.1, `golangci/golangci-lint-action` v9.2.0, `actions/upload-artifact` v7.0.0, `dependabot/fetch-metadata` v2.5.0, `actions/deploy-pages` v4.0.5).
+- README restructured: grouped features (Core/Security/Operations), added use-cases section, reduced badges, streamlined config examples and documentation table.
+- CI workflow version comments updated for precision across all pinned actions.
 
 ## [2.1.0] - 2026-03-25
 

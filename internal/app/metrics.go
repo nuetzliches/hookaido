@@ -919,11 +919,11 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 			"adaptive_backpressure_by_reason":     ingressAdaptiveByReasonAny,
 		},
 		"delivery": map[string]any{
-			"attempt_total":   m.deliveryAttemptTotal.Load(),
-			"acked_total":     m.deliveryAckedTotal.Load(),
-			"retry_total":     m.deliveryRetryTotal.Load(),
-			"dead_total":      m.deliveryDeadTotal.Load(),
-			"dead_by_reason":  deliveryDeadByReasonAny,
+			"attempt_total":  m.deliveryAttemptTotal.Load(),
+			"acked_total":    m.deliveryAckedTotal.Load(),
+			"retry_total":    m.deliveryRetryTotal.Load(),
+			"dead_total":     m.deliveryDeadTotal.Load(),
+			"dead_by_reason": deliveryDeadByReasonAny,
 		},
 		"pull": pullDiagnostics(pullSnapshot),
 	}

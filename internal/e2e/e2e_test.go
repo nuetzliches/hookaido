@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -971,5 +974,144 @@ func TestE2E_PushSaturationNoDeadGrowth(t *testing.T) {
 
 	if got := delivered.Load(); got != totalRequests {
 		t.Fatalf("delivered count: got %d, want %d", got, totalRequests)
+	}
+}
+
+func TestE2E_IngressExecRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "payload.out")
+	script := filepath.Join(dir, "handler.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat > "+outFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newTestStore()
+	ingSrv := ingressServer(store, "/hooks/deploy")
+	ingSrv.TargetsFor = func(route string) []string {
+		return []string{script}
+	}
+	ing := httptest.NewServer(ingSrv)
+	defer ing.Close()
+
+	pd := &dispatcher.PushDispatcher{
+		Store: store,
+		Deliverer: &dispatcher.ExecDeliverer{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		Routes: []dispatcher.RouteConfig{
+			{
+				Route: "/hooks/deploy",
+				Targets: []dispatcher.TargetConfig{{
+					URL:     script,
+					Timeout: 5 * time.Second,
+					Retry:   dispatcher.RetryConfig{Max: 1, Base: 100 * time.Millisecond},
+					IsExec:  true,
+				}},
+				Concurrency: 1,
+			},
+		},
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxWait: 200 * time.Millisecond,
+	}
+	pd.Start()
+	defer pd.Drain(5 * time.Second)
+
+	payload := `{"action":"deploy","ref":"main"}`
+	resp, err := http.Post(ing.URL+"/hooks/deploy", "application/json", bytes.NewReader([]byte(payload)))
+	if err != nil {
+		t.Fatalf("ingress POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("ingress status: got %d, want 202", resp.StatusCode)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		got, err := os.ReadFile(outFile)
+		if err == nil && len(got) > 0 {
+			if string(got) != payload {
+				t.Fatalf("payload mismatch: got %q, want %q", got, payload)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("exec delivery did not occur within 5s")
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}
+
+func TestE2E_IngressExecDLQ(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fail.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newTestStore()
+	ingSrv := ingressServer(store, "/hooks/fail")
+	ingSrv.TargetsFor = func(route string) []string {
+		return []string{script}
+	}
+	ing := httptest.NewServer(ingSrv)
+	defer ing.Close()
+
+	pd := &dispatcher.PushDispatcher{
+		Store: store,
+		Deliverer: &dispatcher.ExecDeliverer{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		Routes: []dispatcher.RouteConfig{
+			{
+				Route: "/hooks/fail",
+				Targets: []dispatcher.TargetConfig{{
+					URL:     script,
+					Timeout: 5 * time.Second,
+					Retry:   dispatcher.RetryConfig{Max: 1, Base: 10 * time.Millisecond},
+					IsExec:  true,
+				}},
+				Concurrency: 1,
+			},
+		},
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxWait: 200 * time.Millisecond,
+	}
+	pd.Start()
+	defer pd.Drain(5 * time.Second)
+
+	resp, err := http.Post(ing.URL+"/hooks/fail", "application/json", bytes.NewReader([]byte(`{"test":true}`)))
+	if err != nil {
+		t.Fatalf("ingress POST: %v", err)
+	}
+	resp.Body.Close()
+
+	// Wait for DLQ entry.
+	deadline := time.After(5 * time.Second)
+	for {
+		dead, err := store.ListDead(queue.DeadListRequest{Limit: 10})
+		if err != nil {
+			t.Fatalf("list dead: %v", err)
+		}
+		if len(dead.Items) > 0 {
+			if dead.Items[0].Route != "/hooks/fail" {
+				t.Fatalf("dead route: got %q", dead.Items[0].Route)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("exec DLQ entry did not appear within 5s")
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 }

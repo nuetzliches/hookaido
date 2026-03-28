@@ -595,6 +595,9 @@ type Deliver struct {
 	URL       string
 	URLQuoted bool
 
+	IsExec  bool
+	ExecEnv []ExecEnvVar
+
 	Retry   *RetryBlock
 	Timeout string
 
@@ -621,6 +624,12 @@ type Deliver struct {
 	SignHMACSecretSelection       string
 	SignHMACSecretSelectionQuoted bool
 	SignHMACSecretSelectionSet    bool
+}
+
+type ExecEnvVar struct {
+	Key         string
+	Value       string
+	ValueQuoted bool
 }
 
 type DeliverBlock struct {

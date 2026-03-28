@@ -846,7 +846,11 @@ func writeQueueBlock(b *bytes.Buffer, q *QueueBlock) {
 }
 
 func writeDeliverBlock(b *bytes.Buffer, d Deliver) {
-	fmt.Fprintf(b, "  deliver %s {\n", formatValue(d.URL, d.URLQuoted))
+	if d.IsExec {
+		fmt.Fprintf(b, "  deliver exec %s {\n", formatValue(d.URL, d.URLQuoted))
+	} else {
+		fmt.Fprintf(b, "  deliver %s {\n", formatValue(d.URL, d.URLQuoted))
+	}
 	if d.Retry != nil {
 		fmt.Fprintf(b, "    %s\n", formatRetryDirective(d.Retry))
 	}
@@ -875,6 +879,9 @@ func writeDeliverBlock(b *bytes.Buffer, d Deliver) {
 	}
 	if d.SignHMACSecretSelectionSet {
 		fmt.Fprintf(b, "    sign secret_selection %s\n", formatValue(d.SignHMACSecretSelection, d.SignHMACSecretSelectionQuoted))
+	}
+	for _, ev := range d.ExecEnv {
+		fmt.Fprintf(b, "    env %s %s\n", ev.Key, formatValue(ev.Value, ev.ValueQuoted))
 	}
 	b.WriteString("  }\n")
 }

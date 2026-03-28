@@ -265,6 +265,10 @@ type CompiledDeliver struct {
 	Retry       RetryConfig
 	Headers     []CompiledDeliverHeader
 	SigningHMAC DeliverSigningHMACConfig
+
+	IsExec  bool
+	Command string
+	ExecEnv map[string]string
 }
 
 type DeliverSigningHMACConfig struct {
@@ -837,6 +841,85 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				deliverOK = false
 				continue
 			}
+
+			if d.IsExec {
+				// Exec delivery: validate command path and env vars.
+				if _, ok := deliverTargets[raw]; ok {
+					res.Errors = append(res.Errors, fmt.Sprintf("route %q duplicate deliver target %q", rPath, raw))
+					deliverOK = false
+					continue
+				}
+				deliverTargets[raw] = struct{}{}
+
+				// sign hmac is incompatible with exec.
+				if d.SignHMACSecretSet || len(d.SignHMACSecretRefs) > 0 || d.SignHMACSignatureHeaderSet || d.SignHMACTimestampHeaderSet || d.SignHMACSecretSelectionSet {
+					res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d] exec does not support sign directives", rPath, j))
+					deliverOK = false
+					continue
+				}
+
+				// env directives require exec.
+				execEnv := make(map[string]string, len(d.ExecEnv))
+				for k, ev := range d.ExecEnv {
+					key := strings.TrimSpace(ev.Key)
+					if key == "" {
+						res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d].env[%d] key must not be empty", rPath, j, k))
+						deliverOK = false
+						continue
+					}
+					if !varNamePattern.MatchString(key) {
+						res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d].env %q must match [A-Za-z_][A-Za-z0-9_]*", rPath, j, key))
+						deliverOK = false
+						continue
+					}
+					val := resolveValue(ev.Value, fmt.Sprintf("route %q deliver[%d].env[%d]", rPath, j, k), &res)
+					execEnv[key] = val
+				}
+
+				timeout := defs.DeliverTimeout
+				if d.TimeoutSet {
+					tRaw := strings.TrimSpace(resolveValue(d.Timeout, fmt.Sprintf("route %q deliver[%d].timeout", rPath, j), &res))
+					dur, err := parsePositiveDuration(tRaw)
+					if err != nil {
+						res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d].timeout %s", rPath, j, err.Error()))
+						deliverOK = false
+						continue
+					}
+					timeout = dur
+				}
+
+				retry := defs.DeliverRetry
+				if d.Retry != nil {
+					rCfg, ok := compileRetry(fmt.Sprintf("route %q deliver[%d].retry", rPath, j), d.Retry, retry, &res)
+					if !ok {
+						deliverOK = false
+						continue
+					}
+					retry = rCfg
+				}
+
+				if !deliverOK {
+					continue
+				}
+
+				deliveries = append(deliveries, CompiledDeliver{
+					URL:     raw,
+					Timeout: timeout,
+					Retry:   retry,
+					IsExec:  true,
+					Command: raw,
+					ExecEnv: execEnv,
+				})
+				continue
+			}
+
+			// env directives are only valid with exec.
+			if len(d.ExecEnv) > 0 {
+				res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d] env directive requires deliver exec", rPath, j))
+				deliverOK = false
+				continue
+			}
+
 			u, err := url.Parse(raw)
 			if err != nil || u == nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("route %q deliver[%d] target must be a valid URL", rPath, j))

@@ -47,6 +47,9 @@ type TargetConfig struct {
 	Retry         RetryConfig
 	SignHMAC      *HMACSigningConfig
 	CustomHeaders []CustomHeader
+
+	IsExec  bool
+	ExecEnv map[string]string
 }
 
 type RouteConfig struct {
@@ -335,6 +338,7 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 
 	delivery := Delivery{
 		ID:            env.ID,
+		Route:         env.Route,
 		Target:        env.Target,
 		Method:        http.MethodPost,
 		URL:           target.URL,
@@ -342,6 +346,9 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 		Body:          env.Payload,
 		CustomHeaders: target.CustomHeaders,
 		Sign:          target.SignHMAC,
+		IsExec:        target.IsExec,
+		ExecEnv:       target.ExecEnv,
+		Attempt:       env.Attempt,
 	}
 
 	timeout := target.Timeout

@@ -8372,3 +8372,209 @@ pull_api { auth token "raw:t" }
 		})
 	}
 }
+
+// --- deliver exec tests ---
+
+func TestParseFormat_DeliverExecBlock(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/hooks/deploy" {
+  deliver exec "/opt/hooks/deploy.sh" {
+    timeout "30s"
+    retry exponential max 3 base 2s cap 1m jitter 0.2
+    env HOOK_SECRET "raw:s3cret"
+    env DEPLOY_ENV production
+  }
+}
+`)
+
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if len(cfg.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(cfg.Routes))
+	}
+	d := cfg.Routes[0].Deliveries[0]
+	if !d.IsExec {
+		t.Fatal("expected IsExec=true")
+	}
+	if d.URL != "/opt/hooks/deploy.sh" {
+		t.Fatalf("expected command path, got %q", d.URL)
+	}
+	if len(d.ExecEnv) != 2 {
+		t.Fatalf("expected 2 env vars, got %d", len(d.ExecEnv))
+	}
+	if d.ExecEnv[0].Key != "HOOK_SECRET" || d.ExecEnv[0].Value != "raw:s3cret" {
+		t.Fatalf("env[0]: got %q=%q", d.ExecEnv[0].Key, d.ExecEnv[0].Value)
+	}
+	if d.ExecEnv[1].Key != "DEPLOY_ENV" || d.ExecEnv[1].Value != "production" {
+		t.Fatalf("env[1]: got %q=%q", d.ExecEnv[1].Key, d.ExecEnv[1].Value)
+	}
+
+	out, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `deliver exec "/opt/hooks/deploy.sh" {`) {
+		t.Fatalf("expected deliver exec in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, `env HOOK_SECRET "raw:s3cret"`) {
+		t.Fatalf("expected env directive in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "env DEPLOY_ENV production") {
+		t.Fatalf("expected env directive in output, got:\n%s", got)
+	}
+}
+
+func TestCompile_DeliverExecRoute(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/hooks/deploy" {
+  deliver exec "/opt/hooks/deploy.sh" {
+    timeout 30s
+    retry exponential max 3 base 2s cap 1m jitter 0.2
+    env DEPLOY_ENV production
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile errors: %v", res.Errors)
+	}
+	if len(compiled.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(compiled.Routes))
+	}
+	d := compiled.Routes[0].Deliveries[0]
+	if !d.IsExec {
+		t.Fatal("expected IsExec=true")
+	}
+	if d.Command != "/opt/hooks/deploy.sh" {
+		t.Fatalf("expected command, got %q", d.Command)
+	}
+	if d.Timeout != 30*time.Second {
+		t.Fatalf("expected 30s timeout, got %s", d.Timeout)
+	}
+	if d.Retry.Max != 3 {
+		t.Fatalf("expected retry max 3, got %d", d.Retry.Max)
+	}
+	if d.ExecEnv["DEPLOY_ENV"] != "production" {
+		t.Fatalf("expected DEPLOY_ENV=production, got %q", d.ExecEnv["DEPLOY_ENV"])
+	}
+}
+
+func TestCompile_DeliverExecSignHMACError(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  deliver exec "/bin/handler" {
+    sign hmac "raw:secret"
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatal("expected compile error for exec + sign hmac")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "exec does not support sign") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected exec sign error, got: %v", res.Errors)
+	}
+}
+
+func TestCompile_DeliverExecEmptyCommand(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  deliver exec "" {}
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatal("expected compile error for empty exec command")
+	}
+}
+
+func TestCompile_DeliverExecEnvKeyValidation(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  deliver exec "/bin/handler" {
+    env "123BAD" value
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatal("expected compile error for invalid env key")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "must match") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected env key validation error, got: %v", res.Errors)
+	}
+}
+
+func TestCompile_DeliverHTTPWithEnvError(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  deliver "https://example.com/hook" {
+    env FOO bar
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatal("expected compile error for env on HTTP deliver")
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "env directive requires deliver exec") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected env-requires-exec error, got: %v", res.Errors)
+	}
+}

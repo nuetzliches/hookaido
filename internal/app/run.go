@@ -254,9 +254,17 @@ func run() int {
 			Deny:                mapEgressRules(compiled.Defaults.EgressPolicy.Deny),
 		}
 		client := tracingHTTPClient(compiled.Observability.TracingEnabled)
+		httpDeliverer := dispatcher.NewHTTPDeliverer(client, policy)
+		var deliverer dispatcher.Deliverer = httpDeliverer
+		if hasExecRoutes(compiled) {
+			deliverer = &dispatcher.MultiDeliverer{
+				HTTP: httpDeliverer,
+				Exec: &dispatcher.ExecDeliverer{Logger: runtimeLogger},
+			}
+		}
 		push := dispatcher.PushDispatcher{
 			Store:     store,
-			Deliverer: dispatcher.NewHTTPDeliverer(client, policy),
+			Deliverer: deliverer,
 			Routes:    routes,
 			Logger:    runtimeLogger,
 			ObserveAttempt: func(outcome queue.AttemptOutcome) {
@@ -2709,6 +2717,8 @@ func buildDispatchRoutes(compiled config.Compiled) []dispatcher.RouteConfig {
 					Jitter: d.Retry.Jitter,
 				},
 				SignHMAC: signing,
+				IsExec:  d.IsExec,
+				ExecEnv: d.ExecEnv,
 			})
 		}
 		routes = append(routes, dispatcher.RouteConfig{
@@ -2718,6 +2728,17 @@ func buildDispatchRoutes(compiled config.Compiled) []dispatcher.RouteConfig {
 		})
 	}
 	return routes
+}
+
+func hasExecRoutes(compiled config.Compiled) bool {
+	for _, rt := range compiled.Routes {
+		for _, d := range rt.Deliveries {
+			if d.IsExec {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func publishPolicyEqual(a, b config.PublishPolicyConfig) bool {

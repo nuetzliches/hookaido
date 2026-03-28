@@ -87,6 +87,12 @@ Per-route:
   - signing directives: `sign hmac <secret-ref>` or repeated `sign hmac secret_ref <ID>`, optional `sign signature_header <name>`, optional `sign timestamp_header <name>`, optional `sign secret_selection <newest_valid|oldest_valid>` (requires `sign hmac secret_ref ...`)
   - `sign signature_header` / `sign timestamp_header` require `sign hmac`
   - signing headers default to `X-Hookaido-Signature` and `X-Hookaido-Timestamp`; names must be valid header tokens and must differ
+- `deliver exec "<command>" { retry?, timeout?, env ... }` (exec mode; delivers by running a local subprocess)
+  - payload is piped to stdin; metadata passed as env vars (`HOOKAIDO_ROUTE`, `HOOKAIDO_EVENT_ID`, `HOOKAIDO_CONTENT_TYPE`, `HOOKAIDO_ATTEMPT`, `HOOKAIDO_HEADER_*`)
+  - `env <KEY> <VALUE>` passes additional environment variables (repeatable; key must match `[A-Za-z_][A-Za-z0-9_]*`)
+  - exit code 0 → success; exit 75 (EX_TEMPFAIL) → retriable; exit 1-125 → failure (retriable); signal kill → retriable; exit 126/127 or startup failure → not retriable (immediate DLQ)
+  - `sign` directives are not supported with `deliver exec` (compile error)
+  - cross-platform: uses `os/exec`, works on Linux, macOS, and Windows
 - `match @name` to attach a named matcher (see below)
 
 ### Channel Types

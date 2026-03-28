@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- `deliver exec` directive: deliver webhook payloads by executing a local subprocess. Payload on stdin, metadata as env vars (`HOOKAIDO_ROUTE`, `HOOKAIDO_EVENT_ID`, `HOOKAIDO_CONTENT_TYPE`, `HOOKAIDO_ATTEMPT`, `HOOKAIDO_HEADER_*`), user-defined `env` vars from config. Exit code mapping for retry/DLQ semantics. Cross-platform via `os/exec`.
+
 ## [2.0.1] - 2026-03-14
 
 ### Added

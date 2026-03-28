@@ -46,6 +46,9 @@ type TargetConfig struct {
 	Timeout  time.Duration
 	Retry    RetryConfig
 	SignHMAC *HMACSigningConfig
+
+	IsExec  bool
+	ExecEnv map[string]string
 }
 
 type RouteConfig struct {
@@ -333,13 +336,17 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 	}
 
 	delivery := Delivery{
-		ID:     env.ID,
-		Target: env.Target,
-		Method: http.MethodPost,
-		URL:    target.URL,
-		Header: header,
-		Body:   env.Payload,
-		Sign:   target.SignHMAC,
+		ID:      env.ID,
+		Route:   env.Route,
+		Target:  env.Target,
+		Method:  http.MethodPost,
+		URL:     target.URL,
+		Header:  header,
+		Body:    env.Payload,
+		Sign:    target.SignHMAC,
+		IsExec:  target.IsExec,
+		ExecEnv: target.ExecEnv,
+		Attempt: env.Attempt,
 	}
 
 	timeout := target.Timeout

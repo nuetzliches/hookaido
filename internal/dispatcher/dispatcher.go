@@ -7,12 +7,18 @@ import (
 
 type Delivery struct {
 	ID     string
+	Route  string
 	Target string
 	Method string
 	URL    string
 	Header http.Header
 	Body   []byte
 	Sign   *HMACSigningConfig
+
+	// Exec delivery fields.
+	IsExec  bool
+	ExecEnv map[string]string
+	Attempt int
 }
 
 type Result struct {

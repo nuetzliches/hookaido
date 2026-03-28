@@ -2673,6 +2673,15 @@ func (p *parser) parseRouteBlock() (Route, error) {
 			}
 			route.Pull = pull
 		case "deliver":
+			// Check if next token is the exec keyword (unquoted).
+			nextTok, err := p.peek()
+			if err != nil {
+				return Route{}, err
+			}
+			isExec := nextTok.kind == tokIdent && nextTok.text == "exec"
+			if isExec {
+				_, _ = p.next() // consume "exec"
+			}
 			url, quoted, err := p.parseValue()
 			if err != nil {
 				return Route{}, err
@@ -2683,6 +2692,7 @@ func (p *parser) parseRouteBlock() (Route, error) {
 			}
 			deliver.URL = url
 			deliver.URLQuoted = quoted
+			deliver.IsExec = isExec
 			route.Deliveries = append(route.Deliveries, *deliver)
 		case "max_body":
 			if route.MaxBodySet {
@@ -3464,6 +3474,20 @@ func (p *parser) parseDeliverBlock() (*Deliver, error) {
 			default:
 				return nil, p.errAt(typTok.pos, "unknown deliver sign type %q", typTok.text)
 			}
+		case "env":
+			key, _, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			val, valQuoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.ExecEnv = append(out.ExecEnv, ExecEnvVar{
+				Key:         key,
+				Value:       val,
+				ValueQuoted: valQuoted,
+			})
 		default:
 			return nil, p.errAt(dirTok.pos, "unknown deliver directive %q", dirTok.text)
 		}
@@ -3550,7 +3574,7 @@ func (p *parser) parseRetryDirective() (*RetryBlock, error) {
 
 func isDeliverDirective(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "retry", "timeout", "sign":
+	case "retry", "timeout", "sign", "env":
 		return true
 	default:
 		return false

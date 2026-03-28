@@ -120,6 +120,35 @@ String-to-sign: `METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + hex(sha256(bod
 
 Verification tries all secrets valid at the request timestamp (from the timestamp header), not just wall-clock time. This allows safe key rotation with overlapping validity windows.
 
+**Provider mode** (GitHub, Gitea/Forgejo):
+
+For webhook providers with their own signature format, use provider mode. This verifies the provider's native signature without timestamp/nonce replay protection:
+
+```hcl
+/webhooks/github {
+  auth hmac {
+    provider github
+    secret env:GITHUB_WEBHOOK_SECRET
+  }
+  pull { path /pull/github }
+}
+
+/webhooks/gitea {
+  auth hmac {
+    provider gitea
+    secret env:GITEA_WEBHOOK_SECRET
+  }
+  pull { path /pull/gitea }
+}
+```
+
+| Provider | Signature Header | Format | Notes |
+|---|---|---|---|
+| `github` | `X-Hub-Signature-256` | `sha256=<hex>` | SHA-256 HMAC of raw body |
+| `gitea` | `X-Gitea-Signature` | `<hex>` | SHA-256 HMAC of raw body |
+
+When `provider` is set, `signature_header`, `timestamp_header`, `nonce_header`, and `tolerance` are forbidden (compile error). Replay protection is not applied.
+
 ### Basic Auth
 
 ```hcl

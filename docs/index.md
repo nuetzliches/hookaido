@@ -30,6 +30,11 @@ Use <span class="hk-kbd">Ctrl</span> + <span class="hk-kbd">K</span> to open sea
     <p><a href="delivery/">Delivery reference</a></p>
   </div>
   <div class="hk-card">
+    <h3>Run Exec Mode</h3>
+    <p>Execute local scripts with webhook payload on stdin. No HTTP server needed.</p>
+    <p><a href="delivery/#subprocess-execution-deliver-exec">Exec delivery reference</a></p>
+  </div>
+  <div class="hk-card">
     <h3>Operate the Queue</h3>
     <p>Inspect health, DLQ, and backlog trends from the Admin API.</p>
     <p><a href="admin-api/">Admin API reference</a></p>

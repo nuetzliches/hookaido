@@ -56,6 +56,7 @@ nav:
       - Getting Started: getting-started.md
       - Deployment Modes: deployment-modes.md
       - Docker: docker.md
+      - Recipes: recipes.md
   - Runtime:
       - Configuration: configuration.md
       - Ingress: ingress.md

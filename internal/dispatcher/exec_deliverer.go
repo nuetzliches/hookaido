@@ -98,8 +98,8 @@ func (e *ExecDeliverer) Deliver(ctx context.Context, d Delivery) Result {
 			return Result{StatusCode: 502, Err: fmt.Errorf("exec killed by signal: %w", err)}
 		}
 
-		switch {
-		case code == 75:
+		switch code {
+		case 75:
 			// EX_TEMPFAIL from sysexits.h → retriable.
 			return Result{StatusCode: 503, Err: fmt.Errorf("exec exit %d: %w", code, err)}
 		default:

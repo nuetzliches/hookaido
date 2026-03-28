@@ -857,6 +857,9 @@ func writeDeliverBlock(b *bytes.Buffer, d Deliver) {
 	if d.TimeoutSet {
 		fmt.Fprintf(b, "    timeout %s\n", formatValue(d.Timeout, d.TimeoutQuoted))
 	}
+	for _, h := range d.Headers {
+		fmt.Fprintf(b, "    header %s %s\n", formatValue(h.Name, h.NameQuoted), formatValue(h.Value, h.ValueQuoted))
+	}
 	if len(d.SignHMACSecretRefs) > 0 {
 		for i, ref := range d.SignHMACSecretRefs {
 			quoted := false
@@ -981,11 +984,14 @@ func shouldWriteRouteAuthForwardBlock(b ForwardAuthBlock) bool {
 }
 
 func hasRouteAuthHMACOptions(r Route) bool {
-	return r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet || r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet
+	return r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet || r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet || r.AuthHMACProviderSet
 }
 
 func writeRouteAuthHMACBlock(b *bytes.Buffer, r Route) {
 	b.WriteString("  auth hmac {\n")
+	if r.AuthHMACProviderSet {
+		fmt.Fprintf(b, "    provider %s\n", formatValue(r.AuthHMACProvider, r.AuthHMACProviderQuoted))
+	}
 	for i, s := range r.AuthHMACSecrets {
 		if strings.TrimSpace(s) == "" {
 			continue

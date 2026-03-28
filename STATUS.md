@@ -1,15 +1,15 @@
 # Development Status
 
-Last updated: 2026-03-14
-Current release: v2.0.1
+Last updated: 2026-03-25
+Current release: v2.1.0
 
 Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change history: `CHANGELOG.md`. Prioritized work items: `BACKLOG.md`.
 
 ## Capabilities Overview
 
-**Ingress & Routing** - HTTP ingress with optional TLS/mTLS, HMAC signature verification (replay protection, secret rotation), Basic auth, forward auth callouts, and per-route/global rate limiting. Route matching supports path, method, host (wildcards), headers, query params, remote IP (CIDR), and named matchers. Channel types (`inbound`/`outbound`/`internal`) enforce directive constraints at compile time.
+**Ingress & Routing** - HTTP ingress with optional TLS/mTLS, HMAC signature verification (replay protection, secret rotation, provider-compatible formats for GitHub/Gitea/Forgejo), Basic auth, forward auth callouts, and per-route/global rate limiting. Route matching supports path, method, host (wildcards), headers, query params, remote IP (CIDR), and named matchers. Channel types (`inbound`/`outbound`/`internal`) enforce directive constraints at compile time.
 
-**Queue & Delivery** - SQLite/WAL and PostgreSQL durable queue backends (in-memory available for dev/tests) with lease semantics, long-poll dequeue, dead-lettering, and queue limits/retention/pruning. Push dispatcher with retry/backoff, per-route concurrency, and optional outbound HMAC signing (multi-secret rotation). Pull API (HTTP/JSON) with bearer-token auth, dequeue limits, and per-route token overrides. Optional Worker API (gRPC) mirrors Pull lease operations (`dequeue`, `ack`, `nack`, `extend`) and is intentionally scoped to pull-worker transport only.
+**Queue & Delivery** - SQLite/WAL and PostgreSQL durable queue backends (in-memory available for dev/tests) with lease semantics, long-poll dequeue, dead-lettering, and queue limits/retention/pruning. Push dispatcher with retry/backoff, per-route concurrency, custom outbound headers, and optional outbound HMAC signing (multi-secret rotation). Pull API (HTTP/JSON) with bearer-token auth, dequeue limits, and per-route token overrides. Optional Worker API (gRPC) mirrors Pull lease operations (`dequeue`, `ack`, `nack`, `extend`) and is intentionally scoped to pull-worker transport only.
 
 **Admin API** - Full queue lifecycle: DLQ management, message publish/cancel/requeue/resume (by ID and by filter), backlog drill-down (top queued, oldest, aging summary, trends with operator-action playbooks). Management model projection and endpoint mapping lifecycle with config-source-of-truth mutations. Structured JSON errors, audit headers, and publish-policy enforcement throughout.
 

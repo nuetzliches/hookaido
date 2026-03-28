@@ -75,7 +75,8 @@ Per-route:
 - `rate_limit { rps, burst? }` (optional; per-route ingress rate limit override)
 - `auth ...` (`basic`, `hmac`, `forward`)
   - HMAC shorthand: `auth hmac "env:HOOKAIDO_INGRESS_SECRET"` or `auth hmac secret_ref "S1"` (optional inline options block after shorthand, e.g. `auth hmac secret_ref "S1" { signature_header ... timestamp_header ... nonce_header ... tolerance ... }`)
-  - HMAC block (richer): `auth hmac { secret ... | secret_ref ... ; signature_header ... ; timestamp_header ... ; nonce_header ... ; tolerance ... }` (`signature_header`/`timestamp_header`/`nonce_header` must be distinct after defaults are applied)
+  - HMAC block (richer): `auth hmac { secret ... | secret_ref ... ; signature_header ... ; timestamp_header ... ; nonce_header ... ; tolerance ... ; provider ... }` (`signature_header`/`timestamp_header`/`nonce_header` must be distinct after defaults are applied)
+  - HMAC provider mode: `auth hmac { provider github; secret env:SECRET }` — uses provider-specific signature format instead of canonical Hookaido format; supported providers: `github` (`X-Hub-Signature-256`, `sha256=hex(HMAC-SHA256(secret, body))`), `gitea` (`X-Gitea-Signature`, `hex(HMAC-SHA256(secret, body))`); `provider` is mutually exclusive with `signature_header`, `timestamp_header`, `nonce_header`, `tolerance`
   - Forward shorthand: `auth forward "https://auth.example/check"`
   - Forward block (optional): `auth forward "https://auth.example/check" { timeout ... ; copy_headers ... ; body_limit ... }`
 - `publish on|off` (optional; defaults `on`; when `off`, Admin/MCP publish mutations reject this route)
@@ -83,7 +84,8 @@ Per-route:
 - `publish.managed on|off` (optional; defaults `on`; when `off`, endpoint-scoped managed publish path rejects this route)
 - `queue "sqlite|memory|postgres"` shorthand or block `queue { backend "sqlite|memory|postgres" }` (defaults to SQLite; runtime currently uses one backend process-wide, so mixed route backends are rejected)
 - `pull { path, auth? }` (pull mode; excludes `deliver`)
-- `deliver "https://..." { retry?, timeout?, sign ... }` (push mode; optional)
+- `deliver "https://..." { retry?, timeout?, header?, sign ... }` (push mode; optional)
+  - `header "Name" "Value"` — static or placeholder-interpolated custom headers on outbound requests (e.g. `header "Authorization" "token {env.FORGEJO_TOKEN}"`); names must be valid HTTP tokens; duplicates (case-insensitive) rejected at compile time; headers are set before HMAC signing
   - signing directives: `sign hmac <secret-ref>` or repeated `sign hmac secret_ref <ID>`, optional `sign signature_header <name>`, optional `sign timestamp_header <name>`, optional `sign secret_selection <newest_valid|oldest_valid>` (requires `sign hmac secret_ref ...`)
   - `sign signature_header` / `sign timestamp_header` require `sign hmac`
   - signing headers default to `X-Hookaido-Signature` and `X-Hookaido-Timestamp`; names must be valid header tokens and must differ

@@ -10,6 +10,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ### Added
 
 - `deliver exec` directive: deliver webhook payloads by executing a local subprocess. Payload on stdin, metadata as env vars (`HOOKAIDO_ROUTE`, `HOOKAIDO_EVENT_ID`, `HOOKAIDO_CONTENT_TYPE`, `HOOKAIDO_ATTEMPT`, `HOOKAIDO_HEADER_*`), user-defined `env` vars from config. Exit code mapping for retry/DLQ semantics. Cross-platform via `os/exec`.
+- Docker entrypoint volume ownership fix: container starts as root, `chown`s `/app/.data` to `hookaido` (UID 1000), then drops privileges via `su-exec`. Prevents `SQLITE_CANTOPEN` on first start with Docker volumes. Rootless-compatible (skips `chown` when run with `--user`).
+- Delivery docs: "Custom Outbound Headers" section documenting `header "Name" "Value"` syntax, placeholder interpolation, and validation rules. Docker/private-network `dns_rebind_protection` note added to Egress Policy section.
+
+### Changed
+
+- CI workflow version comments updated for precision across all pinned actions (`softprops/action-gh-release` v2.6.1, `golangci/golangci-lint-action` v9.2.0, `actions/upload-artifact` v7.0.0, `dependabot/fetch-metadata` v2.5.0, `actions/deploy-pages` v4.0.5).
+
+## [2.1.0] - 2026-03-25
+
+### Added
+
+- Provider-compatible HMAC verification: `auth hmac { provider github; secret env:SECRET }` and `auth hmac { provider gitea; secret env:SECRET }` for GitHub (`X-Hub-Signature-256`) and Gitea/Forgejo (`X-Gitea-Signature`) webhook signature formats without timestamp/nonce replay protection.
+- Custom outbound headers in deliver blocks: `header "Name" "Value"` with placeholder interpolation (`{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`); case-insensitive duplicate detection at compile time.
+- WorkerAPI gRPC transport edge-case test coverage: 14 new tests (57 sub-tests) covering nil requests, blank endpoints, Pull-nil guards, lease ID normalization, error mapping, route resolution fallback, nack-dead, nack-batch, and large-batch dequeue.
 
 ## [2.0.1] - 2026-03-14
 

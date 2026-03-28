@@ -24,6 +24,7 @@ type HMACAuth struct {
 	TimestampHeader string
 	NonceHeader     string
 	Tolerance       time.Duration
+	Provider        string // "github", "gitea", or "" (canonical)
 
 	Now func() time.Time
 
@@ -54,6 +55,9 @@ func NewHMACAuth(secrets [][]byte) *HMACAuth {
 func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) error {
 	if a == nil {
 		return nil
+	}
+	if a.Provider != "" {
+		return a.verifyProvider(r, body)
 	}
 	if len(a.Secrets) == 0 && a.SelectSecrets == nil {
 		return nil
@@ -135,6 +139,85 @@ func cloneByteSlices(in [][]byte) [][]byte {
 		out = append(out, cp)
 	}
 	return out
+}
+
+// allSecrets returns static secrets combined with SelectSecrets at the given time.
+func (a *HMACAuth) allSecrets(at time.Time) [][]byte {
+	var out [][]byte
+	if a.SelectSecrets != nil {
+		out = append(out, a.SelectSecrets(at)...)
+	}
+	out = append(out, a.Secrets...)
+	return out
+}
+
+func (a *HMACAuth) verifyProvider(r *http.Request, body []byte) error {
+	now := time.Now
+	if a.Now != nil {
+		now = a.Now
+	}
+	secrets := a.allSecrets(now())
+	if len(secrets) == 0 {
+		return ErrUnauthorized
+	}
+
+	switch a.Provider {
+	case "github":
+		return a.verifyGitHub(r, body, secrets)
+	case "gitea":
+		return a.verifyGitea(r, body, secrets)
+	default:
+		return ErrUnauthorized
+	}
+}
+
+func (a *HMACAuth) verifyGitHub(r *http.Request, body []byte, secrets [][]byte) error {
+	sigHeader := strings.TrimSpace(r.Header.Get("X-Hub-Signature-256"))
+	if sigHeader == "" {
+		return ErrUnauthorized
+	}
+	if !strings.HasPrefix(sigHeader, "sha256=") {
+		return ErrUnauthorized
+	}
+	gotSig, err := hex.DecodeString(sigHeader[len("sha256="):])
+	if err != nil || len(gotSig) == 0 {
+		return ErrUnauthorized
+	}
+	for _, secret := range secrets {
+		if len(secret) == 0 {
+			continue
+		}
+		mac := hmac.New(sha256.New, secret)
+		_, _ = mac.Write(body)
+		want := mac.Sum(nil)
+		if hmac.Equal(gotSig, want) {
+			return nil
+		}
+	}
+	return ErrUnauthorized
+}
+
+func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) error {
+	sigHeader := strings.TrimSpace(r.Header.Get("X-Gitea-Signature"))
+	if sigHeader == "" {
+		return ErrUnauthorized
+	}
+	gotSig, err := hex.DecodeString(sigHeader)
+	if err != nil || len(gotSig) == 0 {
+		return ErrUnauthorized
+	}
+	for _, secret := range secrets {
+		if len(secret) == 0 {
+			continue
+		}
+		mac := hmac.New(sha256.New, secret)
+		_, _ = mac.Write(body)
+		want := mac.Sum(nil)
+		if hmac.Equal(gotSig, want) {
+			return nil
+		}
+	}
+	return ErrUnauthorized
 }
 
 type nonceCache struct {

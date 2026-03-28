@@ -67,6 +67,9 @@ func (d *HTTPDeliverer) Deliver(ctx context.Context, delivery Delivery) Result {
 			req.Header.Add(k, vv)
 		}
 	}
+	for _, h := range delivery.CustomHeaders {
+		req.Header.Set(h.Name, h.Value)
+	}
 	if err := d.applyDeliverySigning(req, delivery); err != nil {
 		return Result{Err: err}
 	}

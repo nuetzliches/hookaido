@@ -457,6 +457,22 @@ auth hmac {
 }
 ```
 
+**HMAC** (provider mode — GitHub, Gitea/Forgejo):
+
+```hcl
+auth hmac {
+  provider github
+  secret env:GITHUB_WEBHOOK_SECRET
+}
+
+auth hmac {
+  provider gitea
+  secret env:GITEA_WEBHOOK_SECRET
+}
+```
+
+Provider mode uses the provider's native signature format (`X-Hub-Signature-256` for GitHub, `X-Gitea-Signature` for Gitea) without timestamp/nonce replay protection. `signature_header`, `timestamp_header`, `nonce_header`, and `tolerance` are forbidden in provider mode.
+
 **Basic auth:**
 
 ```hcl
@@ -507,6 +523,45 @@ Per-route concurrency can override the global default:
 ```
 
 `deliver_concurrency` is enforced as a shared per-route budget across all route targets.
+
+### Exec Blocks (Subprocess Delivery)
+
+Deliver webhooks by executing a local command. The payload is piped to stdin; metadata is passed as environment variables.
+
+```hcl
+deliver exec "/opt/hooks/deploy.sh" {
+  timeout 30s
+  retry exponential max 3 base 500ms cap 30s jitter 0.1
+
+  env DEPLOY_ENV production
+  env API_KEY {env.HANDLER_API_KEY}
+}
+```
+
+**Metadata environment variables** (always set):
+
+| Variable | Description |
+|---|---|
+| `HOOKAIDO_ROUTE` | Route path (e.g., `/webhooks/github`) |
+| `HOOKAIDO_EVENT_ID` | Message UUID |
+| `HOOKAIDO_CONTENT_TYPE` | Content-Type header from inbound request |
+| `HOOKAIDO_ATTEMPT` | Retry attempt number (1-indexed) |
+| `HOOKAIDO_HEADER_*` | Inbound headers (e.g., `HOOKAIDO_HEADER_X_GITHUB_EVENT`) |
+| `PATH` | Inherited from host for command resolution |
+
+**Exit code semantics:**
+
+| Exit Code | Behaviour |
+|---|---|
+| `0` | Success — message is acked |
+| `75` | Temporary failure (EX_TEMPFAIL) — retriable |
+| `1-125` | General failure — retriable with backoff |
+| `126`, `127` | Command not found / not executable — immediate DLQ |
+| Signal | Process killed — retriable |
+
+Custom `env` values support all placeholder syntaxes (`{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`).
+
+`sign` directives are **not supported** with exec blocks (compile error). Cross-platform via `os/exec` (Linux, macOS, Windows).
 
 ## Placeholders
 

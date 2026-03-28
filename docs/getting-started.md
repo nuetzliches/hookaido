@@ -159,6 +159,43 @@ In push mode, Hookaido delivers webhooks directly to your internal endpoints:
 
 No Pull API is needed — Hookaido handles retry, backoff, and (optional) outbound signing. See [Delivery (Push)](delivery.md) for details.
 
+## Minimal Exec-Mode Setup
+
+Exec mode runs a local script for each webhook — no HTTP server needed on the receiving end:
+
+```hcl
+/webhooks/github {
+  auth hmac {
+    provider github
+    secret env:GITHUB_WEBHOOK_SECRET
+  }
+
+  deliver exec "./handle-webhook.sh" {
+    timeout 30s
+  }
+}
+```
+
+Create a handler script:
+
+```bash
+#!/usr/bin/env bash
+# handle-webhook.sh — payload arrives on stdin
+PAYLOAD=$(cat)
+echo "Received: $(echo "$PAYLOAD" | jq -r '.action // .ref')" >&2
+# Exit 0 = ack, non-zero = retry
+```
+
+Start Hookaido:
+
+```bash
+export GITHUB_WEBHOOK_SECRET="your-github-secret"
+chmod +x handle-webhook.sh
+./hookaido run --config ./Hookaidofile --db ./.data/hookaido.db
+```
+
+The script runs once per webhook event. Exit code `0` acknowledges the message; any other exit code triggers a retry. See [Subprocess Execution](delivery.md#subprocess-execution-deliver-exec) for exit code details and environment variables.
+
 ## Validate Your Config
 
 Before starting:

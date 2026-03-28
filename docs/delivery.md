@@ -146,6 +146,60 @@ Available placeholders: `{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`.
 - Duplicate header names (case-insensitive) are rejected at compile time.
 - Headers are set on outbound requests **before** HMAC signing — they do not affect the signature.
 
+## Subprocess Execution (`deliver exec`)
+
+Deliver webhooks by executing a local command instead of making HTTP requests. The payload is piped to the subprocess's stdin as raw bytes.
+
+```hcl
+/webhooks/github {
+  auth hmac { provider github; secret env:GITHUB_SECRET }
+  deliver exec "/opt/hooks/deploy.sh" {
+    timeout 30s
+    retry exponential max 3 base 1s cap 1m jitter 0.1
+    env DEPLOY_ENV production
+  }
+}
+```
+
+### Payload and Metadata
+
+| Variable | Description |
+|---|---|
+| `HOOKAIDO_ROUTE` | Route path (e.g., `/webhooks/github`) |
+| `HOOKAIDO_EVENT_ID` | Message UUID |
+| `HOOKAIDO_CONTENT_TYPE` | Content-Type from inbound request |
+| `HOOKAIDO_ATTEMPT` | Retry attempt number (1-indexed) |
+| `HOOKAIDO_HEADER_*` | Inbound headers (e.g., `HOOKAIDO_HEADER_X_GITHUB_EVENT` for `X-GitHub-Event`) |
+| `PATH` | Inherited from host environment |
+
+Custom environment variables via `env <KEY> <VALUE>` (repeatable, supports placeholders):
+
+```hcl
+deliver exec "python /app/handler.py" {
+  env API_ENDPOINT {env.INTERNAL_API_URL}
+  env BATCH_SIZE "100"
+}
+```
+
+### Exit Code Semantics
+
+| Exit Code | Behaviour |
+|---|---|
+| `0` | Success — message is acked |
+| `75` | Temporary failure (EX_TEMPFAIL) — retriable |
+| `1-125` | General failure — retriable with backoff |
+| `126`, `127` | Command not found / not executable — non-retriable, immediate DLQ |
+| Signal | Process killed by signal — retriable |
+| Timeout | Context deadline exceeded — retriable |
+
+### Constraints
+
+- `sign` directives are **not supported** with exec (compile error).
+- Timeout is enforced via context cancellation; the process receives `SIGKILL` on expiry.
+- `deliver_concurrency` applies to exec delivery the same as HTTP delivery.
+- Dead-lettering follows the same rules as HTTP push (max retries exhausted, non-retryable errors).
+- Stderr output is captured and logged (truncated to 4 KB) at debug level.
+
 ## Dead-Lettering
 
 Messages are moved to the DLQ when:

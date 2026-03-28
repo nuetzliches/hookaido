@@ -2,20 +2,15 @@
 
 [![CI](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/ci.yml)
 [![Release](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/release.yml)
-[![Container CI](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/container.yml)
-[![Dependency Health](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml/badge.svg)](https://github.com/nuetzliches/hookaido/actions/workflows/dependency-health.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/nuetzliches/hookaido.svg)](https://pkg.go.dev/github.com/nuetzliches/hookaido)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nuetzliches/hookaido/badge)](https://scorecard.dev/viewer/?uri=github.com/nuetzliches/hookaido)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11921/badge)](https://www.bestpractices.dev/projects/11921)
+[![Container](https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/nuetzliches/hookaido/pkgs/container/hookaido)
 [![License](https://img.shields.io/github/license/nuetzliches/hookaido)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/nuetzliches/hookaido?include_prereleases&sort=semver)](https://github.com/nuetzliches/hookaido/releases)
-[![Container](https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/nuetzliches/hookaido/pkgs/container/hookaido)
-
-Docs: https://nuetzliches.github.io/hookaido/
 
 **Webhook infrastructure that just works.** Single binary. Zero runtime dependencies. Production-ready defaults.
 
 Hookaido receives webhooks at the edge, queues them durably, and delivers them to your services — with retries, dead-letter queues, and cryptographic verification built in. Think of it as Caddy for webhooks: a compact config file, sensible defaults, and instant reloads.
+
+Docs: https://nuetzliches.github.io/hookaido/
 
 ---
 
@@ -29,19 +24,34 @@ Hookaido receives webhooks at the edge, queues them durably, and delivers them t
 | Complex multi-service deployment                            | Single binary, one config file, `go build` and run                           |
 | Webhook signature verification is error-prone               | Built-in HMAC-SHA256 verification with replay protection and secret rotation |
 
+## Who Is It For?
+
+- **SaaS integrators** receiving webhooks from GitHub, Stripe, Shopify, or any HTTP callback provider
+- **Platform engineers** building DMZ-safe webhook ingestion without opening inbound firewall rules
+- **DevOps teams** triggering local deploy scripts, CI jobs, or automation from webhook events
+- **Event-driven architectures** that need a durable queue as lightweight middleware between producers and consumers
+
 ## Key Features
 
+### Core
+
 - **Durable queue** — SQLite/WAL or PostgreSQL persistence with at-least-once delivery. In-memory mode for development.
-- **gRPC Worker API** — Lease-based pull transport for internal workers (`dequeue`, `ack`, `nack`, `extend`).
-- **Pull & push modes** — Pull API for DMZ-safe consumption, push dispatcher with concurrency control.
+- **Pull, push & exec** — Pull API for DMZ-safe consumption, push dispatcher with concurrency control, subprocess execution for local scripts.
 - **Hot reload** — Change config, send `SIGHUP` or use `--watch`. No restarts for most changes.
-- **Ingress security** — HMAC signature verification, Basic auth, forward auth callouts, rate limiting.
-- **Outbound signing** — HMAC-SHA256 on push delivery with multi-secret rotation windows.
+- **Channel types** — `inbound` (edge webhooks), `outbound` (API-published queues), `internal` (job queues).
+
+### Security
+
+- **Ingress auth** — HMAC signature verification with replay protection, Basic auth, forward auth callouts, rate limiting. Provider-compatible mode for GitHub and Gitea/Forgejo webhooks.
+- **Outbound signing** — HMAC-SHA256 on push delivery with multi-secret rotation windows and custom outbound headers.
+- **Secret management** — Env vars, files, Vault refs, and raw literals. Placeholder interpolation keeps secrets out of config.
+
+### Operations
+
 - **Dead-letter queue** — Failed messages land in the DLQ with full attempt history. Requeue or inspect via API.
 - **Admin API** — Health checks, queue inspection, backlog trends, publish/cancel/requeue operations.
 - **Observability** — Structured JSON logs, Prometheus metrics, OpenTelemetry tracing (OTLP).
-- **AI-ready** — Built-in MCP server for AI tooling integration (config inspection, queue diagnostics, mutations).
-- **Channel types** — `inbound` (edge webhooks), `outbound` (API→queue→push), `internal` (job queues).
+- **MCP server** — AI tooling integration with role-gated config inspection, queue diagnostics, and mutations.
 - **VS Code extension** — Syntax highlighting and snippets for Hookaidofile (`editors/vscode/`).
 
 ## Quick Start
@@ -109,20 +119,14 @@ pull_api {
 }
 ```
 
-**Outbound queue (no ingress, API-published):**
+**Deliver via subprocess (no HTTP server needed):**
 
 ```hcl
-outbound /jobs/deploy {
-  deliver "https://ci.internal/deploy" { timeout 10s }
-}
-```
-
-**Internal job queue (pull-only, no ingress):**
-
-```hcl
-internal {
-  /jobs/cleanup {
-    pull { path /pull/cleanup }
+/webhooks/github {
+  auth hmac { provider github; secret env:GITHUB_SECRET }
+  deliver exec "/opt/hooks/deploy.sh" {
+    timeout 30s
+    env DEPLOY_ENV production
   }
 }
 ```
@@ -130,7 +134,7 @@ internal {
 Placeholders keep secrets out of config: `{$VAR}`, `{env.VAR}`, `{file./run/secrets/key}`, `{vars.NAME}`.
 Secret refs for auth/signing support `env:`, `file:`, `vault:`, and `raw:` schemes.
 
-Full DSL reference → [DESIGN.md](DESIGN.md)
+Full DSL reference and more examples: [DESIGN.md](DESIGN.md) | [Recipes](docs/recipes.md)
 
 ## Architecture
 
@@ -206,28 +210,16 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 - Docker: use the official image `ghcr.io/nuetzliches/hookaido` (or build locally), see [Docker quickstart](docs/docker.md)
 - No external runtime dependencies
 
-## Maintainer Notes
-
-- OpenSSF Scorecard runs with `GITHUB_TOKEN` by default.
-- OpenSSF Best Practices badge page: <https://www.bestpractices.dev/projects/11921>.
-- If the repository uses **classic branch protection rules**, add a repository secret `SCORECARD_TOKEN` (fine-grained PAT with `Administration: Read-only`) so the `Branch-Protection` check can be evaluated fully.
-
 ## Documentation
 
-| Document                         | Purpose                                                                      |
-| -------------------------------- | ---------------------------------------------------------------------------- |
-| [docs/](docs/index.md)           | User-facing documentation (getting started, configuration, APIs, deployment) |
-| [docs/docker.md](docs/docker.md) | Docker / Docker Compose quickstart                                           |
-| [docs/ossf-best-practices.md](docs/ossf-best-practices.md) | OpenSSF badge maintenance notes (portal is status SoT) |
-| [DESIGN.md](DESIGN.md)           | Canonical DSL and API specification                                          |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and expectations                                      |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community conduct expectations                                       |
-| [SECURITY.md](SECURITY.md)       | Vulnerability reporting and security response policy                         |
-| [SUPPORT.md](SUPPORT.md)         | Support channels and issue quality guidance                                  |
-| [GOVERNANCE.md](GOVERNANCE.md)   | Maintainer roles and decision process                                        |
-| [CHANGELOG.md](CHANGELOG.md)     | User-visible changes                                                         |
-| [STATUS.md](STATUS.md)           | Development progress snapshot                                                |
-| [BACKLOG.md](BACKLOG.md)         | Prioritized work items                                                       |
+| Document                           | Purpose                                                                      |
+| ---------------------------------- | ---------------------------------------------------------------------------- |
+| [docs/](docs/index.md)            | User-facing documentation (getting started, configuration, APIs, deployment) |
+| [DESIGN.md](DESIGN.md)            | Canonical DSL and API specification                                          |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow, development setup, and maintainer notes               |
+| [CHANGELOG.md](CHANGELOG.md)      | User-visible changes per release                                             |
+| [SECURITY.md](SECURITY.md)        | Vulnerability reporting and security response policy                         |
+| [SUPPORT.md](SUPPORT.md)          | Support channels and issue quality guidance                                  |
 
 ## License
 

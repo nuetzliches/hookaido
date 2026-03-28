@@ -4,41 +4,17 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority
 
-- [x] **~~Entrypoint volume ownership fix~~** — Moved to Completed.
-- [x] **~~Document `header` directive in delivery docs~~** — Moved to Completed.
+_No open items._
 
-- [x] **~~Remove or integrate internal/router~~** — Moved to Completed.
-- [x] **~~Improve workerapi test coverage~~** — Moved to Completed.
-- [x] **~~Provider-compatible HMAC verification~~** — Moved to Completed.
-- [x] **~~Custom outbound headers in deliver blocks~~** — Moved to Completed.
-- [x] **~~Mixed-workload tail latency playbook~~** — Moved to Completed.
-- [x] **~~Drain fairness under saturation~~** — Moved to Completed.
-- [x] **~~Adaptive backpressure production tuning guide~~** — Moved to Completed.
-- [x] **~~Management model runtime wiring~~** — Moved to Completed.
-- [x] **~~Config `validate --format json`~~** — Moved to Completed.
-- [x] **~~Egress policy enforcement~~** — Moved to Completed.
-- [x] **~~Admin API integration tests~~** — Moved to Completed.
-- [x] **~~MCP Admin-proxy mode tests~~** — Moved to Completed.
-- [x] **~~Attestation bundle validation~~** — Moved to Completed.
+## P2 - Nice to Have
 
-## P2 - Nice to Have (v2.0+)
-
-- [x] **~~CI: Node.js 24 Actions audit~~** — Moved to Completed.
 - [ ] **xhookaido build tool** — CLI tool for building custom Hookaido binaries with selected modules (like xcaddy). Deferred until module system is stable.
-- [x] **~~Vault secret adapter~~** — Moved to Completed.
-- [x] **~~Full code review and polish pass~~** — Moved to Completed.
-- [x] **~~Documentation UX refresh~~** — Moved to Completed.
-- [x] **~~Scorecard: fuzzing baseline~~** — Moved to Completed.
-- [x] **~~Scorecard: API visibility/auth follow-up~~** — Moved to Completed.
-- [x] **~~CII Best Practices badge~~** — Moved to Completed.
-- [x] **~~Config `diff` CLI command~~** — Moved to Completed.
-- [x] **~~VS Code Extension (Hookaidofile)~~** — Moved to Completed. _Optional: LSP backed by `config validate`/`config compile` for live diagnostics._
-- [x] **~~Graceful shutdown draining~~** — Moved to Completed.
-- [x] **~~Shared listener mode~~** — Moved to Completed.
-- [x] **~~Windows CI~~** — Moved to Completed.
+- [ ] **VS Code LSP** — Language server backed by `config validate`/`config compile` for live diagnostics in the editor. Optional follow-up to the VS Code extension.
 
 ## Completed (move here when done)
 
+- [x] **Deliver exec (subprocess delivery)** — `deliver exec "<command>" { ... }` directive for local script execution. Payload piped to stdin, metadata as env vars (`HOOKAIDO_ROUTE`, `HOOKAIDO_EVENT_ID`, `HOOKAIDO_ATTEMPT`, etc.), exit-code retry semantics (0=ack, 75/1-125=retry, 126/127=DLQ). Cross-platform via `os/exec`. Custom env vars with placeholder interpolation. 11 tests.
+- [x] **Documentation modernization (v2.1.0)** — README marketing rewrite (grouped features, use-cases section, reduced badges/examples). New `docs/recipes.md` with 4 practical patterns (GitHub→Deploy, Stripe→Billing, Multi-Provider Fan-Out, CI/CD Job Queue). Documented `deliver exec`, provider-compatible HMAC, and custom outbound headers across configuration.md, delivery.md, ingress.md, getting-started.md, and Hookaidofile. Exec card added to docs index. Maintainer notes moved to CONTRIBUTING.md.
 - [x] **Entrypoint volume ownership fix** — Added `docker-entrypoint.sh` with root→chown→`su-exec` privilege drop pattern. Dockerfile updated: `su-exec` installed, UID pinned to 1000, `USER` removed, entrypoint wired. Rootless-compatible (skips chown when not root). Docker docs updated.
 - [x] **Document `header` directive in delivery docs** — Added "Custom Outbound Headers" section to `docs/delivery.md` with syntax, placeholder support (`{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`), and validation rules (HTTP token, case-insensitive dedup, pre-signing). Added Docker/private-network `dns_rebind_protection` note to Egress Policy section.
 - [x] **CI: Node.js 24 Actions audit** — Audited all 8 workflows. Pinned version comments updated for precision (`softprops/action-gh-release` v2.6.1, `golangci/golangci-lint-action` v9.2.0, `actions/upload-artifact` v7.0.0, `dependabot/fetch-metadata` v2.5.0, `actions/deploy-pages` v4.0.5). Most first-party actions already Node.js 24-ready; 4 community/pages actions still on Node.js 20 (no upstream update available yet). — 14 new test functions (57 sub-tests) in `modules/grpcworker/server_test.go` covering nil requests, blank endpoints, Pull-nil guards, invalid durations, lease ID normalization edge cases (both-set, all-empty, max-batch, dedup), error mapping (all status codes), route resolution fallback chain, custom MaxLeaseBatch, nack-dead via gRPC, nack-batch, and large-batch dequeue.

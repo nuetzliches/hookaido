@@ -46,3 +46,9 @@ PRs must pass CI and branch protection checks before merge.
 - `main` protection must keep force-push and deletion disabled.
 - Release tags are strict SemVer `vX.Y.Z` only (no `vX.Y`).
 - For releases, push only the explicit tag (for example `git push origin v1.5.0`), not `--tags`.
+
+## Maintainer Notes
+
+- OpenSSF Scorecard runs with `GITHUB_TOKEN` by default.
+- OpenSSF Best Practices badge page: <https://www.bestpractices.dev/projects/11921>.
+- If the repository uses **classic branch protection rules**, add a repository secret `SCORECARD_TOKEN` (fine-grained PAT with `Administration: Read-only`) so the `Branch-Protection` check can be evaluated fully.

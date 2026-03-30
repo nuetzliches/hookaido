@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hookaido — Einsatzmöglichkeiten</title>
+  <style>
+    html, body, #app { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; }
+  </style>
+  <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@excalidraw/excalidraw@0.17.6/dist/excalidraw.production.min.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    const { Excalidraw } = ExcalidrawLib;
+
+    // Color palette
+    const C = {
+      hookaido: "#e03131",
+      pull: "#1971c2",
+      push: "#2f9e44",
+      exec: "#e8590c",
+      hybrid: "#9c36b5",
+      outbound: "#0c8599",
+      internal: "#5c940d",
+      provider: "#495057",
+      worker: "#364fc7",
+      bg: "#f8f9fa",
+      text: "#212529",
+    };
+
+    let id = 0;
+    const uid = () => `el_${++id}`;
+
+    function rect(x, y, w, h, opts = {}) {
+      return {
+        id: opts.id || uid(),
+        type: "rectangle",
+        x, y,
+        width: w,
+        height: h,
+        strokeColor: opts.stroke || "#343a40",
+        backgroundColor: opts.bg || "transparent",
+        fillStyle: opts.fillStyle || "solid",
+        strokeWidth: opts.strokeWidth || 2,
+        roundness: { type: 3 },
+        opacity: 100,
+        angle: 0,
+        groupIds: opts.groupIds || [],
+        boundElements: opts.boundElements || null,
+        locked: false,
+        ...opts.extra,
+      };
+    }
+
+    function text(x, y, str, opts = {}) {
+      return {
+        id: opts.id || uid(),
+        type: "text",
+        x, y,
+        width: opts.width || str.length * 9,
+        height: opts.height || 25,
+        text: str,
+        fontSize: opts.fontSize || 20,
+        fontFamily: 1,
+        textAlign: opts.textAlign || "center",
+        verticalAlign: "middle",
+        strokeColor: opts.color || C.text,
+        opacity: 100,
+        angle: 0,
+        groupIds: opts.groupIds || [],
+        containerId: opts.containerId || null,
+        originalText: str,
+        autoResize: true,
+        lineHeight: 1.25,
+        locked: false,
+      };
+    }
+
+    function arrow(startX, startY, endX, endY, opts = {}) {
+      return {
+        id: opts.id || uid(),
+        type: "arrow",
+        x: startX,
+        y: startY,
+        width: endX - startX,
+        height: endY - startY,
+        points: [[0, 0], [endX - startX, endY - startY]],
+        strokeColor: opts.stroke || "#868e96",
+        strokeWidth: opts.strokeWidth || 2,
+        opacity: 100,
+        angle: 0,
+        groupIds: [],
+        roundness: { type: 2 },
+        startArrowhead: opts.startArrow || null,
+        endArrowhead: opts.endArrow || "arrow",
+        locked: false,
+      };
+    }
+
+    function diamond(x, y, w, h, opts = {}) {
+      return {
+        id: opts.id || uid(),
+        type: "diamond",
+        x, y,
+        width: w,
+        height: h,
+        strokeColor: opts.stroke || "#343a40",
+        backgroundColor: opts.bg || "transparent",
+        fillStyle: opts.fillStyle || "solid",
+        strokeWidth: opts.strokeWidth || 2,
+        roundness: { type: 2 },
+        opacity: 100,
+        angle: 0,
+        groupIds: opts.groupIds || [],
+        locked: false,
+      };
+    }
+
+    // ── Build scene ──────────────────────────────────────
+
+    const elements = [];
+
+    // ── Central Hookaido ──────────────────────────────
+    const cx = 600, cy = 450;
+    elements.push(rect(cx - 100, cy - 40, 200, 80, { bg: C.hookaido, stroke: "#c92a2a", fillStyle: "solid", strokeWidth: 3 }));
+    elements.push(text(cx - 60, cy - 16, "Hookaido", { fontSize: 28, color: "#ffffff", width: 120, height: 32 }));
+    elements.push(text(cx - 90, cy + 20, "Webhook Queue", { fontSize: 14, color: "#ffc9c9", width: 180, height: 20 }));
+
+    // ── Helper: Use-Case Box ──────────────────────────
+    function useCase(x, y, title, subtitle, lines, color, arrowFrom, arrowDir) {
+      const w = 280, h = 160;
+      const gid = uid();
+      elements.push(rect(x, y, w, h, { bg: color + "18", stroke: color, fillStyle: "solid", groupIds: [gid] }));
+      elements.push(text(x + 10, y + 12, title, { fontSize: 18, color: color, textAlign: "left", width: w - 20, groupIds: [gid] }));
+      elements.push(text(x + 10, y + 38, subtitle, { fontSize: 13, color: "#868e96", textAlign: "left", width: w - 20, height: 18, groupIds: [gid] }));
+
+      let ly = y + 62;
+      for (const line of lines) {
+        elements.push(text(x + 16, ly, line, { fontSize: 13, color: C.text, textAlign: "left", width: w - 30, height: 18, groupIds: [gid] }));
+        ly += 20;
+      }
+
+      // Arrow to/from Hookaido center
+      if (arrowFrom) {
+        const [ax, ay] = arrowFrom;
+        elements.push(arrow(ax, ay, arrowDir[0], arrowDir[1], { stroke: color, strokeWidth: 2 }));
+      }
+    }
+
+    // ── 1. Pull Mode (top-left) ──────────────────────
+    useCase(120, 60, "① Pull Mode (DMZ-First)", "Empfohlener Default", [
+      "→ Webhooks landen in der DMZ",
+      "→ Workers ziehen über Outbound",
+      "→ Keine Inbound-Firewall nötig",
+      "→ GitHub, Stripe, Shopify …",
+    ], C.pull, [360, 220], [cx - 60, cy - 40]);
+
+    // ── 2. Push Mode (top-right) ──────────────────────
+    useCase(800, 60, "② Push Mode (Direct Delivery)", "Sofortige Zustellung", [
+      "→ Direkte HTTP-Zustellung",
+      "→ Exponential Backoff + Retry",
+      "→ Ideal für Single-Node",
+      "→ Hohe Priorität Webhooks",
+    ], C.push, [840, 220], [cx + 100, cy - 40]);
+
+    // ── 3. Exec Mode (left) ──────────────────────
+    useCase(20, 360, "③ Exec Mode (Subprocess)", "Script-Ausführung", [
+      "→ Payload via stdin an Script",
+      "→ Kein HTTP-Server nötig",
+      "→ Exit-Code = Erfolg/Retry/Fail",
+      "→ DevOps Automation",
+    ], C.exec, [300, 440], [cx - 100, cy]);
+
+    // ── 4. Hybrid (right) ──────────────────────
+    useCase(900, 360, "④ Hybrid (Pull + Push)", "Gemischte Delivery", [
+      "→ Pull & Push pro Route",
+      "→ Verschiedene SLAs",
+      "→ GitHub=Pull, Stripe=Push",
+      "→ Flexibles Routing",
+    ], C.hybrid, [900, 440], [cx + 100, cy]);
+
+    // ── 5. Outbound Channels (bottom-left) ──────────────
+    useCase(120, 660, "⑤ Outbound Channels", "API-gesteuert", [
+      "→ Apps publizieren via Admin API",
+      "→ Hookaido queued & delivered",
+      "→ Slack, E-Mail, Webhooks",
+      "→ Retry & DLQ inklusive",
+    ], C.outbound, [360, 660], [cx - 60, cy + 40]);
+
+    // ── 6. Internal Job Queues (bottom-right) ──────────
+    useCase(800, 660, "⑥ Internal Job Queues", "Background Processing", [
+      "→ Interne Channels ohne Ingress",
+      "→ CI/CD Jobs, Batch Reports",
+      "→ Durable mit At-Least-Once",
+      "→ gRPC oder HTTP Pull",
+    ], C.internal, [840, 660], [cx + 100, cy + 40]);
+
+    // ── Webhook Providers (far left) ──────────────────
+    const provY = 120;
+    elements.push(rect(-220, provY, 180, 50, { bg: "#212529", stroke: "#343a40", fillStyle: "solid" }));
+    elements.push(text(-195, provY + 12, "GitHub", { fontSize: 16, color: "#ffffff", width: 130 }));
+
+    elements.push(rect(-220, provY + 70, 180, 50, { bg: "#635bff22", stroke: "#635bff", fillStyle: "solid" }));
+    elements.push(text(-195, provY + 82, "Stripe", { fontSize: 16, color: "#635bff", width: 130 }));
+
+    elements.push(rect(-220, provY + 140, 180, 50, { bg: "#96bf4822", stroke: "#96bf48", fillStyle: "solid" }));
+    elements.push(text(-195, provY + 152, "Shopify", { fontSize: 16, color: "#5e8e3e", width: 130 }));
+
+    elements.push(rect(-220, provY + 210, 180, 50, { bg: "#fc6d2622", stroke: "#fc6d26", fillStyle: "solid" }));
+    elements.push(text(-195, provY + 222, "GitLab", { fontSize: 16, color: "#fc6d26", width: 130 }));
+
+    elements.push(rect(-220, provY + 280, 180, 50, { bg: "#868e9622", stroke: "#868e96", fillStyle: "solid" }));
+    elements.push(text(-195, provY + 292, "Any HTTP …", { fontSize: 16, color: "#495057", width: 130 }));
+
+    // Provider label
+    elements.push(text(-220, provY - 40, "Webhook Providers", { fontSize: 16, color: "#868e96", textAlign: "left", width: 200 }));
+
+    // Arrows from providers toward pull mode
+    elements.push(arrow(-40, provY + 25, 120, 120, { stroke: "#868e96" }));
+    elements.push(arrow(-40, provY + 95, 120, 150, { stroke: "#868e96" }));
+    elements.push(arrow(-40, provY + 165, 120, 180, { stroke: "#868e96" }));
+
+    // ── Workers / Services (far right) ──────────────────
+    const wY = 120;
+    elements.push(text(1280, wY - 40, "Workers & Services", { fontSize: 16, color: "#868e96", textAlign: "left", width: 200 }));
+
+    elements.push(rect(1280, wY, 180, 50, { bg: C.worker + "22", stroke: C.worker, fillStyle: "solid" }));
+    elements.push(text(1305, wY + 12, "CI/CD Worker", { fontSize: 16, color: C.worker, width: 130 }));
+
+    elements.push(rect(1280, wY + 70, 180, 50, { bg: C.worker + "22", stroke: C.worker, fillStyle: "solid" }));
+    elements.push(text(1305, wY + 82, "Billing Service", { fontSize: 16, color: C.worker, width: 130 }));
+
+    elements.push(rect(1280, wY + 140, 180, 50, { bg: C.worker + "22", stroke: C.worker, fillStyle: "solid" }));
+    elements.push(text(1305, wY + 152, "Order Processor", { fontSize: 16, color: C.worker, width: 130 }));
+
+    elements.push(rect(1280, wY + 210, 180, 50, { bg: C.worker + "22", stroke: C.worker, fillStyle: "solid" }));
+    elements.push(text(1305, wY + 222, "Deploy Script", { fontSize: 16, color: C.worker, width: 130 }));
+
+    elements.push(rect(1280, wY + 280, 180, 50, { bg: C.worker + "22", stroke: C.worker, fillStyle: "solid" }));
+    elements.push(text(1305, wY + 292, "gRPC Consumer", { fontSize: 16, color: C.worker, width: 130 }));
+
+    // Arrows from use cases toward workers
+    elements.push(arrow(1080, 140, 1280, wY + 25, { stroke: "#868e96" }));
+    elements.push(arrow(1080, 170, 1280, wY + 95, { stroke: "#868e96" }));
+    elements.push(arrow(1180, 440, 1280, wY + 165, { stroke: "#868e96" }));
+
+    // ── Features diamond (bottom center) ──────────────
+    const fy = 880;
+    elements.push(text(cx - 160, fy, "Key Features", { fontSize: 18, color: "#868e96", textAlign: "center", width: 320 }));
+
+    const features = [
+      "HMAC-SHA256 Auth", "Rate Limiting", "Dead-Letter Queue",
+      "Hot Reload", "Prometheus Metrics", "OpenTelemetry",
+      "SSRF Protection", "SQLite / PostgreSQL", "MCP (AI Tools)"
+    ];
+
+    let fx = cx - 400;
+    for (const feat of features) {
+      elements.push(rect(fx, fy + 30, 130, 36, { bg: "#e9ecef", stroke: "#ced4da", fillStyle: "solid", strokeWidth: 1 }));
+      elements.push(text(fx + 5, fy + 37, feat, { fontSize: 11, color: "#495057", textAlign: "center", width: 120, height: 22 }));
+      fx += 145;
+    }
+
+    // ── Title ──────────────────────────────────────────
+    elements.push(text(cx - 200, -30, "Hookaido — Einsatzmöglichkeiten", { fontSize: 32, color: C.hookaido, textAlign: "center", width: 400, height: 40 }));
+    elements.push(text(cx - 200, 10, "Webhook Ingress Queue Middleware", { fontSize: 16, color: "#868e96", textAlign: "center", width: 400, height: 22 }));
+
+    // ── Render ────────────────────────────────────────
+    const initialData = {
+      elements,
+      appState: {
+        viewBackgroundColor: "#ffffff",
+        gridSize: null,
+        zenModeEnabled: false,
+        theme: "light",
+      },
+      scrollToContent: true,
+    };
+
+    const App = () => {
+      return React.createElement(
+        "div",
+        { style: { width: "100vw", height: "100vh" } },
+        React.createElement(Excalidraw, { initialData })
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById("app"));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>

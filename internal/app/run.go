@@ -176,13 +176,34 @@ func run() int {
 	running := compiled
 	var store queue.Store
 	var reloadMu sync.Mutex
+	var currentPush *dispatcher.PushDispatcher
 	reloadNow := func(trigger string) {
 		reloadMu.Lock()
 		defer reloadMu.Unlock()
 
+		prev := running
 		updated, ok := reloadConfig(*configPath, running, state, runtimeLogger, trigger)
 		if ok {
 			running = updated
+		}
+		if !ok {
+			return
+		}
+
+		// Hot-reload dispatcher when delivery config changed.
+		if !dispatcherConfigEqual(prev, updated) {
+			if currentPush != nil {
+				const drainTimeout = 15 * time.Second
+				if drained := currentPush.Drain(drainTimeout); !drained {
+					runtimeLogger.Warn("dispatcher_drain_timeout_reload", slog.Duration("timeout", drainTimeout))
+				}
+				currentPush = nil
+				runtimeLogger.Info("dispatcher_stopped_for_reload")
+			}
+			if updated.HasDeliverRoutes {
+				currentPush = startPushDispatcher(updated, store, runtimeLogger, appMetrics)
+				runtimeLogger.Info("dispatcher_reloaded", slog.Int("routes", len(currentPush.Routes)))
+			}
 		}
 	}
 
@@ -245,47 +266,24 @@ func run() int {
 		return 1
 	}
 	if compiled.HasDeliverRoutes {
-		routes := buildDispatchRoutes(compiled)
-		policy := dispatcher.EgressPolicy{
-			HTTPSOnly:           compiled.Defaults.EgressPolicy.HTTPSOnly,
-			Redirects:           compiled.Defaults.EgressPolicy.Redirects,
-			DNSRebindProtection: compiled.Defaults.EgressPolicy.DNSRebindProtection,
-			Allow:               mapEgressRules(compiled.Defaults.EgressPolicy.Allow),
-			Deny:                mapEgressRules(compiled.Defaults.EgressPolicy.Deny),
-		}
-		client := tracingHTTPClient(compiled.Observability.TracingEnabled)
-		httpDeliverer := dispatcher.NewHTTPDeliverer(client, policy)
-		var deliverer dispatcher.Deliverer = httpDeliverer
-		if hasExecRoutes(compiled) {
-			deliverer = &dispatcher.MultiDeliverer{
-				HTTP: httpDeliverer,
-				Exec: &dispatcher.ExecDeliverer{Logger: runtimeLogger},
-			}
-		}
-		push := dispatcher.PushDispatcher{
-			Store:     store,
-			Deliverer: deliverer,
-			Routes:    routes,
-			Logger:    runtimeLogger,
-			ObserveAttempt: func(outcome queue.AttemptOutcome) {
-				appMetrics.observeDeliveryAttempt(outcome)
-			},
-			ObserveDead: func(reason string) {
-				appMetrics.observeDeliveryDeadReason(reason)
-			},
-		}
-		push.Start()
+		currentPush = startPushDispatcher(compiled, store, runtimeLogger, appMetrics)
 		defer func() {
+			reloadMu.Lock()
+			p := currentPush
+			reloadMu.Unlock()
+			if p == nil {
+				return
+			}
 			// Drain in-flight deliveries before exit. The timeout should
 			// cover the longest possible delivery (timeout + retry delay).
 			const drainTimeout = 15 * time.Second
-			if ok := push.Drain(drainTimeout); !ok {
+			if ok := p.Drain(drainTimeout); !ok {
 				runtimeLogger.Warn("dispatcher_drain_timeout", slog.Duration("timeout", drainTimeout))
 			} else {
 				runtimeLogger.Info("dispatcher_drained")
 			}
 		}()
-		runtimeLogger.Info("dispatcher_started", slog.Int("routes", len(routes)))
+		runtimeLogger.Info("dispatcher_started", slog.Int("routes", len(currentPush.Routes)))
 	}
 	if *watch {
 		go watchConfig(ctx, *configPath, runtimeLogger, func() {
@@ -2564,10 +2562,6 @@ func requiresRestartForReload(compiled, running config.Compiled) bool {
 		return true
 	}
 
-	if !dispatcherConfigEqual(compiled, running) {
-		return true
-	}
-
 	return false
 }
 
@@ -2745,6 +2739,40 @@ func hasExecRoutes(compiled config.Compiled) bool {
 		}
 	}
 	return false
+}
+
+func startPushDispatcher(compiled config.Compiled, store queue.Store, logger *slog.Logger, metrics *runtimeMetrics) *dispatcher.PushDispatcher {
+	routes := buildDispatchRoutes(compiled)
+	policy := dispatcher.EgressPolicy{
+		HTTPSOnly:           compiled.Defaults.EgressPolicy.HTTPSOnly,
+		Redirects:           compiled.Defaults.EgressPolicy.Redirects,
+		DNSRebindProtection: compiled.Defaults.EgressPolicy.DNSRebindProtection,
+		Allow:               mapEgressRules(compiled.Defaults.EgressPolicy.Allow),
+		Deny:                mapEgressRules(compiled.Defaults.EgressPolicy.Deny),
+	}
+	client := tracingHTTPClient(compiled.Observability.TracingEnabled)
+	httpDeliverer := dispatcher.NewHTTPDeliverer(client, policy)
+	var deliverer dispatcher.Deliverer = httpDeliverer
+	if hasExecRoutes(compiled) {
+		deliverer = &dispatcher.MultiDeliverer{
+			HTTP: httpDeliverer,
+			Exec: &dispatcher.ExecDeliverer{Logger: logger},
+		}
+	}
+	push := &dispatcher.PushDispatcher{
+		Store:     store,
+		Deliverer: deliverer,
+		Routes:    routes,
+		Logger:    logger,
+		ObserveAttempt: func(outcome queue.AttemptOutcome) {
+			metrics.observeDeliveryAttempt(outcome)
+		},
+		ObserveDead: func(reason string) {
+			metrics.observeDeliveryDeadReason(reason)
+		},
+	}
+	push.Start()
+	return push
 }
 
 func publishPolicyEqual(a, b config.PublishPolicyConfig) bool {

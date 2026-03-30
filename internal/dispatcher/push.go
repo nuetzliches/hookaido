@@ -96,6 +96,7 @@ func (d *PushDispatcher) Start() {
 
 	for _, rt := range d.Routes {
 		if len(rt.Targets) == 0 {
+			logger.Warn("dispatcher_route_no_targets", slog.String("route", rt.Route))
 			continue
 		}
 		concurrency := rt.Concurrency
@@ -373,6 +374,13 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 	if isSuccess(res) {
 		attempt.Outcome = queue.AttemptOutcomeAcked
 		d.recordAttempt(logger, attempt)
+		logger.Info("delivery_ok",
+			slog.String("route", env.Route),
+			slog.String("target", target.URL),
+			slog.Int("status", res.StatusCode),
+			slog.Int("attempt", env.Attempt),
+			slog.String("event_id", env.ID),
+		)
 		return leaseAction{
 			kind:    leaseActionAck,
 			route:   env.Route,
@@ -389,6 +397,19 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 		delay := retryDelay(env.Attempt, target.Retry)
 		attempt.Outcome = queue.AttemptOutcomeRetry
 		d.recordAttempt(logger, attempt)
+		attrs := []any{
+			slog.String("route", env.Route),
+			slog.String("target", target.URL),
+			slog.Int("attempt", env.Attempt),
+			slog.Duration("delay", delay),
+			slog.String("event_id", env.ID),
+		}
+		if res.Err != nil {
+			attrs = append(attrs, slog.String("error", res.Err.Error()))
+		} else {
+			attrs = append(attrs, slog.Int("status", res.StatusCode))
+		}
+		logger.Info("delivery_retry", attrs...)
 		return leaseAction{
 			kind:    leaseActionNack,
 			route:   env.Route,
@@ -407,6 +428,19 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 	attempt.Outcome = queue.AttemptOutcomeDead
 	attempt.DeadReason = reason
 	d.recordAttempt(logger, attempt)
+	attrs := []any{
+		slog.String("route", env.Route),
+		slog.String("target", target.URL),
+		slog.Int("attempt", env.Attempt),
+		slog.String("reason", reason),
+		slog.String("event_id", env.ID),
+	}
+	if res.Err != nil {
+		attrs = append(attrs, slog.String("error", res.Err.Error()))
+	} else {
+		attrs = append(attrs, slog.Int("status", res.StatusCode))
+	}
+	logger.Warn("delivery_dead", attrs...)
 	return leaseAction{
 		kind:    leaseActionMarkDead,
 		route:   env.Route,

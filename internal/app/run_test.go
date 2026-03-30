@@ -534,8 +534,11 @@ func TestRequiresRestartForReload_DeliverTargetChanged(t *testing.T) {
   deliver "https://ci.internal/two" {}
 }
 `)
-	if !requiresRestartForReload(updated, running) {
-		t.Fatalf("expected restart required when deliver target changes")
+	if requiresRestartForReload(updated, running) {
+		t.Fatalf("expected live reload for deliver target change (dispatcher hot-reload)")
+	}
+	if dispatcherConfigEqual(updated, running) {
+		t.Fatalf("expected dispatcher config to differ when deliver target changes")
 	}
 }
 
@@ -554,8 +557,11 @@ func TestRequiresRestartForReload_DeliverSigningChanged(t *testing.T) {
   }
 }
 `)
-	if !requiresRestartForReload(updated, running) {
-		t.Fatalf("expected restart required when deliver signing changes")
+	if requiresRestartForReload(updated, running) {
+		t.Fatalf("expected live reload for deliver signing change (dispatcher hot-reload)")
+	}
+	if dispatcherConfigEqual(updated, running) {
+		t.Fatalf("expected dispatcher config to differ when deliver signing changes")
 	}
 }
 
@@ -591,8 +597,11 @@ secrets {
   }
 }
 `)
-	if !requiresRestartForReload(updated, running) {
-		t.Fatalf("expected restart required when deliver signing secret_refs change")
+	if requiresRestartForReload(updated, running) {
+		t.Fatalf("expected live reload for deliver signing secret_refs change (dispatcher hot-reload)")
+	}
+	if dispatcherConfigEqual(updated, running) {
+		t.Fatalf("expected dispatcher config to differ when deliver signing secret_refs change")
 	}
 }
 
@@ -625,8 +634,11 @@ secrets {
   }
 }
 `)
-	if !requiresRestartForReload(updated, running) {
-		t.Fatalf("expected restart required when deliver signing secret_selection changes")
+	if requiresRestartForReload(updated, running) {
+		t.Fatalf("expected live reload for deliver signing secret_selection change (dispatcher hot-reload)")
+	}
+	if dispatcherConfigEqual(updated, running) {
+		t.Fatalf("expected dispatcher config to differ when deliver signing secret_selection changes")
 	}
 }
 
@@ -713,8 +725,11 @@ defaults {
 }
 "/x" { deliver "https://ci.internal/hook" {} }
 `)
-	if !requiresRestartForReload(updated, running) {
-		t.Fatalf("expected restart required when egress policy changes with deliver routes")
+	if requiresRestartForReload(updated, running) {
+		t.Fatalf("expected live reload for egress policy change with deliver routes (dispatcher hot-reload)")
+	}
+	if dispatcherConfigEqual(updated, running) {
+		t.Fatalf("expected dispatcher config to differ when egress policy changes with deliver routes")
 	}
 }
 

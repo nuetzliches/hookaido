@@ -9,6 +9,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 _No unreleased changes._
 
+## [2.2.1] - 2026-03-30
+
+### Fixed
+
+- Dispatcher now logs all delivery attempts: `delivery_ok` (INFO), `delivery_retry` (INFO), and `delivery_dead` (WARN) with route, target, status, attempt number, and event ID. Previously, deliveries were completely silent in logs.
+- Routes with zero targets now emit a `dispatcher_route_no_targets` warning instead of being silently skipped.
+- Dispatcher delivery config changes (targets, signing, egress policy) are now hot-reloaded via `--watch`/SIGHUP without requiring a full process restart. Previously, config reload detected the mismatch but did not recreate the dispatcher, causing webhooks to be accepted by ingress but never delivered.
+
 ## [2.2.0] - 2026-03-28
 
 ### Added

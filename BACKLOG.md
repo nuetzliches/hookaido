@@ -15,7 +15,7 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
   - `internal/pullapi` (73.6%) — Pull API handler coverage
   - `internal/config` (77.3%) — Config parser edge cases
   - `internal/mcp` (77.3%) — MCP server handler coverage
-- [ ] **Go Report Card A-** — Verify grade at https://goreportcard.com/report/github.com/nuetzliches/hookaido. Fix any lint/vet/fmt issues.
+- [ ] **Go Report Card refresh** — Currently A+ but cached at v1.5.1. Tag a new patch release (v2.2.1+) so Go Report Card picks up the gofmt/misspell fixes from #118. Then refresh at https://goreportcard.com/report/github.com/nuetzliches/hookaido.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
 - [ ] **awesome-go PR** — Submit to [avelino/awesome-go](https://github.com/avelino/awesome-go) under "Messaging" category. Requires: ≥5 months history (eligible ~July 2026), coverage ≥80%, Go Report Card A-, pkg.go.dev docs.
 

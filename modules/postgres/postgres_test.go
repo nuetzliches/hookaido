@@ -818,3 +818,44 @@ func TestIntegration_RetentionPruning(t *testing.T) {
 		t.Fatalf("count after prune = %d, want 1 (only the trigger item)", countAfter)
 	}
 }
+
+func TestIntegration_DequeueLongPollWakesOnEnqueue(t *testing.T) {
+	dsn := requirePostgresDSN(t)
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	cleanupStore(t, store)
+
+	done := make(chan queue.DequeueResponse, 1)
+	go func() {
+		resp, _ := store.Dequeue(queue.DequeueRequest{
+			Route:   "/poll/wake",
+			Target:  "https://example.com/hook",
+			Batch:   1,
+			MaxWait: 2 * time.Second,
+		})
+		done <- resp
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := store.Enqueue(queue.Envelope{
+		ID:      "wake_evt_1",
+		Route:   "/poll/wake",
+		Target:  "https://example.com/hook",
+		Payload: []byte(`{}`),
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	select {
+	case resp := <-done:
+		if len(resp.Items) != 1 {
+			t.Fatalf("expected 1 item, got %d", len(resp.Items))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Dequeue did not wake up after Enqueue")
+	}
+}

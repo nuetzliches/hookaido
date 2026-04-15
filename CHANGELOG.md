@@ -7,7 +7,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- Queue dequeue loop now uses event-driven wake-up instead of aggressive 25ms polling. Enqueue signals waiting Dequeue goroutines immediately via channel notification; polling interval raised to 1s as fallback for delayed/retry items only. Reduces idle CPU from ~26% to <1% (SQLite and PostgreSQL backends).
 
 ## [2.2.1] - 2026-03-30
 

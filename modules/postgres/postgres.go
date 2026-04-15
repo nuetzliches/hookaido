@@ -25,6 +25,7 @@ type Store struct {
 
 	mu                       sync.Mutex
 	nowFn                    func() time.Time
+	notify                   chan struct{}
 	pollInterval             time.Duration
 	maxDepth                 int
 	dropPolicy               string
@@ -215,7 +216,8 @@ func NewStore(dsn string, opts ...Option) (*Store, error) {
 	s := &Store{
 		db:           db,
 		nowFn:        time.Now,
-		pollInterval: 25 * time.Millisecond,
+		notify:       make(chan struct{}),
+		pollInterval: 1 * time.Second,
 		dropPolicy:   "reject",
 		metrics:      newPostgresRuntimeMetrics(),
 	}
@@ -241,6 +243,19 @@ func (s *Store) Close() error {
 func (s *Store) init() error {
 	_, err := s.db.ExecContext(context.Background(), postgresSchemaV1)
 	return err
+}
+
+func (s *Store) signal() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	close(s.notify)
+	s.notify = make(chan struct{})
+}
+
+func (s *Store) waitCh() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.notify
 }
 
 func (s *Store) Enqueue(env queue.Envelope) error {
@@ -337,6 +352,7 @@ INSERT INTO queue_items (
 		if err != nil {
 			return mapPostgresInsertError(err)
 		}
+		s.signal()
 		return nil
 	})
 }
@@ -387,11 +403,22 @@ func (s *Store) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error)
 			if remaining <= 0 {
 				return queue.DequeueResponse{}, nil
 			}
+
+			waitCh := s.waitCh()
 			sleep := remaining
 			if s.pollInterval > 0 && sleep > s.pollInterval {
 				sleep = s.pollInterval
 			}
-			time.Sleep(sleep)
+			timer := time.NewTimer(sleep)
+			select {
+			case <-waitCh:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				continue
+			case <-timer.C:
+				continue
+			}
 		}
 	})
 }

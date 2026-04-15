@@ -348,7 +348,7 @@ func NewStore(dbPath string, opts ...Option) (*Store, error) {
 		db:                 db,
 		nowFn:              time.Now,
 		notify:             make(chan struct{}),
-		pollInterval:       25 * time.Millisecond,
+		pollInterval:       1 * time.Second,
 		dropPolicy:         "reject",
 		metrics:            newSQLiteRuntimeMetrics(),
 		checkpointInterval: defaultSQLiteCheckpointInterval,

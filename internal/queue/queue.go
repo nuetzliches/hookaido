@@ -227,6 +227,14 @@ type BatchEnqueuer interface {
 	EnqueueBatch(items []Envelope) (int, error)
 }
 
+// StoreNotifier is an optional extension for stores that support
+// event-driven notification when new items become available.
+// The returned channel is closed when one or more items are enqueued,
+// after which a fresh channel must be obtained by calling NotifyCh again.
+type StoreNotifier interface {
+	NotifyCh() <-chan struct{}
+}
+
 const statsTopBacklogLimit = 10
 
 const (

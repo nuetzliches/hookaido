@@ -992,6 +992,34 @@ func (p *parser) parseAPIBlock(name string) (*APIBlock, error) {
 			out.MaxWait = v
 			out.MaxWaitQuoted = quoted
 			out.MaxWaitSet = true
+		case "sse_keepalive":
+			if name != "pull_api" {
+				return nil, p.errAt(dirTok.pos, "unknown %s directive %q", name, dirTok.text)
+			}
+			if out.SSEKeepaliveSet {
+				return nil, p.errAt(dirTok.pos, "duplicate %s sse_keepalive", name)
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.SSEKeepalive = v
+			out.SSEKeepaliveQuoted = quoted
+			out.SSEKeepaliveSet = true
+		case "sse_max_connection":
+			if name != "pull_api" {
+				return nil, p.errAt(dirTok.pos, "unknown %s directive %q", name, dirTok.text)
+			}
+			if out.SSEMaxConnectionSet {
+				return nil, p.errAt(dirTok.pos, "duplicate %s sse_max_connection", name)
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.SSEMaxConnection = v
+			out.SSEMaxConnectionQuoted = quoted
+			out.SSEMaxConnectionSet = true
 		case "tls":
 			if out.TLS != nil {
 				return nil, p.errAt(dirTok.pos, "duplicate %s tls block", name)

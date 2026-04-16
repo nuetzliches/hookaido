@@ -84,8 +84,11 @@ jobs:
           cp "${{ steps.attest_provenance.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_provenance.intoto.jsonl"
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.attestation.json"
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.intoto.jsonl"
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          files: dist/*
-          generate_release_notes: true
+      - name: Upload Release Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+      - name: Update Release Notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false --latest

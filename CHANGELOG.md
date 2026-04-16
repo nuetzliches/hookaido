@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- SSE endpoint for Pull API (`GET {pull.path}/stream`): consumers can receive webhook messages in real-time over a persistent Server-Sent Events connection instead of polling. Each SSE message creates a lease (same semantics as dequeue); ACK/NACK remain via existing POST endpoints. Supports `batch` and `lease_ttl` query parameters, configurable keepalive interval (`sse_keepalive`, default 15s) and max connection duration (`sse_max_connection`). Multiple concurrent SSE connections act as competing consumers. New Prometheus metrics: `hookaido_pull_sse_connections_total`, `hookaido_pull_sse_messages_sent_total`, `hookaido_pull_sse_connection_active`.
+
 ### Fixed
 
 - Queue dequeue loop now uses event-driven wake-up instead of aggressive 25ms polling. Enqueue signals waiting Dequeue goroutines immediately via channel notification; polling interval raised to 1s as fallback for delayed/retry items only. Reduces idle CPU from ~26% to <1% (SQLite and PostgreSQL backends).

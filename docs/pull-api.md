@@ -32,8 +32,9 @@ The endpoints become:
 - `POST http://localhost:9443/pull/github/ack`
 - `POST http://localhost:9443/pull/github/nack`
 - `POST http://localhost:9443/pull/github/extend`
+- `GET  http://localhost:9443/pull/github/stream` (SSE)
 
-All requests use `Content-Type: application/json`.
+POST requests use `Content-Type: application/json`. The SSE endpoint returns `Content-Type: text/event-stream`.
 
 ## Authentication
 
@@ -273,6 +274,58 @@ All non-2xx responses return structured JSON:
 
 > Request bodies are parsed strictly: unknown JSON fields and trailing JSON documents are rejected with `400`.
 
+## SSE Streaming
+
+### `GET {endpoint}/stream`
+
+Opens a Server-Sent Events connection for real-time message delivery. Each SSE message creates a lease (same semantics as dequeue). ACK/NACK remain via the existing POST endpoints.
+
+**Query parameters:**
+
+| Parameter   | Default                      | Description                                                    |
+| ----------- | ---------------------------- | -------------------------------------------------------------- |
+| `batch`     | `1`                          | Messages to dequeue per cycle (capped by `pull_api.max_batch`) |
+| `lease_ttl` | `pull_api.default_lease_ttl` | Lease duration per message. Capped by `pull_api.max_lease_ttl` |
+
+**Request:**
+
+```bash
+curl -N -H "Authorization: Bearer $TOKEN" \
+  http://localhost:9443/pull/github/stream
+```
+
+**SSE event format:**
+
+```
+id: lease_abc123
+event: message
+data: {"id":"evt_1","lease_id":"lease_abc123","route":"/webhooks/github","received_at":"...","attempt":1,"payload_b64":"...","headers":{...}}
+
+: keepalive
+
+```
+
+- `id` is the `lease_id` — used as `Last-Event-ID` on reconnect.
+- `event: message` for queued items; `: keepalive` comments keep the connection alive through proxies.
+- The `data` JSON payload is identical to items returned by `POST /dequeue`.
+
+**Behavior:**
+
+- Auth is identical to all other Pull API endpoints (bearer token).
+- Multiple concurrent SSE connections on the same route act as competing consumers — leases prevent double-delivery.
+- On reconnect, the consumer sends `Last-Event-ID`. Since leases were already created, reconnect simply resumes dequeuing new items.
+- The server sends keepalive comments at the interval configured by `sse_keepalive` (default 15s).
+- Optionally, `sse_max_connection` limits the maximum connection duration for resource hygiene.
+
+**Error event:**
+
+If the store becomes unavailable, the server sends an error event and closes the connection:
+
+```
+event: error
+data: dequeue is temporarily unavailable
+```
+
 ## Dequeue Controls
 
 Fine-tune Pull API behavior in the config:
@@ -286,12 +339,14 @@ pull_api {
   max_lease_ttl 5m        # hard upper bound for lease TTL
   default_max_wait 0      # when client omits max_wait (default 0 = no wait)
   max_wait 30s            # hard upper bound for long-poll wait
+  sse_keepalive 15s       # SSE keepalive comment interval (default 15s)
+  sse_max_connection 1h   # optional max SSE connection duration (default unlimited)
 }
 ```
 
 ## Consumer Implementation Tips
 
-1. **Use long-polling** (`max_wait`) to reduce empty-response overhead.
+1. **Use SSE streaming** (`GET .../stream`) for zero-latency delivery, or **long-polling** (`max_wait`) as a simpler alternative.
 2. **Process in batches** — dequeue multiple messages, process in parallel, ack individually.
 3. **Extend leases proactively** — if processing takes >50% of your `lease_ttl`, extend early.
 4. **Dead-letter on permanent failures** — use `nack { dead: true, reason: "..." }` for non-retryable errors.

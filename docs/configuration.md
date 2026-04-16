@@ -149,23 +149,27 @@ pull_api {
   max_lease_ttl 5m           # optional upper bound for lease TTL
   default_max_wait 0         # default long-poll wait (default 0 = no wait)
   max_wait 30s               # optional upper bound for long-poll wait
+  sse_keepalive 15s          # SSE keepalive comment interval (default 15s)
+  sse_max_connection 1h      # optional max SSE connection duration (default unlimited)
 
   tls { ... }
 }
 ```
 
-| Directive           | Default      | Description                                |
-| ------------------- | ------------ | ------------------------------------------ |
-| `listen`            | `:9443`      | Bind address                               |
-| `grpc_listen`       | —            | Optional gRPC worker listener address      |
-| `prefix`            | —            | URL path prefix for all pull endpoints     |
-| `auth token`        | **required** | Bearer token allowlist (`env:`/`file:`/`vault:`/`raw:` ref) |
-| `max_batch`         | `100`        | Max items per dequeue request              |
-| `default_lease_ttl` | `30s`        | Lease TTL when client omits it             |
-| `max_lease_ttl`     | off          | Optional upper cap for effective lease TTL |
-| `default_max_wait`  | `0`          | Long-poll wait when client omits it        |
-| `max_wait`          | off          | Optional upper cap for long-poll wait      |
-| `tls`               | —            | TLS and optional mTLS configuration        |
+| Directive            | Default      | Description                                |
+| -------------------- | ------------ | ------------------------------------------ |
+| `listen`             | `:9443`      | Bind address                               |
+| `grpc_listen`        | —            | Optional gRPC worker listener address      |
+| `prefix`             | —            | URL path prefix for all pull endpoints     |
+| `auth token`         | **required** | Bearer token allowlist (`env:`/`file:`/`vault:`/`raw:` ref) |
+| `max_batch`          | `100`        | Max items per dequeue request              |
+| `default_lease_ttl`  | `30s`        | Lease TTL when client omits it             |
+| `max_lease_ttl`      | off          | Optional upper cap for effective lease TTL |
+| `default_max_wait`   | `0`          | Long-poll wait when client omits it        |
+| `max_wait`           | off          | Optional upper cap for long-poll wait      |
+| `sse_keepalive`      | `15s`        | Interval for SSE keepalive comments        |
+| `sse_max_connection` | off          | Optional max duration for SSE connections  |
+| `tls`                | —            | TLS and optional mTLS configuration        |
 
 > Pull API auth is required when pull routes are present. Deliver-only configs can omit it entirely — the Pull API server is skipped in that case.
 >

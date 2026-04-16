@@ -2945,6 +2945,10 @@ func (s *Store) waitCh() <-chan struct{} {
 	return s.notify
 }
 
+// NotifyCh returns a channel that is closed when new items become available.
+// After the channel fires, callers must call NotifyCh again to get the next signal.
+func (s *Store) NotifyCh() <-chan struct{} { return s.waitCh() }
+
 type sqliteTxClass int
 
 const (

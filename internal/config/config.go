@@ -129,6 +129,14 @@ type APIBlock struct {
 	MaxWait       string
 	MaxWaitQuoted bool
 	MaxWaitSet    bool
+
+	SSEKeepalive       string
+	SSEKeepaliveQuoted bool
+	SSEKeepaliveSet    bool
+
+	SSEMaxConnection       string
+	SSEMaxConnectionQuoted bool
+	SSEMaxConnectionSet    bool
 }
 
 type ObservabilityBlock struct {

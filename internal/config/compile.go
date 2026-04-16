@@ -190,8 +190,10 @@ type APIConfig struct {
 	MaxBatch        int
 	DefaultLeaseTTL time.Duration
 	MaxLeaseTTL     time.Duration
-	DefaultMaxWait  time.Duration
-	MaxWait         time.Duration
+	DefaultMaxWait   time.Duration
+	MaxWait          time.Duration
+	SSEKeepalive     time.Duration
+	SSEMaxConnection time.Duration
 }
 
 type CompiledRoute struct {
@@ -2774,6 +2776,24 @@ func compileAPI(name string, in *APIBlock, defaultListen string) (APIConfig, Val
 		}
 		if in.DefaultMaxWaitSet && in.MaxWaitSet && out.MaxWait > 0 && out.DefaultMaxWait > out.MaxWait {
 			res.Errors = append(res.Errors, "pull_api.default_max_wait must not exceed pull_api.max_wait")
+		}
+		if in.SSEKeepaliveSet {
+			raw := strings.TrimSpace(resolveValue(in.SSEKeepalive, "pull_api.sse_keepalive", &res))
+			d, off, err := parseDurationValue(raw)
+			if err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("pull_api.sse_keepalive %s", err.Error()))
+			} else if !off {
+				out.SSEKeepalive = d
+			}
+		}
+		if in.SSEMaxConnectionSet {
+			raw := strings.TrimSpace(resolveValue(in.SSEMaxConnection, "pull_api.sse_max_connection", &res))
+			d, off, err := parseDurationValue(raw)
+			if err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("pull_api.sse_max_connection %s", err.Error()))
+			} else if !off {
+				out.SSEMaxConnection = d
+			}
 		}
 	}
 

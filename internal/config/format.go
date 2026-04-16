@@ -343,6 +343,12 @@ func writeAPIBlock(b *bytes.Buffer, name string, api *APIBlock) {
 		if api.MaxWaitSet {
 			fmt.Fprintf(b, "  max_wait %s\n", formatValue(api.MaxWait, api.MaxWaitQuoted))
 		}
+		if api.SSEKeepaliveSet {
+			fmt.Fprintf(b, "  sse_keepalive %s\n", formatValue(api.SSEKeepalive, api.SSEKeepaliveQuoted))
+		}
+		if api.SSEMaxConnectionSet {
+			fmt.Fprintf(b, "  sse_max_connection %s\n", formatValue(api.SSEMaxConnection, api.SSEMaxConnectionQuoted))
+		}
 	}
 	if api.TLS != nil {
 		writeTLSBlock(b, api.TLS)

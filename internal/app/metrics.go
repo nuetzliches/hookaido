@@ -68,13 +68,16 @@ type runtimeMetrics struct {
 }
 
 type pullRouteMetrics struct {
-	dequeueByStatus   map[string]int64
-	ackedTotal        int64
-	nackedTotal       int64
-	ackConflictTotal  int64
-	nackConflictTotal int64
-	leaseActive       int64
-	leaseExpiredTotal int64
+	dequeueByStatus      map[string]int64
+	ackedTotal           int64
+	nackedTotal          int64
+	ackConflictTotal     int64
+	nackConflictTotal    int64
+	leaseActive          int64
+	leaseExpiredTotal    int64
+	sseConnectionsTotal  int64
+	sseMessagesSentTotal int64
+	sseConnectionActive  int64
 }
 
 type pullLease struct {
@@ -83,13 +86,16 @@ type pullLease struct {
 }
 
 type pullRouteSnapshot struct {
-	dequeueByStatus   map[string]int64
-	ackedTotal        int64
-	nackedTotal       int64
-	ackConflictTotal  int64
-	nackConflictTotal int64
-	leaseActive       int64
-	leaseExpiredTotal int64
+	dequeueByStatus      map[string]int64
+	ackedTotal           int64
+	nackedTotal          int64
+	ackConflictTotal     int64
+	nackConflictTotal    int64
+	leaseActive          int64
+	leaseExpiredTotal    int64
+	sseConnectionsTotal  int64
+	sseMessagesSentTotal int64
+	sseConnectionActive  int64
 }
 
 func newRuntimeMetrics() *runtimeMetrics {
@@ -443,6 +449,38 @@ func (m *runtimeMetrics) observePullExtend(route string, statusCode int, leaseID
 	}
 }
 
+func (m *runtimeMetrics) observePullSSEConnect(route string) {
+	if m == nil {
+		return
+	}
+
+	route = normalizePullRoute(route)
+
+	m.pullMu.Lock()
+	defer m.pullMu.Unlock()
+
+	metrics := m.pullRouteLocked(route)
+	metrics.sseConnectionsTotal++
+	metrics.sseConnectionActive++
+}
+
+func (m *runtimeMetrics) observePullSSEDisconnect(route string, statusCode int, messagesSent int, duration time.Duration) {
+	if m == nil {
+		return
+	}
+
+	route = normalizePullRoute(route)
+
+	m.pullMu.Lock()
+	defer m.pullMu.Unlock()
+
+	metrics := m.pullRouteLocked(route)
+	metrics.sseMessagesSentTotal += int64(messagesSent)
+	if metrics.sseConnectionActive > 0 {
+		metrics.sseConnectionActive--
+	}
+}
+
 func (m *runtimeMetrics) pullSnapshot() map[string]pullRouteSnapshot {
 	if m == nil {
 		return nil
@@ -466,13 +504,16 @@ func (m *runtimeMetrics) pullSnapshot() map[string]pullRouteSnapshot {
 			byStatus[status] = n
 		}
 		out[route] = pullRouteSnapshot{
-			dequeueByStatus:   byStatus,
-			ackedTotal:        metrics.ackedTotal,
-			nackedTotal:       metrics.nackedTotal,
-			ackConflictTotal:  metrics.ackConflictTotal,
-			nackConflictTotal: metrics.nackConflictTotal,
-			leaseActive:       metrics.leaseActive,
-			leaseExpiredTotal: metrics.leaseExpiredTotal,
+			dequeueByStatus:      byStatus,
+			ackedTotal:           metrics.ackedTotal,
+			nackedTotal:          metrics.nackedTotal,
+			ackConflictTotal:     metrics.ackConflictTotal,
+			nackConflictTotal:    metrics.nackConflictTotal,
+			leaseActive:          metrics.leaseActive,
+			leaseExpiredTotal:    metrics.leaseExpiredTotal,
+			sseConnectionsTotal:  metrics.sseConnectionsTotal,
+			sseMessagesSentTotal: metrics.sseMessagesSentTotal,
+			sseConnectionActive:  metrics.sseConnectionActive,
 		}
 	}
 	return out
@@ -1157,6 +1198,12 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_pull_lease_active gauge\n")
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_pull_lease_expired_total Total number of Pull lease expirations observed during ack/nack/extend operations.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_pull_lease_expired_total counter\n")
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_pull_sse_connections_total Total number of SSE connections established by route.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_pull_sse_connections_total counter\n")
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_pull_sse_messages_sent_total Total number of messages sent over SSE by route.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_pull_sse_messages_sent_total counter\n")
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_pull_sse_connection_active Current number of active SSE connections by route.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_pull_sse_connection_active gauge\n")
 		for _, route := range sortedRoutes(pullSnapshot) {
 			metrics := pullSnapshot[route]
 			for _, status := range orderedPullStatuses(metrics.dequeueByStatus) {
@@ -1174,6 +1221,9 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			_, _ = fmt.Fprintf(w, "hookaido_pull_nack_conflict_total{route=%q} %d\n", route, metrics.nackConflictTotal)
 			_, _ = fmt.Fprintf(w, "hookaido_pull_lease_active{route=%q} %d\n", route, metrics.leaseActive)
 			_, _ = fmt.Fprintf(w, "hookaido_pull_lease_expired_total{route=%q} %d\n", route, metrics.leaseExpiredTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_connections_total{route=%q} %d\n", route, metrics.sseConnectionsTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_messages_sent_total{route=%q} %d\n", route, metrics.sseMessagesSentTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_connection_active{route=%q} %d\n", route, metrics.sseConnectionActive)
 		}
 
 		// --- Queue depth (on-scrape from store) ---

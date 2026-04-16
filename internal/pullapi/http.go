@@ -42,8 +42,12 @@ type Server struct {
 	MaxBatch        int
 	MaxLeaseBatch   int
 	MaxLeaseTTL     time.Duration
-	DefaultMaxWait  time.Duration
-	MaxWait         time.Duration
+	DefaultMaxWait   time.Duration
+	MaxWait          time.Duration
+	SSEKeepalive        time.Duration
+	SSEMaxConnection    time.Duration
+	ObserveSSEConnect   func(route string)
+	ObserveSSEDisconnect func(route string, statusCode int, messagesSent int, duration time.Duration)
 
 	RecentLeaseOpTTL time.Duration
 	RecentLeaseOpCap int
@@ -79,6 +83,31 @@ type recentLeaseOpEntry struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cleanPath := path.Clean(r.URL.Path)
+	op := path.Base(cleanPath)
+	endpoint := strings.TrimSuffix(cleanPath, "/"+op)
+	if endpoint == "" {
+		endpoint = "/"
+	}
+
+	if r.Method == http.MethodGet {
+		if op != "stream" {
+			writeError(w, http.StatusMethodNotAllowed, pullErrMethodNotAllowed, "method must be POST")
+			return
+		}
+		if s.Authorize != nil && !s.Authorize(r) {
+			writeError(w, http.StatusUnauthorized, pullErrUnauthorized, "request is not authorized")
+			return
+		}
+		route, ok := s.resolveRoute(endpoint)
+		if !ok {
+			writeError(w, http.StatusNotFound, pullErrRouteNotFound, "pull endpoint is not configured")
+			return
+		}
+		s.handleSSE(w, r, route)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, pullErrMethodNotAllowed, "method must be POST")
 		return
@@ -87,13 +116,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.Authorize != nil && !s.Authorize(r) {
 		writeError(w, http.StatusUnauthorized, pullErrUnauthorized, "request is not authorized")
 		return
-	}
-
-	cleanPath := path.Clean(r.URL.Path)
-	op := path.Base(cleanPath)
-	endpoint := strings.TrimSuffix(cleanPath, "/"+op)
-	if endpoint == "" {
-		endpoint = "/"
 	}
 
 	route, ok := s.resolveRoute(endpoint)
@@ -110,6 +132,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleNack(w, r, route)
 	case "extend":
 		s.handleExtend(w, r, route)
+	case "stream":
+		writeError(w, http.StatusMethodNotAllowed, pullErrMethodNotAllowed, "stream requires GET method")
 	default:
 		writeError(w, http.StatusNotFound, pullErrOperationNotFound, "pull operation was not found")
 	}

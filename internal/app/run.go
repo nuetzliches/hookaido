@@ -1797,6 +1797,14 @@ func startServers(
 	pullHandler.MaxLeaseTTL = compiled.PullAPI.MaxLeaseTTL
 	pullHandler.DefaultMaxWait = compiled.PullAPI.DefaultMaxWait
 	pullHandler.MaxWait = compiled.PullAPI.MaxWait
+	pullHandler.SSEKeepalive = compiled.PullAPI.SSEKeepalive
+	pullHandler.SSEMaxConnection = compiled.PullAPI.SSEMaxConnection
+	pullHandler.ObserveSSEConnect = func(route string) {
+		appMetrics.observePullSSEConnect(route)
+	}
+	pullHandler.ObserveSSEDisconnect = func(route string, statusCode int, messagesSent int, duration time.Duration) {
+		appMetrics.observePullSSEDisconnect(route, statusCode, messagesSent, duration)
+	}
 	pullHandler.ObserveDequeue = func(route string, statusCode int, items []queue.Envelope) {
 		appMetrics.observePullDequeue(route, statusCode, items)
 	}

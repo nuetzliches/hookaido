@@ -96,6 +96,14 @@ func NewMemoryStore(opts ...MemoryOption) *MemoryStore {
 	return s
 }
 
+// NotifyCh returns a channel that is closed when new items become available.
+// After the channel fires, callers must call NotifyCh again to get the next signal.
+func (s *MemoryStore) NotifyCh() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.notify
+}
+
 // WithMemoryPressureLimits overrides memory pressure limits for the in-memory
 // backend. Positive values enable explicit thresholds.
 func WithMemoryPressureLimits(retainedItems int, retainedBytes int64) MemoryOption {

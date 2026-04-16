@@ -85,18 +85,7 @@ jobs:
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.attestation.json"
           cp "${{ steps.attest_sbom.outputs.bundle-path }}" "dist/hookaido_${{ steps.version_meta.outputs.safe_version }}_sbom.intoto.jsonl"
       - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          COMMIT="${GITHUB_SHA}"
-          # Clean up any pre-existing release AND tag. Published releases
-          # are immutable (org rulesets) so both must be removed first.
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release delete "$TAG" --yes --cleanup-tag
-          fi
-          # Recreate tag + release with assets in one atomic step.
-          gh release create "$TAG" dist/* \
-            --target "$COMMIT" \
-            --title "$TAG" \
-            --generate-notes
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: dist/*
+          generate_release_notes: true

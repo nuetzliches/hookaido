@@ -89,14 +89,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # Delete any existing release (published releases are immutable
-          # and block asset uploads). The tag is preserved.
+          COMMIT="${GITHUB_SHA}"
+          # Clean up any pre-existing release AND tag. Published releases
+          # are immutable (org rulesets) so both must be removed first.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release delete "$TAG" --yes
+            gh release delete "$TAG" --yes --cleanup-tag
           fi
-          # Create a draft release, upload assets, then publish.
+          # Recreate tag + release with assets in one atomic step.
           gh release create "$TAG" dist/* \
-            --draft \
+            --target "$COMMIT" \
             --title "$TAG" \
             --generate-notes
-          gh release edit "$TAG" --draft=false --latest

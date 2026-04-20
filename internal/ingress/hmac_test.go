@@ -310,15 +310,15 @@ func TestHMACAuth_VerifyStripe_MissingHeader(t *testing.T) {
 func TestHMACAuth_VerifyStripe_ExpiredTimestamp(t *testing.T) {
 	secret := []byte("stripe-webhook-secret")
 	body := []byte(`{"id":"evt_123"}`)
-	sigTs := time.Unix(1735689600, 0).UTC()
-	now := sigTs.Add(10 * time.Minute) // 10min after signature — outside default 5min tolerance
+	sigTS := time.Unix(1735689600, 0).UTC()
+	now := sigTS.Add(10 * time.Minute) // 10min after signature — outside default 5min tolerance
 
 	auth := NewHMACAuth([][]byte{secret})
 	auth.Provider = "stripe"
 	auth.Now = func() time.Time { return now }
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/stripe", bytes.NewReader(body))
-	req.Header.Set("Stripe-Signature", signStripe(sigTs.Unix(), body, secret, "v1"))
+	req.Header.Set("Stripe-Signature", signStripe(sigTS.Unix(), body, secret, "v1"))
 
 	if err := auth.Verify(req, "/webhooks/stripe", body); err == nil {
 		t.Fatalf("expected unauthorized for expired timestamp")
@@ -328,15 +328,15 @@ func TestHMACAuth_VerifyStripe_ExpiredTimestamp(t *testing.T) {
 func TestHMACAuth_VerifyStripe_FutureTimestamp(t *testing.T) {
 	secret := []byte("stripe-webhook-secret")
 	body := []byte(`{"id":"evt_123"}`)
-	sigTs := time.Unix(1735689600, 0).UTC()
-	now := sigTs.Add(-10 * time.Minute) // now is 10min before ts — also outside tolerance
+	sigTS := time.Unix(1735689600, 0).UTC()
+	now := sigTS.Add(-10 * time.Minute) // now is 10min before ts — also outside tolerance
 
 	auth := NewHMACAuth([][]byte{secret})
 	auth.Provider = "stripe"
 	auth.Now = func() time.Time { return now }
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/stripe", bytes.NewReader(body))
-	req.Header.Set("Stripe-Signature", signStripe(sigTs.Unix(), body, secret, "v1"))
+	req.Header.Set("Stripe-Signature", signStripe(sigTS.Unix(), body, secret, "v1"))
 
 	if err := auth.Verify(req, "/webhooks/stripe", body); err == nil {
 		t.Fatalf("expected unauthorized for future timestamp")
@@ -346,8 +346,8 @@ func TestHMACAuth_VerifyStripe_FutureTimestamp(t *testing.T) {
 func TestHMACAuth_VerifyStripe_CustomTolerance(t *testing.T) {
 	secret := []byte("stripe-webhook-secret")
 	body := []byte(`{"id":"evt_123"}`)
-	sigTs := time.Unix(1735689600, 0).UTC()
-	now := sigTs.Add(8 * time.Minute)
+	sigTS := time.Unix(1735689600, 0).UTC()
+	now := sigTS.Add(8 * time.Minute)
 
 	auth := NewHMACAuth([][]byte{secret})
 	auth.Provider = "stripe"
@@ -355,7 +355,7 @@ func TestHMACAuth_VerifyStripe_CustomTolerance(t *testing.T) {
 	auth.Now = func() time.Time { return now }
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/stripe", bytes.NewReader(body))
-	req.Header.Set("Stripe-Signature", signStripe(sigTs.Unix(), body, secret, "v1"))
+	req.Header.Set("Stripe-Signature", signStripe(sigTS.Unix(), body, secret, "v1"))
 
 	if err := auth.Verify(req, "/webhooks/stripe", body); err != nil {
 		t.Fatalf("expected verify ok with 10m tolerance, got %v", err)

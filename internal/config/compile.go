@@ -684,10 +684,10 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 		if r.AuthHMACProviderSet {
 			raw := strings.TrimSpace(resolveValue(r.AuthHMACProvider, fmt.Sprintf("route %q auth hmac provider", rPath), &res))
 			switch raw {
-			case "github", "gitea":
+			case "github", "gitea", "stripe", "cituro":
 				hmacProvider = raw
 			default:
-				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac provider %q must be one of: github, gitea", rPath, raw))
+				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac provider %q must be one of: github, gitea, stripe, cituro", rPath, raw))
 			}
 			if r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet || r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet {
 				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac provider is mutually exclusive with signature_header, timestamp_header, nonce_header, and tolerance", rPath))

@@ -32,6 +32,35 @@ Full control via block form:
 
 **Secret rotation:** With `secret_ref`, verification tries all secrets valid at the request timestamp (from the signed timestamp header), allowing overlapping key rotation with zero downtime.
 
+#### Providers
+
+Provider-compatible HMAC verification short-circuits the canonical format and
+instead uses the wire format of a specific webhook provider:
+
+```hcl
+/webhooks/github { auth hmac { provider github; secret env:GH_SECRET } }
+/webhooks/gitea  { auth hmac { provider gitea;  secret env:GITEA_SECRET } }
+/webhooks/stripe { auth hmac { provider stripe; secret env:STRIPE_SECRET } }
+/webhooks/cituro { auth hmac { provider cituro; secret env:CITURO_SECRET } }
+```
+
+| Provider | Header | Signed payload | Replay protection |
+| --- | --- | --- | --- |
+| `github` | `X-Hub-Signature-256: sha256=<hex>` | `body` | none (GitHub omits timestamp) |
+| `gitea`  | `X-Gitea-Signature: <hex>`          | `body` | none |
+| `stripe` | `Stripe-Signature: t=<ts>,v1=<hex>[,v0=<hex>...]` | `<ts>.<body>` | 5 min fixed tolerance |
+| `cituro` | `X-CITURO-SIGNATURE: t=<ts>,s=<hex>` | `<ts>.<body>` | 5 min fixed tolerance |
+
+`stripe` and `cituro` share the same signature scheme (timestamped HMAC-SHA256
+over `<ts>.<body>`) — `cituro` is effectively an alias with a different
+header name (`X-CITURO-SIGNATURE`) and signature tag (`s` instead of `v1`).
+Both accept multiple comma-separated `<tag>=<hex>` pairs in the header; any
+matching signature verifies the request (useful for Stripe's v0/v1 rotation).
+
+Provider mode is mutually exclusive with `signature_header`, `timestamp_header`,
+`nonce_header`, and `tolerance` — use the canonical block form (without
+`provider`) if you need to customise those.
+
 ### Basic Auth
 
 ```hcl

@@ -166,6 +166,13 @@ func (a *HMACAuth) verifyProvider(r *http.Request, body []byte) error {
 		return a.verifyGitHub(r, body, secrets)
 	case "gitea":
 		return a.verifyGitea(r, body, secrets)
+	case "stripe":
+		return a.verifyStripe(r, body, secrets, "Stripe-Signature", "v1")
+	case "cituro":
+		// Cituro uses the same "t=<ts>,<tag>=<hex>" header format and
+		// "<ts>.<body>" signed-payload scheme as Stripe, but with a
+		// different header name and signature tag.
+		return a.verifyStripe(r, body, secrets, "X-CITURO-SIGNATURE", "s")
 	default:
 		return ErrUnauthorized
 	}
@@ -212,6 +219,89 @@ func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) e
 		}
 		mac := hmac.New(sha256.New, secret)
 		_, _ = mac.Write(body)
+		want := mac.Sum(nil)
+		if hmac.Equal(gotSig, want) {
+			return nil
+		}
+	}
+	return ErrUnauthorized
+}
+
+// verifyStripe verifies a Stripe-style HMAC signature.
+//
+// Header format: "t=<unix-ts>,<sigTag>=<hex>[,<sigTag>=<hex>...]"
+// (Stripe: `Stripe-Signature` with sigTag "v1". Other providers reuse the
+// same scheme with different header + tag names — e.g. Cituro uses
+// `X-CITURO-SIGNATURE` with sigTag "s".)
+//
+// String-to-sign: "<ts>.<body>" (HMAC-SHA256, lowercase hex).
+//
+// Replay protection: the timestamp must be within a.Tolerance of the current
+// time (default 5m). No nonce — retries within the tolerance window are
+// accepted, which matches Stripe/Cituro semantics.
+func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, headerName, sigTag string) error {
+	raw := strings.TrimSpace(r.Header.Get(headerName))
+	if raw == "" {
+		return ErrUnauthorized
+	}
+
+	var tsStr, sigHex string
+	for _, part := range strings.Split(raw, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.TrimSpace(kv[1])
+		switch key {
+		case "t":
+			if tsStr == "" {
+				tsStr = val
+			}
+		case sigTag:
+			if sigHex == "" {
+				sigHex = val
+			}
+		}
+	}
+	if tsStr == "" || sigHex == "" {
+		return ErrUnauthorized
+	}
+
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		return ErrUnauthorized
+	}
+
+	tolerance := a.Tolerance
+	if tolerance <= 0 {
+		tolerance = 5 * time.Minute
+	}
+	now := time.Now
+	if a.Now != nil {
+		now = a.Now
+	}
+	t := time.Unix(ts, 0).UTC()
+	if d := now().UTC().Sub(t); d < -tolerance || d > tolerance {
+		return ErrUnauthorized
+	}
+
+	gotSig, err := hex.DecodeString(sigHex)
+	if err != nil || len(gotSig) == 0 {
+		return ErrUnauthorized
+	}
+
+	msg := make([]byte, 0, len(tsStr)+1+len(body))
+	msg = append(msg, tsStr...)
+	msg = append(msg, '.')
+	msg = append(msg, body...)
+
+	for _, secret := range secrets {
+		if len(secret) == 0 {
+			continue
+		}
+		mac := hmac.New(sha256.New, secret)
+		_, _ = mac.Write(msg)
 		want := mac.Sum(nil)
 		if hmac.Equal(gotSig, want) {
 			return nil

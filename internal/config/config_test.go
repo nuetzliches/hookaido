@@ -7255,7 +7255,7 @@ pull_api { auth token "raw:t" }
 
 "/x" {
   auth hmac {
-    provider "stripe"
+    provider "shopify"
     secret env:GH_SECRET
   }
   pull { path "/e" }
@@ -7271,13 +7271,71 @@ pull_api { auth token "raw:t" }
 	}
 	found := false
 	for _, e := range res.Errors {
-		if strings.Contains(e, `provider "stripe" must be one of`) {
+		if strings.Contains(e, `provider "shopify" must be one of`) {
 			found = true
 			break
 		}
 	}
 	if !found {
 		t.Fatalf("expected invalid provider error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_AuthHMACProviderStripe(t *testing.T) {
+	t.Setenv("STRIPE_SECRET", "whsec_test")
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/webhooks/stripe" {
+  auth hmac {
+    provider stripe
+    secret env:STRIPE_SECRET
+  }
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+	if len(compiled.Routes) != 1 {
+		t.Fatalf("expected one route, got %#v", compiled.Routes)
+	}
+	if got := compiled.Routes[0].AuthHMACProvider; got != "stripe" {
+		t.Fatalf("expected provider stripe, got %q", got)
+	}
+}
+
+func TestCompile_AuthHMACProviderCituro(t *testing.T) {
+	t.Setenv("CITURO_SECRET", "whs_cituro_test")
+	in := []byte(`
+pull_api { auth token "raw:t" }
+
+"/webhooks/cituro" {
+  auth hmac {
+    provider cituro
+    secret env:CITURO_SECRET
+  }
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("compile: %#v", res)
+	}
+	if len(compiled.Routes) != 1 {
+		t.Fatalf("expected one route, got %#v", compiled.Routes)
+	}
+	if got := compiled.Routes[0].AuthHMACProvider; got != "cituro" {
+		t.Fatalf("expected provider cituro, got %q", got)
 	}
 }
 

@@ -10,6 +10,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ### Added
 
 - SSE endpoint for Pull API (`GET {pull.path}/stream`): consumers can receive webhook messages in real-time over a persistent Server-Sent Events connection instead of polling. Each SSE message creates a lease (same semantics as dequeue); ACK/NACK remain via existing POST endpoints. Supports `batch` and `lease_ttl` query parameters, configurable keepalive interval (`sse_keepalive`, default 15s) and max connection duration (`sse_max_connection`). Multiple concurrent SSE connections act as competing consumers. New Prometheus metrics: `hookaido_pull_sse_connections_total`, `hookaido_pull_sse_messages_sent_total`, `hookaido_pull_sse_connection_active`.
+- Stripe-compatible HMAC verification: `auth hmac { provider stripe; secret env:SECRET }` verifies the `Stripe-Signature: t=<ts>,v1=<hex>` header format with the `<ts>.<body>` signed payload and a 5-minute timestamp tolerance. Multiple comma-separated `<tag>=<hex>` pairs in the header are accepted (covers Stripe's v0/v1 rotation).
+- Cituro HMAC verification: `auth hmac { provider cituro; secret env:SECRET }` reuses the Stripe scheme with header `X-CITURO-SIGNATURE` and signature tag `s` instead of `v1`. Matches the wire format documented in Cituro's API spec.
 
 ### Fixed
 

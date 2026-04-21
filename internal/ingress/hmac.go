@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -242,6 +243,7 @@ func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) e
 func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, headerName, sigTag string) error {
 	raw := strings.TrimSpace(r.Header.Get(headerName))
 	if raw == "" {
+		slog.Warn("hmac_stripe_failed", "reason", "header_missing", "header", headerName)
 		return ErrUnauthorized
 	}
 
@@ -265,11 +267,17 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 		}
 	}
 	if tsStr == "" || sigHex == "" {
+		slog.Warn("hmac_stripe_failed", "reason", "parse_incomplete",
+			"header", headerName, "sig_tag", sigTag,
+			"ts_present", tsStr != "", "sig_present", sigHex != "",
+			"header_value", raw)
 		return ErrUnauthorized
 	}
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
+		slog.Warn("hmac_stripe_failed", "reason", "ts_parse_error",
+			"header", headerName, "ts_str", tsStr, "err", err.Error())
 		return ErrUnauthorized
 	}
 
@@ -283,11 +291,16 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 	}
 	t := time.Unix(ts, 0).UTC()
 	if d := now().UTC().Sub(t); d < -tolerance || d > tolerance {
+		slog.Warn("hmac_stripe_failed", "reason", "ts_out_of_tolerance",
+			"header", headerName, "ts_unix", ts, "delta_seconds", d.Seconds(),
+			"tolerance_seconds", tolerance.Seconds())
 		return ErrUnauthorized
 	}
 
 	gotSig, err := hex.DecodeString(sigHex)
 	if err != nil || len(gotSig) == 0 {
+		slog.Warn("hmac_stripe_failed", "reason", "sig_hex_decode_error",
+			"header", headerName, "sig_hex_len", len(sigHex), "sig_hex_prefix", safePrefix(sigHex, 6))
 		return ErrUnauthorized
 	}
 
@@ -307,7 +320,35 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 			return nil
 		}
 	}
+
+	// No secret matched: emit diagnostic fingerprint (never raw secrets or full signatures).
+	// "got_prefix" and "want_prefix" are the first 8 hex chars of the received vs.
+	// the computed signature for the *first* secret in the pool -- enough to spot
+	// a wholesale mismatch (wrong key material / wrong body framing) without
+	// leaking the full MAC.
+	var wantPrefix string
+	if len(secrets) > 0 && len(secrets[0]) > 0 {
+		mac := hmac.New(sha256.New, secrets[0])
+		_, _ = mac.Write(msg)
+		wantPrefix = hex.EncodeToString(mac.Sum(nil))[:8]
+	}
+	slog.Warn("hmac_stripe_failed", "reason", "no_secret_matched",
+		"header", headerName, "sig_tag", sigTag,
+		"secrets_tried", len(secrets),
+		"ts_str", tsStr, "body_len", len(body),
+		"got_prefix", hex.EncodeToString(gotSig)[:min(8, 2*len(gotSig))],
+		"want_prefix_first_secret", wantPrefix)
 	return ErrUnauthorized
+}
+
+// safePrefix returns the first n characters of s, or all of s if shorter.
+// Used for diagnostic logging where we want a fingerprint without leaking
+// the full value (e.g. signature prefix, not full signature).
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 type nonceCache struct {

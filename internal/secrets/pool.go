@@ -181,15 +181,33 @@ func (p *Pool) ListMetadata() []VersionMetadata {
 	return out
 }
 
-func (p *Pool) pruneExpiredLocked(now time.Time) {
+func (p *Pool) pruneExpiredLocked(now time.Time) []string {
+	var removed []string
 	kept := p.versions[:0]
 	for _, v := range p.versions {
 		if !v.ValidUntil.IsZero() && !v.ValidUntil.After(now) {
+			removed = append(removed, v.ID)
 			continue
 		}
 		kept = append(kept, v)
 	}
 	p.versions = kept
+	return removed
+}
+
+// PruneExpired removes every version whose ValidUntil is non-zero and not after
+// now, and returns the removed version IDs. Versions with zero ValidUntil
+// (unbounded) are never pruned. Safe for concurrent callers; uses the pool's
+// write lock.
+//
+// Used by the periodic secret-GC sweeper (internal/app) so that expired-but-
+// not-at-cap versions do not accumulate indefinitely in memory or in the
+// persisted runtime_secrets table. Add() already prunes opportunistically when
+// the pool is at max_versions; PruneExpired is the unconditional variant.
+func (p *Pool) PruneExpired(now time.Time) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pruneExpiredLocked(now)
 }
 
 func (p *Pool) maxVersionsOrDefault() int {

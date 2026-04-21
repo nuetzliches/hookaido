@@ -216,6 +216,7 @@ DELETE /admin/secrets/cituro/sec_<old>  # after cut-over
 - **Backup policy:** the `runtime_secrets` table contains sealed ciphertext; without `HOOKAIDO_SECRET_ENCRYPTION_KEY` it is unrecoverable. Store the key separately from the DB backup.
 - **Key rotation:** rotating `HOOKAIDO_SECRET_ENCRYPTION_KEY` invalidates all persisted runtime secrets. Plan a two-phase rotation (new key → issuer re-pushes → old key retired) — no automated re-wrap in v1.
 - **Overlap windows:** use `not_before`/`not_after` on the POST body to describe the rotation overlap. `Set.ValidAt` already filters by time, so both secrets can be live for the cut-over window.
+- **Expired-version GC:** a background sweeper runs every 5 minutes (plus once at startup) and removes versions whose `not_after` is in the past, both from the in-memory pool and from the persisted `runtime_secrets` table. Without it, short overlap windows would cause `GET /admin/secrets/<name>` and the DB to grow unboundedly since the per-`POST` opportunistic prune only fires when the pool is at `max_versions`. Each sweep emits a `secret_gc_pruned` log line per affected pool and increments `hookaido_runtime_secret_gc_pruned_total{pool="<name>"}`. The interval is not user-configurable in v1.
 
 ## API Access Control
 

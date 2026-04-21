@@ -39,6 +39,13 @@ import (
 
 const backlogTrendCaptureInterval = time.Minute
 
+// secretGCInterval controls how often the background sweeper prunes expired
+// runtime-secret versions. Matches defaultQueueRetentionPruneInterval (5 min)
+// since both are "periodic cleanup of rows nobody is actively reading".
+// Intentionally not configurable in v1 — operators with unusual overlap
+// windows can file a follow-up if the constant is too slack or too eager.
+const secretGCInterval = 5 * time.Minute
+
 func run() int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -265,6 +272,9 @@ func run() int {
 		runtimeLogger.Error("start_servers_failed", slog.Any("err", err))
 		return 1
 	}
+	// Must come after startServers because attachSecretStore (called inside)
+	// is what populates runtimeState.secretStore.
+	startSecretGC(ctx, state, appMetrics, runtimeLogger)
 	if compiled.HasDeliverRoutes {
 		currentPush = startPushDispatcher(compiled, store, runtimeLogger, appMetrics)
 		defer func() {
@@ -1314,6 +1324,71 @@ func startBacklogTrendCapture(ctx context.Context, trendStore queue.BacklogTrend
 				return
 			case <-ticker.C:
 				capture("interval")
+			}
+		}
+	}()
+}
+
+// startSecretGC runs a periodic sweep that prunes expired versions from every
+// registered secret pool and removes the corresponding rows from the persisted
+// store. Complements Pool.Add's opportunistic pruning (which only fires at
+// max_versions). Without the sweeper, deployments with many short overlap
+// windows accumulate expired-but-not-at-cap versions indefinitely in
+// Pool.ListMetadata() output and in the runtime_secrets table.
+//
+// Runs an immediate sweep on startup ("startup" trigger) so that rows left
+// over from a previous process lifetime are cleaned up before the first
+// ticker elapses. Stops when ctx is cancelled.
+func startSecretGC(ctx context.Context, state *runtimeState, metrics *runtimeMetrics, logger *slog.Logger) {
+	if state == nil || state.secretRegistry == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	sweep := func(trigger string) {
+		now := time.Now().UTC()
+		names := state.secretRegistry.Names()
+		for _, name := range names {
+			pool, ok := state.secretRegistry.Pool(name)
+			if !ok {
+				continue
+			}
+			removed := pool.PruneExpired(now)
+			if len(removed) == 0 {
+				continue
+			}
+			for _, id := range removed {
+				// Store delete errors are logged but do not unwind the pool
+				// mutation: the version is already gone from memory, so the
+				// DB row is at worst orphaned and operator-visible via logs.
+				if _, err := state.deleteSecretRecord(name, id); err != nil {
+					logger.Warn("secret_gc_store_delete_failed",
+						slog.String("pool", name),
+						slog.String("version_id", id),
+						slog.String("trigger", trigger),
+						slog.Any("err", err))
+				}
+			}
+			metrics.observeSecretGCPruned(name, len(removed))
+			logger.Info("secret_gc_pruned",
+				slog.String("pool", name),
+				slog.Int("removed", len(removed)),
+				slog.String("trigger", trigger))
+		}
+	}
+
+	sweep("startup")
+	go func() {
+		ticker := time.NewTicker(secretGCInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweep("interval")
 			}
 		}
 	}()

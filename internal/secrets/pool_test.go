@@ -206,6 +206,128 @@ func TestPool_Replace(t *testing.T) {
 	}
 }
 
+func TestPool_PruneExpired(t *testing.T) {
+	base := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+
+	t.Run("empty pool returns nil", func(t *testing.T) {
+		p, _ := NewPool("empty", true, 0, nil)
+		if got := p.PruneExpired(base); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("unbounded versions are never pruned", func(t *testing.T) {
+		p, _ := NewPool("unbounded", true, 0, nil)
+		_ = p.Add(makeVersion("v1", base.Add(-2*time.Hour), time.Time{}))
+		_ = p.Add(makeVersion("v2", base.Add(-time.Hour), time.Time{}))
+		if got := p.PruneExpired(base); len(got) != 0 {
+			t.Fatalf("expected 0, got %v", got)
+		}
+		if p.Size() != 2 {
+			t.Fatalf("Size: %d want 2", p.Size())
+		}
+	})
+
+	t.Run("expired versions are removed, live ones kept", func(t *testing.T) {
+		p, _ := NewPool("mixed", true, 0, nil)
+		_ = p.Add(makeVersion("exp1", base.Add(-3*time.Hour), base.Add(-2*time.Hour)))
+		_ = p.Add(makeVersion("exp2", base.Add(-3*time.Hour), base.Add(-time.Hour)))
+		_ = p.Add(makeVersion("live", base, base.Add(time.Hour)))
+		_ = p.Add(makeVersion("unbounded", base, time.Time{}))
+
+		removed := p.PruneExpired(base)
+		if len(removed) != 2 {
+			t.Fatalf("expected 2 removed, got %v", removed)
+		}
+		gotIDs := map[string]bool{}
+		for _, id := range removed {
+			gotIDs[id] = true
+		}
+		if !gotIDs["exp1"] || !gotIDs["exp2"] {
+			t.Fatalf("expected exp1+exp2, got %v", removed)
+		}
+		if p.Size() != 2 {
+			t.Fatalf("Size after prune: %d want 2", p.Size())
+		}
+		for _, v := range p.List() {
+			if v.ID == "exp1" || v.ID == "exp2" {
+				t.Fatalf("pruned version %q still present", v.ID)
+			}
+		}
+	})
+
+	t.Run("ValidUntil equal to now is pruned (exclusive boundary)", func(t *testing.T) {
+		p, _ := NewPool("boundary", true, 0, nil)
+		_ = p.Add(makeVersion("edge", base.Add(-time.Hour), base))
+		removed := p.PruneExpired(base)
+		if len(removed) != 1 || removed[0] != "edge" {
+			t.Fatalf("expected [edge] removed, got %v", removed)
+		}
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		p, _ := NewPool("idem", true, 0, nil)
+		_ = p.Add(makeVersion("expired", base.Add(-2*time.Hour), base.Add(-time.Hour)))
+		_ = p.Add(makeVersion("live", base, time.Time{}))
+
+		first := p.PruneExpired(base)
+		second := p.PruneExpired(base)
+		if len(first) != 1 || first[0] != "expired" {
+			t.Fatalf("first sweep: %v", first)
+		}
+		if len(second) != 0 {
+			t.Fatalf("second sweep should be a no-op, got %v", second)
+		}
+	})
+
+	t.Run("concurrent PruneExpired + ValidAt + Add", func(t *testing.T) {
+		p, _ := NewPool("concurrent-gc", true, 512, nil)
+		// Seed with a mix of expired and live versions.
+		for i := 0; i < 32; i++ {
+			_ = p.Add(makeVersion(fmt.Sprintf("exp%d", i),
+				base.Add(-2*time.Hour), base.Add(-time.Hour)))
+		}
+		for i := 0; i < 32; i++ {
+			_ = p.Add(makeVersion(fmt.Sprintf("live%d", i),
+				base, time.Time{}))
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(3)
+		// Pruner
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				_ = p.PruneExpired(base)
+			}
+		}()
+		// Reader
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				_ = p.ValidAt(base)
+				_ = p.List()
+			}
+		}()
+		// Writer
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				_ = p.Add(makeVersion(fmt.Sprintf("new%d", i),
+					base.Add(time.Duration(i)*time.Millisecond), time.Time{}))
+			}
+		}()
+		wg.Wait()
+
+		// After the race, only live + new versions should remain; all exp* must be gone.
+		for _, v := range p.List() {
+			if len(v.ID) >= 3 && v.ID[:3] == "exp" {
+				t.Fatalf("expired version %q survived prune race", v.ID)
+			}
+		}
+	})
+}
+
 func TestPool_ConcurrentAddAndValidAt(t *testing.T) {
 	p, _ := NewPool("concurrent", true, 256, nil)
 	base := time.Now().UTC()

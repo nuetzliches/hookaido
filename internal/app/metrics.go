@@ -50,6 +50,11 @@ type runtimeMetrics struct {
 	deliveryDeadMu       sync.Mutex
 	deliveryDeadByReason map[string]int64
 
+	// Runtime-secret GC counters. Pool label is unbounded in principle but in
+	// practice bounded by the number of declared runtime secrets.
+	secretGCMu           sync.Mutex
+	secretGCPrunedByPool map[string]int64
+
 	// Queue store for on-scrape stats
 	queueStore queue.Store
 	queueStats struct {
@@ -106,6 +111,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		ingressAdaptiveByReason:         make(map[string]int64),
 		ingressRejectedByReasonAndState: make(map[string]map[string]int64),
 		deliveryDeadByReason:            make(map[string]int64),
+		secretGCPrunedByPool:            make(map[string]int64),
 	}
 	m.queueStats.ttl = time.Second
 	return m
@@ -211,6 +217,34 @@ func (m *runtimeMetrics) observeDeliveryDeadReason(reason string) {
 	}
 	m.deliveryDeadByReason[normalized]++
 	m.deliveryDeadMu.Unlock()
+}
+
+// observeSecretGCPruned records that n expired versions were pruned from the
+// given pool. A pool that has never been swept does not appear in the exposed
+// counter until its first non-zero observation.
+func (m *runtimeMetrics) observeSecretGCPruned(pool string, n int) {
+	if m == nil || n <= 0 || pool == "" {
+		return
+	}
+	m.secretGCMu.Lock()
+	if m.secretGCPrunedByPool == nil {
+		m.secretGCPrunedByPool = make(map[string]int64)
+	}
+	m.secretGCPrunedByPool[pool] += int64(n)
+	m.secretGCMu.Unlock()
+}
+
+func (m *runtimeMetrics) secretGCPrunedSnapshot() map[string]int64 {
+	if m == nil {
+		return nil
+	}
+	m.secretGCMu.Lock()
+	defer m.secretGCMu.Unlock()
+	out := make(map[string]int64, len(m.secretGCPrunedByPool))
+	for k, v := range m.secretGCPrunedByPool {
+		out[k] = v
+	}
+	return out
 }
 
 func (m *runtimeMetrics) observePublishResult(accepted, rejected int, code string, scoped bool) {
@@ -1035,6 +1069,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		}
 		ingressRejectBreakdown := newIngressRejectBreakdownSnapshot()
 		var pullSnapshot map[string]pullRouteSnapshot
+		var secretGCPrunedByPool map[string]int64
 		if rm != nil {
 			tracingEnabled = rm.tracingEnabled.Load()
 			tracingInitFailuresTotal = rm.tracingInitFailuresTotal.Load()
@@ -1055,6 +1090,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			deliveryDeadByReason = rm.deliveryDeadReasonSnapshot()
 			ingressRejectBreakdown = rm.ingressRejectBreakdownSnapshot()
 			pullSnapshot = rm.pullSnapshot()
+			secretGCPrunedByPool = rm.secretGCPrunedSnapshot()
 		}
 
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -1181,6 +1217,18 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_delivery_dead_by_reason_total counter\n")
 		for _, reason := range deliveryDeadReasonOrder {
 			_, _ = fmt.Fprintf(w, "hookaido_delivery_dead_by_reason_total{reason=%q} %d\n", reason, deliveryDeadByReason[reason])
+		}
+
+		// --- Runtime secret GC ---
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_runtime_secret_gc_pruned_total Total number of expired runtime-secret versions pruned by the background sweeper, by pool name.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_runtime_secret_gc_pruned_total counter\n")
+		secretGCPools := make([]string, 0, len(secretGCPrunedByPool))
+		for pool := range secretGCPrunedByPool {
+			secretGCPools = append(secretGCPools, pool)
+		}
+		sort.Strings(secretGCPools)
+		for _, pool := range secretGCPools {
+			_, _ = fmt.Fprintf(w, "hookaido_runtime_secret_gc_pruned_total{pool=%q} %d\n", pool, secretGCPrunedByPool[pool])
 		}
 
 		// --- Pull metrics ---

@@ -7,6 +7,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-04-21
+
+### Fixed
+
+- Bare `GET /healthz` (no query string) now bypasses the `admin_api.auth token` guard so orchestrator liveness probes (Docker healthcheck, Kubernetes `livenessProbe`, cloud load balancers) can reach it without a bearer token ([#153](https://github.com/nuetzliches/hookaido/issues/153)). `/healthz?details=1` (and any other query string, including `?details=0`) still follows admin auth — the diagnostic payload leaks queue/backlog/ingress telemetry that must stay gated. Removes the `CMD-SHELL` Bearer-token workaround required by v2.7.0 deployments with admin auth enabled; the static `ok\n` response body exposes no deployment-sensitive information.
+
 ## [2.7.0] - 2026-04-21
 
 ### Added

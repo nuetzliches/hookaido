@@ -181,6 +181,42 @@ secrets {
 - **Signing** selects the newest (or oldest) valid secret at signing time.
 - **Verification** tries all secrets valid at the request timestamp — not wall-clock time — enabling safe rotation with overlapping windows.
 
+### Runtime Rotation via Admin API
+
+For HMAC verification secrets that the upstream issuer rotates at runtime (Cituro's `roll-secret`, Stripe webhook-endpoint rotation, etc.), declare the pool as `runtime true`:
+
+```hcl
+secrets {
+  secret "cituro" {
+    runtime true
+    max_versions 16
+    # optional bootstrap: seeded once if the DB pool is empty
+    value env:CITURO_BOOTSTRAP_SECRET
+    valid_from "2026-04-21T00:00:00Z"
+  }
+}
+```
+
+The issuer service (e.g. soapNEO) then pushes fresh secrets via the admin API:
+
+```
+POST /admin/secrets/cituro   # add new secret during overlap window
+DELETE /admin/secrets/cituro/sec_<old>  # after cut-over
+```
+
+**Requirements:**
+
+- `HOOKAIDO_SECRET_ENCRYPTION_KEY` (32 bytes, base64) must be exported. Runtime-added secrets are AES-256-GCM sealed before they are written to the backing store (SQLite `runtime_secrets` table, or Postgres equivalent). The key is only in memory — the DB alone is not sufficient to decrypt.
+- Backing store must be SQLite or Postgres. Memory-only deployments accept the writes but lose them on restart (a warning is logged at startup).
+- The admin token already protects the endpoint. Keep the admin listener on an internal interface.
+
+**Operational notes:**
+
+- **Push before cut-over:** the issuer must POST the secret to Hookaido *before* the upstream provider begins issuing webhooks signed with it. Otherwise the `verifyStripe`/`verifyCituro` 5-minute tolerance window will silently drop early requests.
+- **Backup policy:** the `runtime_secrets` table contains sealed ciphertext; without `HOOKAIDO_SECRET_ENCRYPTION_KEY` it is unrecoverable. Store the key separately from the DB backup.
+- **Key rotation:** rotating `HOOKAIDO_SECRET_ENCRYPTION_KEY` invalidates all persisted runtime secrets. Plan a two-phase rotation (new key → issuer re-pushes → old key retired) — no automated re-wrap in v1.
+- **Overlap windows:** use `not_before`/`not_after` on the POST body to describe the rotation overlap. `Set.ValidAt` already filters by time, so both secrets can be live for the cut-over window.
+
 ## API Access Control
 
 ### Pull API

@@ -227,6 +227,12 @@ func writeSecretsBlock(b *bytes.Buffer, s *SecretsBlock) {
 		if secret.ValidUntilSet {
 			fmt.Fprintf(b, "    valid_until %s\n", formatValue(secret.ValidUntil, secret.ValidUntilQuoted))
 		}
+		if secret.RuntimeSet {
+			fmt.Fprintf(b, "    runtime %s\n", formatValue(secret.Runtime, secret.RuntimeQuoted))
+		}
+		if secret.MaxVersionsSet {
+			fmt.Fprintf(b, "    max_versions %s\n", formatValue(secret.MaxVersions, secret.MaxVersionsQuoted))
+		}
 		b.WriteString("  }\n")
 	}
 	b.WriteString("}\n")

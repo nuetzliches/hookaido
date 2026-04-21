@@ -125,6 +125,18 @@ CREATE INDEX IF NOT EXISTS idx_pg_backlog_trend_time
   ON backlog_trend_samples(captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pg_backlog_trend_route_target_time
   ON backlog_trend_samples(route, target, captured_at DESC);
+
+CREATE TABLE IF NOT EXISTS runtime_secrets (
+  pool_name  TEXT NOT NULL,
+  id         TEXT NOT NULL,
+  sealed     BYTEA NOT NULL,
+  not_before TIMESTAMPTZ NOT NULL,
+  not_after  TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (pool_name, id)
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_secrets_pool
+  ON runtime_secrets(pool_name, not_before DESC);
 `
 
 func WithNowFunc(now func() time.Time) Option {

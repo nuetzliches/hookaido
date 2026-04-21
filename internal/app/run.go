@@ -320,6 +320,11 @@ type runtimeState struct {
 	ingressRouteLimits   map[string]*tokenBucketLimiter
 	adaptiveController   *adaptiveAdmissionController
 	now                  func() time.Time
+
+	secretRegistry *secrets.Registry
+	runtimePools   map[string]struct{}
+	secretStore    secrets.Store
+	sealer         *secrets.Sealer
 }
 
 func newRuntimeState(compiled config.Compiled) *runtimeState {
@@ -335,6 +340,8 @@ func newRuntimeState(compiled config.Compiled) *runtimeState {
 		hmacByRoute:          make(map[string]*ingress.HMACAuth),
 		ingressRouteLimits:   make(map[string]*tokenBucketLimiter),
 		now:                  time.Now,
+		secretRegistry:       secrets.NewRegistry(),
+		runtimePools:         make(map[string]struct{}),
 	}
 	s.adaptiveController = newAdaptiveAdmissionController(compiled.Defaults.AdaptiveBackpressure, compiled.Defaults.TrendSignals)
 	s.configureIngressRateLimits(compiled)
@@ -414,6 +421,233 @@ func (s *runtimeState) setQueueStore(store queue.Store) {
 	s.mu.RUnlock()
 	if controller != nil {
 		controller.setStore(store)
+	}
+}
+
+// attachSecretStore connects the runtime-secrets persistence layer. It
+// type-asserts the queue store to secrets.Store (SQLite/Postgres implement
+// both) and falls back to an in-memory store when the queue backend is itself
+// in-memory. After attaching, runtime pools are hydrated from persisted
+// records and seeded from their bootstrap ValueRef when still empty.
+func (s *runtimeState) attachSecretStore(store queue.Store, compiled config.Compiled, logger *slog.Logger) error {
+	var ss secrets.Store
+	if candidate, ok := store.(secrets.Store); ok {
+		ss = candidate
+	} else {
+		ss = secrets.NewMemoryStore()
+		if logger != nil {
+			logger.Warn("runtime_secrets_memory_only",
+				slog.String("reason", "queue backend does not implement secrets.Store; runtime secrets will not survive restart"))
+		}
+	}
+	s.mu.Lock()
+	s.secretStore = ss
+	s.mu.Unlock()
+	return s.hydrateRuntimeSecrets(compiled, logger)
+}
+
+// hydrateRuntimeSecrets loads persisted records into their pools and, for
+// still-empty pools with a configured bootstrap ValueRef, seeds them. Called
+// once per process after attachSecretStore; reloads do not re-hydrate because
+// the pool state is already authoritative in memory.
+func (s *runtimeState) hydrateRuntimeSecrets(compiled config.Compiled, logger *slog.Logger) error {
+	s.mu.RLock()
+	store := s.secretStore
+	sealer := s.sealer
+	s.mu.RUnlock()
+	if store == nil {
+		return nil
+	}
+	for id, sc := range compiled.Secrets {
+		if !sc.Runtime {
+			continue
+		}
+		pool, ok := s.secretRegistry.Pool(id)
+		if !ok {
+			continue
+		}
+		if pool.Size() > 0 {
+			continue
+		}
+		records, err := store.ListByPool(id)
+		if err != nil {
+			return fmt.Errorf("hydrate secret %q: %w", id, err)
+		}
+		versions := make([]secrets.Version, 0, len(records))
+		for _, rec := range records {
+			if sealer == nil {
+				return fmt.Errorf("hydrate secret %q: no sealer configured", id)
+			}
+			plain, err := sealer.Open(rec.Sealed)
+			if err != nil {
+				return fmt.Errorf("hydrate secret %q record %q: %w", id, rec.ID, err)
+			}
+			versions = append(versions, secrets.Version{
+				ID:         rec.ID,
+				Value:      plain,
+				ValidFrom:  rec.NotBefore,
+				ValidUntil: rec.NotAfter,
+			})
+		}
+		if len(versions) > 0 {
+			if err := pool.Replace(versions); err != nil {
+				return fmt.Errorf("hydrate secret %q replace: %w", id, err)
+			}
+			if logger != nil {
+				logger.Info("runtime_secret_hydrated",
+					slog.String("pool", id), slog.Int("versions", len(versions)))
+			}
+			continue
+		}
+		// DB empty for this pool — seed from bootstrap ValueRef if available.
+		if sc.ValueRef == "" {
+			continue
+		}
+		plain, err := secrets.LoadRef(sc.ValueRef)
+		if err != nil {
+			return fmt.Errorf("seed secret %q: %w", id, err)
+		}
+		bootstrapID := "sec_bootstrap"
+		bootstrapFrom := sc.ValidFrom
+		if bootstrapFrom.IsZero() {
+			bootstrapFrom = time.Now().UTC()
+		}
+		version := secrets.Version{
+			ID:         bootstrapID,
+			Value:      plain,
+			ValidFrom:  bootstrapFrom,
+			ValidUntil: sc.ValidUntil,
+		}
+		if err := pool.Add(version); err != nil {
+			return fmt.Errorf("seed secret %q pool: %w", id, err)
+		}
+		if sealer != nil && store != nil {
+			sealed, err := sealer.Seal(plain)
+			if err != nil {
+				return fmt.Errorf("seed secret %q seal: %w", id, err)
+			}
+			rec := secrets.Record{
+				PoolName:  id,
+				ID:        bootstrapID,
+				Sealed:    sealed,
+				NotBefore: bootstrapFrom,
+				NotAfter:  sc.ValidUntil,
+				CreatedAt: time.Now().UTC(),
+			}
+			if err := store.Upsert(rec); err != nil {
+				return fmt.Errorf("seed secret %q persist: %w", id, err)
+			}
+		}
+		if logger != nil {
+			logger.Info("runtime_secret_seeded_from_config",
+				slog.String("pool", id), slog.String("bootstrap_id", bootstrapID))
+		}
+	}
+	return nil
+}
+
+// secretPool exposes a runtime-mutable pool via the admin API, subject to the
+// runtime-true allowlist. Returns (nil, false) for pools that are not declared
+// runtime=true (protects static pools from admin mutation).
+func (s *runtimeState) secretPool(name string) (*secrets.Pool, bool) {
+	s.mu.RLock()
+	runtimeOK := false
+	if s.runtimePools != nil {
+		_, runtimeOK = s.runtimePools[name]
+	}
+	s.mu.RUnlock()
+	if !runtimeOK {
+		return nil, false
+	}
+	return s.secretRegistry.Pool(name)
+}
+
+// persistSecret writes a sealed record via the attached store.
+func (s *runtimeState) persistSecret(rec secrets.Record) error {
+	s.mu.RLock()
+	store := s.secretStore
+	s.mu.RUnlock()
+	if store == nil {
+		return fmt.Errorf("secret store not attached")
+	}
+	return store.Upsert(rec)
+}
+
+// deleteSecretRecord removes a record via the attached store.
+func (s *runtimeState) deleteSecretRecord(poolName, id string) (bool, error) {
+	s.mu.RLock()
+	store := s.secretStore
+	s.mu.RUnlock()
+	if store == nil {
+		return false, fmt.Errorf("secret store not attached")
+	}
+	return store.Delete(poolName, id)
+}
+
+// sealSecretValue seals plaintext for persistence.
+func (s *runtimeState) sealSecretValue(plain []byte) ([]byte, error) {
+	s.mu.RLock()
+	sealer := s.sealer
+	s.mu.RUnlock()
+	if sealer == nil {
+		return nil, fmt.Errorf("sealer not configured")
+	}
+	return sealer.Seal(plain)
+}
+
+// adminSecretPool adapts *secrets.Pool to admin.SecretPool. The admin package
+// stays decoupled from internal/secrets; this adapter lives in internal/app
+// where both dependencies already exist.
+type adminSecretPool struct {
+	pool *secrets.Pool
+}
+
+func (a *adminSecretPool) Name() string  { return a.pool.Name() }
+func (a *adminSecretPool) Runtime() bool { return a.pool.Runtime() }
+
+func (a *adminSecretPool) Add(id string, value []byte, notBefore, notAfter time.Time) error {
+	err := a.pool.Add(secrets.Version{
+		ID:         id,
+		Value:      value,
+		ValidFrom:  notBefore,
+		ValidUntil: notAfter,
+	})
+	return mapPoolErr(err)
+}
+
+func (a *adminSecretPool) Remove(id string) bool {
+	_, removed := a.pool.Remove(id)
+	return removed
+}
+
+func (a *adminSecretPool) ListMetadata() []admin.SecretVersionMetadata {
+	mds := a.pool.ListMetadata()
+	out := make([]admin.SecretVersionMetadata, len(mds))
+	for i, md := range mds {
+		out[i] = admin.SecretVersionMetadata{
+			ID:        md.ID,
+			NotBefore: md.ValidFrom,
+			NotAfter:  md.ValidUntil,
+		}
+	}
+	return out
+}
+
+func mapPoolErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, secrets.ErrDuplicateID):
+		return fmt.Errorf("%w: %v", admin.ErrSecretDuplicate, err)
+	case errors.Is(err, secrets.ErrPoolFull):
+		return fmt.Errorf("%w: %v", admin.ErrSecretPoolFull, err)
+	case errors.Is(err, secrets.ErrEmptyID),
+		errors.Is(err, secrets.ErrEmptyValue),
+		errors.Is(err, secrets.ErrMissingFrom),
+		errors.Is(err, secrets.ErrInvalidWindow):
+		return fmt.Errorf("%w: %v", admin.ErrSecretInvalid, err)
+	default:
+		return err
 	}
 }
 
@@ -857,17 +1091,80 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		adminTokens = append(adminTokens, b)
 	}
 
-	secretVersions := make(map[string]secrets.Version, len(compiled.Secrets))
+	// Ensure a sealer exists if any secret is runtime=true. We attempt this before
+	// touching any pool so failures surface with a clear message.
+	anyRuntime := false
+	for _, sc := range compiled.Secrets {
+		if sc.Runtime {
+			anyRuntime = true
+			break
+		}
+	}
+	if anyRuntime && s.sealer == nil {
+		keyRef := strings.TrimSpace(os.Getenv("HOOKAIDO_SECRET_ENCRYPTION_KEY"))
+		if keyRef == "" {
+			return fmt.Errorf("HOOKAIDO_SECRET_ENCRYPTION_KEY is required when any secret is declared runtime=true")
+		}
+		sealer, err := secrets.NewSealer(keyRef)
+		if err != nil {
+			return fmt.Errorf("HOOKAIDO_SECRET_ENCRYPTION_KEY: %w", err)
+		}
+		s.sealer = sealer
+	}
+
+	// Build per-name pools. For runtime=true pools, preserve any existing *Pool
+	// pointer across reload so in-flight route closures see live mutations.
+	nextRuntimePools := make(map[string]struct{})
 	for id, sc := range compiled.Secrets {
+		if sc.Runtime {
+			nextRuntimePools[id] = struct{}{}
+			if _, ok := s.secretRegistry.Pool(id); ok {
+				// Already registered from a previous loadAuth call; versions are managed
+				// via admin API + hydrateRuntimeSecrets. Do not replace.
+				continue
+			}
+			pool, err := secrets.NewPool(id, true, sc.MaxVersions, nil)
+			if err != nil {
+				return fmt.Errorf("secret %q: %w", id, err)
+			}
+			if err := s.secretRegistry.Register(pool); err != nil {
+				return fmt.Errorf("register runtime pool %q: %w", id, err)
+			}
+			continue
+		}
+
+		// Non-runtime (static) pool: single seed version from ValueRef.
 		b, err := secrets.LoadRef(sc.ValueRef)
 		if err != nil {
 			return fmt.Errorf("secret %q value %q: %w", id, sc.ValueRef, err)
 		}
-		secretVersions[id] = secrets.Version{
+		seed := []secrets.Version{{
 			ID:         id,
 			Value:      b,
 			ValidFrom:  sc.ValidFrom,
 			ValidUntil: sc.ValidUntil,
+		}}
+		if existing, ok := s.secretRegistry.Pool(id); ok {
+			if err := existing.Replace(seed); err != nil {
+				return fmt.Errorf("replace static pool %q: %w", id, err)
+			}
+		} else {
+			pool, err := secrets.NewPool(id, false, 0, seed)
+			if err != nil {
+				return fmt.Errorf("secret %q: %w", id, err)
+			}
+			if err := s.secretRegistry.Register(pool); err != nil {
+				return fmt.Errorf("register static pool %q: %w", id, err)
+			}
+		}
+	}
+
+	// Remove pools that are no longer declared in config. Runtime pools may
+	// still be referenced by captured closures, but if the config no longer
+	// lists them they should not be mutable from admin API anymore.
+	for _, name := range s.secretRegistry.Names() {
+		if _, ok := compiled.Secrets[name]; !ok {
+			s.secretRegistry.Unregister(name)
 		}
 	}
 
@@ -927,18 +1224,18 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			secs = append(secs, b)
 		}
 
-		var versions []secrets.Version
+		var pools []*secrets.Pool
 		seenRefs := make(map[string]struct{})
 		for _, ref := range rt.AuthHMACSecretRefs {
 			if _, ok := seenRefs[ref]; ok {
 				continue
 			}
 			seenRefs[ref] = struct{}{}
-			v, ok := secretVersions[ref]
+			pool, ok := s.secretRegistry.Pool(ref)
 			if !ok {
 				return fmt.Errorf("route %q auth hmac secret_ref %q not found", rt.Path, ref)
 			}
-			versions = append(versions, v)
+			pools = append(pools, pool)
 		}
 
 		auth := ingress.NewHMACAuth(secs)
@@ -955,25 +1252,28 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		if rt.AuthHMACTolerance > 0 {
 			auth.Tolerance = rt.AuthHMACTolerance
 		}
-		if len(versions) > 0 {
-			set := secrets.Set{Versions: versions}
-			if err := set.Validate(); err != nil {
-				return fmt.Errorf("route %q auth hmac secret_ref invalid: %w", rt.Path, err)
-			}
+		if len(pools) > 0 {
+			capturedPools := pools
+			capturedSecs := secs
 			auth.SelectSecrets = func(at time.Time) [][]byte {
-				valid := set.ValidAt(at)
-				out := make([][]byte, 0, len(valid))
-				for _, v := range valid {
-					out = append(out, v.Value)
+				out := make([][]byte, 0, 4)
+				for _, pool := range capturedPools {
+					for _, v := range pool.ValidAt(at) {
+						out = append(out, v.Value)
+					}
 				}
-				if len(secs) > 0 {
-					out = append(out, secs...)
+				if len(capturedSecs) > 0 {
+					out = append(out, capturedSecs...)
 				}
 				return out
 			}
 		}
 		hmacByRoute[rt.Path] = auth
 	}
+
+	s.mu.Lock()
+	s.runtimePools = nextRuntimePools
+	s.mu.Unlock()
 
 	s.mu.Lock()
 	s.pullAuthorize = pullapi.BearerTokenAuthorizer(tokens)
@@ -1756,6 +2056,9 @@ func startServers(
 		runtimeLogger = slog.Default()
 	}
 	state.setQueueStore(store)
+	if err := state.attachSecretStore(store, compiled, runtimeLogger); err != nil {
+		return nil, fmt.Errorf("attach secret store: %w", err)
+	}
 
 	ing := ingress.NewServer(store)
 	ing.ResolveRoute = state.resolveIngress
@@ -1846,6 +2149,39 @@ func startServers(
 	adminH.ManagementModel = state.managementModel
 	adminH.UpsertManagedEndpoint = upsertManagedEndpoint
 	adminH.DeleteManagedEndpoint = deleteManagedEndpoint
+	adminH.SecretLookup = func(name string) (admin.SecretPool, bool) {
+		pool, ok := state.secretPool(name)
+		if !ok {
+			return nil, false
+		}
+		return &adminSecretPool{pool: pool}, true
+	}
+	adminH.PersistSecret = func(rec admin.SecretRecord) error {
+		return state.persistSecret(secrets.Record{
+			PoolName:  rec.PoolName,
+			ID:        rec.ID,
+			Sealed:    rec.Sealed,
+			NotBefore: rec.NotBefore,
+			NotAfter:  rec.NotAfter,
+			CreatedAt: rec.CreatedAt,
+		})
+	}
+	adminH.DeleteSecretRecord = state.deleteSecretRecord
+	adminH.SealSecret = state.sealSecretValue
+	adminH.AuditSecretMutation = func(evt admin.SecretMutationAuditEvent) {
+		runtimeLogger.Info(
+			"admin_secret_mutation",
+			slog.String("operation", evt.Operation),
+			slog.String("pool", evt.PoolName),
+			slog.String("secret_id", evt.SecretID),
+			slog.Time("not_before", evt.NotBefore),
+			slog.Time("not_after", evt.NotAfter),
+			slog.String("reason", evt.Reason),
+			slog.String("actor", evt.Actor),
+			slog.String("request_id", evt.RequestID),
+			slog.Time("at", evt.At),
+		)
+	}
 	adminH.AuditManagementMutation = func(event admin.ManagementMutationAuditEvent) {
 		runtimeLogger.Info(
 			"admin_management_mutation",

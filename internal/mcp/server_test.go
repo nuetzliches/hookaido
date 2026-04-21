@@ -62,7 +62,7 @@ func TestHandleRequest_ToolsList(t *testing.T) {
 		if _, ok := want[tool.Name]; ok {
 			want[tool.Name] = true
 		}
-		if tool.Name == "dlq_requeue" || tool.Name == "dlq_delete" || tool.Name == "messages_cancel" || tool.Name == "messages_requeue" || tool.Name == "messages_resume" || tool.Name == "messages_publish" || tool.Name == "messages_cancel_by_filter" || tool.Name == "messages_requeue_by_filter" || tool.Name == "messages_resume_by_filter" || tool.Name == "management_endpoint_upsert" || tool.Name == "management_endpoint_delete" || tool.Name == "config_apply" || tool.Name == "instance_status" || tool.Name == "instance_logs_tail" || tool.Name == "instance_start" || tool.Name == "instance_stop" || tool.Name == "instance_reload" {
+		if tool.Name == "dlq_requeue" || tool.Name == "dlq_delete" || tool.Name == "messages_cancel" || tool.Name == "messages_requeue" || tool.Name == "messages_resume" || tool.Name == "messages_publish" || tool.Name == "messages_cancel_by_filter" || tool.Name == "messages_requeue_by_filter" || tool.Name == "messages_resume_by_filter" || tool.Name == "management_endpoint_upsert" || tool.Name == "management_endpoint_delete" || tool.Name == "config_apply" || tool.Name == "rotate_secret" || tool.Name == "instance_status" || tool.Name == "instance_logs_tail" || tool.Name == "instance_start" || tool.Name == "instance_stop" || tool.Name == "instance_reload" {
 			t.Fatalf("unexpected mutation tool %q in read-only mode", tool.Name)
 		}
 	}
@@ -93,7 +93,7 @@ func TestHandleRequest_ToolsListWithMutations(t *testing.T) {
 		seen[tool.Name] = true
 		byName[tool.Name] = tool
 	}
-	for _, name := range []string{"config_apply", "management_endpoint_upsert", "management_endpoint_delete", "dlq_requeue", "dlq_delete", "messages_cancel", "messages_requeue", "messages_resume", "messages_publish", "messages_cancel_by_filter", "messages_requeue_by_filter", "messages_resume_by_filter"} {
+	for _, name := range []string{"config_apply", "management_endpoint_upsert", "management_endpoint_delete", "rotate_secret", "dlq_requeue", "dlq_delete", "messages_cancel", "messages_requeue", "messages_resume", "messages_publish", "messages_cancel_by_filter", "messages_requeue_by_filter", "messages_resume_by_filter"} {
 		if !seen[name] {
 			t.Fatalf("expected tool %q", name)
 		}

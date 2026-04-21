@@ -102,6 +102,9 @@ Runtime control tools (`instance_start`, `instance_stop`, `instance_reload`) req
 | ---------------------------- | ------- | ----------------------------------- |
 | `management_endpoint_upsert` | `admin` | Map application/endpoint to a route |
 | `management_endpoint_delete` | `admin` | Remove endpoint mapping             |
+| `rotate_secret`              | `admin` | Add / list / delete runtime HMAC secrets via admin API |
+
+`rotate_secret` takes `operation` (`add`, `list`, or `delete`) plus `name` (the `secret "<name>" { runtime true }` pool). `add` requires `value` and optional `not_before`/`not_after`; `delete` requires `id`. `add` and `delete` also require `reason` (audit). The tool always proxies to `/admin/secrets/...` — it never mutates the Hookaidofile, because the pool registry lives in the running process. The plaintext `value` is only in the request body; `list` responses contain metadata only. See [Admin API → Runtime Secret Rotation](admin-api.md#runtime-secret-rotation) for wire format details.
 
 ### Runtime Control Tools
 

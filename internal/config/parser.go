@@ -848,6 +848,28 @@ func (p *parser) parseSecretBlock(id string, idQuoted bool) (SecretBlock, error)
 			out.ValidUntil = v
 			out.ValidUntilQuoted = quoted
 			out.ValidUntilSet = true
+		case "runtime":
+			if out.RuntimeSet {
+				return SecretBlock{}, p.errAt(dirTok.pos, "duplicate secret runtime")
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return SecretBlock{}, err
+			}
+			out.Runtime = v
+			out.RuntimeQuoted = quoted
+			out.RuntimeSet = true
+		case "max_versions":
+			if out.MaxVersionsSet {
+				return SecretBlock{}, p.errAt(dirTok.pos, "duplicate secret max_versions")
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return SecretBlock{}, err
+			}
+			out.MaxVersions = v
+			out.MaxVersionsQuoted = quoted
+			out.MaxVersionsSet = true
 		default:
 			return SecretBlock{}, p.errAt(dirTok.pos, "unknown secret directive %q", dirTok.text)
 		}

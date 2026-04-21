@@ -423,6 +423,87 @@ Remove mapping labels from the currently mapped route.
 
 > Both `PUT` and `DELETE` require `X-Hookaido-Audit-Reason` and perform atomic config write + reload with rollback on failure.
 
+## Runtime Secret Rotation
+
+> **Added in v2.7.0.** Only available for `secret "<name>" { runtime true }` pools. The encryption key `HOOKAIDO_SECRET_ENCRYPTION_KEY` (32 bytes, base64) must be set at startup. Persisted records are AES-GCM sealed at rest in the same store used for the queue (SQLite/Postgres). All three endpoints require the existing admin bearer token.
+
+### `POST /secrets/{name}`
+
+Adds a new HMAC verification secret to a runtime-mutable pool. The server generates the secret ID (`sec_<16hex>`) and returns it in the response.
+
+Request body:
+
+```json
+{
+  "value": "whs_fresh_from_cituro",
+  "not_before": "2026-04-21T10:00:00Z",
+  "not_after":  "2026-05-21T10:00:00Z"
+}
+```
+
+- `value` (required): the HMAC signing key as received from the upstream provider (e.g. Cituro's `roll-secret` response).
+- `not_before` (optional): ISO-8601 timestamp; defaults to the current time.
+- `not_after` (optional): ISO-8601 timestamp; omitted = no upper bound. When set, must be strictly after `not_before`.
+
+Response `201 Created`:
+
+```json
+{
+  "id": "sec_4f1a2c3d5e6b7890",
+  "not_before": "2026-04-21T10:00:00Z",
+  "not_after":  "2026-05-21T10:00:00Z",
+  "created_at": "2026-04-21T10:00:01Z"
+}
+```
+
+### `GET /secrets/{name}`
+
+Returns the metadata for every version registered in the pool. The plaintext `value` is **never** exposed by any admin endpoint.
+
+Response `200 OK`:
+
+```json
+{
+  "name": "cituro",
+  "versions": [
+    {"id": "sec_4f1a2c3d5e6b7890", "not_before": "2026-04-21T10:00:00Z", "not_after": "2026-05-21T10:00:00Z"},
+    {"id": "sec_bootstrap",         "not_before": "2026-01-01T00:00:00Z"}
+  ]
+}
+```
+
+### `DELETE /secrets/{name}/{id}`
+
+Removes a single version from the pool (and from the persisted store). Used to revoke a rotated-out secret after its overlap window ends.
+
+Response `204 No Content`.
+
+### Rotation Flow (Issuer-side service)
+
+```
+issuer creates webhook upstream
+  → upstream returns new secret
+  → issuer POSTs /admin/secrets/{name} with value + optional not_after
+    (old version still valid during overlap window)
+  → issuer proves new secret by sending a test event
+  → after cut-over, issuer DELETEs the old /admin/secrets/{name}/{old_id}
+```
+
+| Code                          | Status | Description                                         |
+| ----------------------------- | ------ | --------------------------------------------------- |
+| `secret_management_unavailable` | 503  | Runtime rotation not configured (missing key/store) |
+| `secret_pool_not_found`       | 404    | `{name}` is not a `runtime true` pool                |
+| `secret_not_runtime`          | 400    | Pool exists but is declared as static                |
+| `secret_value_empty`          | 400    | Missing or empty `value` in request body             |
+| `secret_invalid_window`       | 400    | `not_after` is not strictly after `not_before`       |
+| `secret_duplicate_id`         | 409    | Generated id collided with an existing version       |
+| `secret_pool_full`            | 413    | Pool has reached its `max_versions` cap              |
+| `secret_id_not_found`         | 404    | DELETE target was already removed or never existed   |
+| `secret_seal_failure`         | 500    | Encryption failed (should not happen in practice)    |
+| `secret_persist_failure`      | 500    | Persistence layer returned an error                  |
+
+All three endpoints emit a structured `admin_secret_mutation` audit log event with operation (`add`/`delete`), pool name, secret id, reason, actor, and request id. The plaintext value is never logged.
+
 ## Audit Requirements
 
 All mutation endpoints require the `X-Hookaido-Audit-Reason` header (max 512 chars). Additional audit headers:

@@ -1795,6 +1795,10 @@ func compileSecrets(in *SecretsBlock) (map[string]SecretConfig, ValidationResult
 
 		maxVersions := 0
 		if s.MaxVersionsSet {
+			if !runtime {
+				res.Errors = append(res.Errors, fmt.Sprintf("secret %q max_versions is only valid when runtime = true", id))
+				continue
+			}
 			rawMax := strings.TrimSpace(resolveValue(s.MaxVersions, fmt.Sprintf("secret %q max_versions", id), &res))
 			n, err := strconv.Atoi(rawMax)
 			if err != nil || n < 1 {
@@ -1802,13 +1806,6 @@ func compileSecrets(in *SecretsBlock) (map[string]SecretConfig, ValidationResult
 				continue
 			}
 			maxVersions = n
-		} else if !runtime {
-			// Non-runtime pools keep the legacy single-version behaviour; MaxVersions is irrelevant.
-		}
-
-		if !runtime && s.MaxVersionsSet {
-			res.Errors = append(res.Errors, fmt.Sprintf("secret %q max_versions is only valid when runtime = true", id))
-			continue
 		}
 
 		// value + valid_from: required when not runtime, optional (as bootstrap seed) when runtime.

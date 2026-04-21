@@ -7,14 +7,32 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-04-21
+
 ### Added
 
 - Runtime HMAC secret rotation via admin API (issue #147): declare a pool with `secret "<name>" { runtime true; max_versions N }`, then push new verification secrets at runtime via `POST /admin/secrets/{name}` (plus `GET` for metadata-only listing and `DELETE /admin/secrets/{name}/{id}` for revocation). Persistence to SQLite (`schemaV7`) and Postgres with AES-256-GCM sealing via `HOOKAIDO_SECRET_ENCRYPTION_KEY` (32 bytes, base64). Route closures reference pools by pointer so admin mutations are visible to in-flight verification without a reload. Enables zero-downtime rotation flows where the issuer service (e.g. soapNEO for Cituro) receives the fresh secret from the upstream provider and pushes it to Hookaido (DMZ) without a redeploy.
 - Background sweeper for expired runtime-secret versions: every 5 minutes (plus once on startup) the process prunes versions whose `not_after` is in the past from every registered pool and from the persisted `runtime_secrets` table. Complements `Pool.Add`'s opportunistic prune, which only fires at `max_versions`, so deployments with short overlap windows no longer accumulate expired rows in `GET /admin/secrets/<name>` or in the DB. New Prometheus counter `hookaido_runtime_secret_gc_pruned_total{pool="<name>"}` and `secret_gc_pruned` log lines expose what was swept.
 - MCP `rotate_secret` tool (role `admin`, requires `--enable-mutations`): proxies `add`/`list`/`delete` operations to `/admin/secrets/...` for AI-assisted rotation workflows. Audit reason/actor propagate via principal; list responses contain metadata only (never the plaintext value).
-- SSE endpoint for Pull API (`GET {pull.path}/stream`): consumers can receive webhook messages in real-time over a persistent Server-Sent Events connection instead of polling. Each SSE message creates a lease (same semantics as dequeue); ACK/NACK remain via existing POST endpoints. Supports `batch` and `lease_ttl` query parameters, configurable keepalive interval (`sse_keepalive`, default 15s) and max connection duration (`sse_max_connection`). Multiple concurrent SSE connections act as competing consumers. New Prometheus metrics: `hookaido_pull_sse_connections_total`, `hookaido_pull_sse_messages_sent_total`, `hookaido_pull_sse_connection_active`.
+
+### Planned
+
+- Pluggable Sealer backends (env / AWS KMS / HashiCorp Vault Transit) for compliance-regulated deployments and automated KEK rotation — see [#151](https://github.com/nuetzliches/hookaido/issues/151). The v2.7.0 sealed-record layout reserves version bytes `0x02`/`0x03` so records written by this release stay readable when the alternative backends ship.
+
+## [2.6.0] - 2026-04-20
+
+### Added
+
 - Stripe-compatible HMAC verification: `auth hmac { provider stripe; secret env:SECRET }` verifies the `Stripe-Signature: t=<ts>,v1=<hex>` header format with the `<ts>.<body>` signed payload and a 5-minute timestamp tolerance. Multiple comma-separated `<tag>=<hex>` pairs in the header are accepted (covers Stripe's v0/v1 rotation).
 - Cituro HMAC verification: `auth hmac { provider cituro; secret env:SECRET }` reuses the Stripe scheme with header `X-CITURO-SIGNATURE` and signature tag `s` instead of `v1`. Matches the wire format documented in Cituro's API spec.
+
+## [2.4.0] - 2026-04-16
+
+### Added
+
+- SSE endpoint for Pull API (`GET {pull.path}/stream`): consumers can receive webhook messages in real-time over a persistent Server-Sent Events connection instead of polling. Each SSE message creates a lease (same semantics as dequeue); ACK/NACK remain via existing POST endpoints. Supports `batch` and `lease_ttl` query parameters, configurable keepalive interval (`sse_keepalive`, default 15s) and max connection duration (`sse_max_connection`). Multiple concurrent SSE connections act as competing consumers. New Prometheus metrics: `hookaido_pull_sse_connections_total`, `hookaido_pull_sse_messages_sent_total`, `hookaido_pull_sse_connection_active`.
+
+## [2.2.2] - 2026-04-15
 
 ### Fixed
 

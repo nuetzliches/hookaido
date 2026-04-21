@@ -387,11 +387,13 @@ type ObservabilityConfig struct {
 }
 
 type SecretConfig struct {
-	ID         string
-	ValueRef   string
-	ValidFrom  time.Time
-	ValidUntil time.Time
-	HasUntil   bool
+	ID          string
+	ValueRef    string
+	ValidFrom   time.Time
+	ValidUntil  time.Time
+	HasUntil    bool
+	Runtime     bool
+	MaxVersions int
 }
 
 type MetricsConfig struct {
@@ -1040,7 +1042,13 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 						continue
 					}
 
-					signing.SecretVersions = append(signing.SecretVersions, DeliverSigningSecretVersion(sc))
+					signing.SecretVersions = append(signing.SecretVersions, DeliverSigningSecretVersion{
+						ID:         sc.ID,
+						ValueRef:   sc.ValueRef,
+						ValidFrom:  sc.ValidFrom,
+						ValidUntil: sc.ValidUntil,
+						HasUntil:   sc.HasUntil,
+					})
 				}
 				if len(signing.SecretVersions) > 0 {
 					signing.Enabled = true
@@ -1774,28 +1782,65 @@ func compileSecrets(in *SecretsBlock) (map[string]SecretConfig, ValidationResult
 			continue
 		}
 
-		if !s.ValueSet {
-			res.Errors = append(res.Errors, fmt.Sprintf("secret %q value is required", id))
-			continue
+		runtime := false
+		if s.RuntimeSet {
+			rawRuntime := strings.TrimSpace(resolveValue(s.Runtime, fmt.Sprintf("secret %q runtime", id), &res))
+			parsed, ok := parseBoolValue(rawRuntime)
+			if !ok {
+				res.Errors = append(res.Errors, fmt.Sprintf("secret %q runtime must be true/false (got %q)", id, rawRuntime))
+				continue
+			}
+			runtime = parsed
 		}
-		value := strings.TrimSpace(resolveValue(s.Value, fmt.Sprintf("secret %q value", id), &res))
-		if value == "" {
-			res.Errors = append(res.Errors, fmt.Sprintf("secret %q value must not be empty", id))
-			continue
+
+		maxVersions := 0
+		if s.MaxVersionsSet {
+			rawMax := strings.TrimSpace(resolveValue(s.MaxVersions, fmt.Sprintf("secret %q max_versions", id), &res))
+			n, err := strconv.Atoi(rawMax)
+			if err != nil || n < 1 {
+				res.Errors = append(res.Errors, fmt.Sprintf("secret %q max_versions must be a positive integer (got %q)", id, rawMax))
+				continue
+			}
+			maxVersions = n
+		} else if !runtime {
+			// Non-runtime pools keep the legacy single-version behaviour; MaxVersions is irrelevant.
 		}
-		if err := secrets.ValidateRef(value); err != nil {
-			res.Errors = append(res.Errors, fmt.Sprintf("secret %q value %v", id, err))
+
+		if !runtime && s.MaxVersionsSet {
+			res.Errors = append(res.Errors, fmt.Sprintf("secret %q max_versions is only valid when runtime = true", id))
 			continue
 		}
 
-		if !s.ValidFromSet {
-			res.Errors = append(res.Errors, fmt.Sprintf("secret %q valid_from is required", id))
+		// value + valid_from: required when not runtime, optional (as bootstrap seed) when runtime.
+		var (
+			value     string
+			validFrom time.Time
+		)
+		if s.ValueSet {
+			value = strings.TrimSpace(resolveValue(s.Value, fmt.Sprintf("secret %q value", id), &res))
+			if value == "" {
+				res.Errors = append(res.Errors, fmt.Sprintf("secret %q value must not be empty", id))
+				continue
+			}
+			if err := secrets.ValidateRef(value); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("secret %q value %v", id, err))
+				continue
+			}
+		} else if !runtime {
+			res.Errors = append(res.Errors, fmt.Sprintf("secret %q value is required (use `runtime true` to allow empty bootstrap)", id))
 			continue
 		}
-		rawFrom := strings.TrimSpace(resolveValue(s.ValidFrom, fmt.Sprintf("secret %q valid_from", id), &res))
-		validFrom, err := parseTimestampValue(rawFrom)
-		if err != nil {
-			res.Errors = append(res.Errors, fmt.Sprintf("secret %q valid_from %s", id, err.Error()))
+
+		if s.ValidFromSet {
+			rawFrom := strings.TrimSpace(resolveValue(s.ValidFrom, fmt.Sprintf("secret %q valid_from", id), &res))
+			t, err := parseTimestampValue(rawFrom)
+			if err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("secret %q valid_from %s", id, err.Error()))
+				continue
+			}
+			validFrom = t
+		} else if value != "" {
+			res.Errors = append(res.Errors, fmt.Sprintf("secret %q valid_from is required when value is set", id))
 			continue
 		}
 
@@ -1812,6 +1857,10 @@ func compileSecrets(in *SecretsBlock) (map[string]SecretConfig, ValidationResult
 				res.Errors = append(res.Errors, fmt.Sprintf("secret %q valid_until %s", id, err.Error()))
 				continue
 			}
+			if validFrom.IsZero() {
+				res.Errors = append(res.Errors, fmt.Sprintf("secret %q valid_until requires valid_from", id))
+				continue
+			}
 			if !t.After(validFrom) {
 				res.Errors = append(res.Errors, fmt.Sprintf("secret %q valid_until must be after valid_from", id))
 				continue
@@ -1821,11 +1870,13 @@ func compileSecrets(in *SecretsBlock) (map[string]SecretConfig, ValidationResult
 		}
 
 		out[id] = SecretConfig{
-			ID:         id,
-			ValueRef:   value,
-			ValidFrom:  validFrom,
-			ValidUntil: validUntil,
-			HasUntil:   hasUntil,
+			ID:          id,
+			ValueRef:    value,
+			ValidFrom:   validFrom,
+			ValidUntil:  validUntil,
+			HasUntil:    hasUntil,
+			Runtime:     runtime,
+			MaxVersions: maxVersions,
 		}
 	}
 

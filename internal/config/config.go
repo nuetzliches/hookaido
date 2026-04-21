@@ -91,6 +91,14 @@ type SecretBlock struct {
 	ValidUntil       string
 	ValidUntilQuoted bool
 	ValidUntilSet    bool
+
+	Runtime       string
+	RuntimeQuoted bool
+	RuntimeSet    bool
+
+	MaxVersions       string
+	MaxVersionsQuoted bool
+	MaxVersionsSet    bool
 }
 
 type APIBlock struct {

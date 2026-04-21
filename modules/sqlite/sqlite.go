@@ -22,7 +22,7 @@ import (
 	sqlite3 "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 const backlogTrendRetention = 30 * 24 * time.Hour
 const defaultSQLiteCheckpointInterval = time.Minute
 const defaultSQLiteLeaseSweepInterval = 10 * time.Millisecond
@@ -151,6 +151,20 @@ BEGIN
       leased = leased + CASE WHEN NEW.state = 'leased' THEN 1 ELSE 0 END - CASE WHEN OLD.state = 'leased' THEN 1 ELSE 0 END
   WHERE id = 1;
 END;
+`
+
+const schemaV7 = `
+CREATE TABLE IF NOT EXISTS runtime_secrets (
+  pool_name  TEXT NOT NULL,
+  id         TEXT NOT NULL,
+  sealed     BLOB NOT NULL,
+  not_before INTEGER NOT NULL,
+  not_after  INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (pool_name, id)
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_secrets_pool
+  ON runtime_secrets(pool_name, not_before DESC);
 `
 
 type Option func(*Store)
@@ -470,6 +484,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		case 6:
 			if _, err := conn.ExecContext(ctx, schemaV6); err != nil {
 				return fmt.Errorf("sqlite: migrate v6: %w", err)
+			}
+		case 7:
+			if _, err := conn.ExecContext(ctx, schemaV7); err != nil {
+				return fmt.Errorf("sqlite: migrate v7: %w", err)
 			}
 		default:
 			return fmt.Errorf("sqlite: unknown migration %d", v)

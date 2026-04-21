@@ -264,6 +264,25 @@ secrets {
 - Referenced via `secret_ref "S1"` in auth and signing blocks.
 - `value` accepts `env:`, `file:`, `vault:`, and `raw:` refs.
 
+**Runtime-mutable pools** (v2.7.0+): add `runtime true` to allow the admin API (`POST /admin/secrets/{name}`) to register additional versions at runtime. Useful when the issuing service rotates secrets itself and needs to push them into Hookaido without a redeploy.
+
+```hcl
+secrets {
+  secret "cituro" {
+    runtime true
+    max_versions 16            # optional, default 32
+    value env:CITURO_BOOTSTRAP # optional; only seeded when the DB pool is empty
+    valid_from "2026-04-21T00:00:00Z"
+  }
+}
+```
+
+- Requires `HOOKAIDO_SECRET_ENCRYPTION_KEY` (32 bytes, base64) at startup — runtime secrets are AES-GCM sealed before persisting.
+- Persisted to the same store as the queue (SQLite/Postgres). An in-memory queue degrades to memory-only secrets (lost on restart, warning logged).
+- `max_versions` is a hard cap to protect against operator error; `Pool.Add` prunes expired versions automatically before returning `secret_pool_full`.
+- `max_versions` only applies when `runtime true`.
+- See [docs/admin-api.md → Runtime Secret Rotation](admin-api.md#runtime-secret-rotation) for the HTTP contract and [docs/security.md](security.md#runtime-rotation-via-admin-api) for operational notes.
+
 ### `vars`
 
 Reusable values with nested expansion:

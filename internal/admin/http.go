@@ -68,6 +68,17 @@ const (
 	managementCodeRouteTargetDrift = "management_route_target_mismatch"
 	managementCodeRouteBacklog     = "management_route_backlog_active"
 	managementCodeConflict         = "management_conflict"
+
+	secretCodeUnavailable    = "secret_management_unavailable"
+	secretCodePoolNotFound   = "secret_pool_not_found"
+	secretCodeNotRuntime     = "secret_not_runtime"
+	secretCodeValueEmpty     = "secret_value_empty"
+	secretCodeInvalidWindow  = "secret_invalid_window"
+	secretCodePoolFull       = "secret_pool_full"
+	secretCodeDuplicateID    = "secret_duplicate_id"
+	secretCodeIDNotFound     = "secret_id_not_found"
+	secretCodeSealFailure    = "secret_seal_failure"
+	secretCodePersistFailure = "secret_persist_failure"
 	readCodeUnauthorized           = "unauthorized"
 	readCodeMethodNotAllowed       = "method_not_allowed"
 	readCodeInvalidQuery           = "invalid_query"
@@ -167,6 +178,13 @@ type Server struct {
 	UpsertManagedEndpoint              func(req ManagementEndpointUpsertRequest) (ManagementEndpointMutationResult, error)
 	DeleteManagedEndpoint              func(req ManagementEndpointDeleteRequest) (ManagementEndpointMutationResult, error)
 
+	// Runtime secret rotation (see handle_secrets.go).
+	SecretLookup        SecretLookup
+	PersistSecret       func(rec SecretRecord) error
+	DeleteSecretRecord  func(poolName, id string) (bool, error)
+	SealSecret          func(plain []byte) ([]byte, error)
+	AuditSecretMutation func(event SecretMutationAuditEvent)
+
 	queueHealth struct {
 		mu         sync.Mutex
 		ttl        time.Duration
@@ -210,6 +228,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cleanPath := path.Clean(r.URL.Path)
 	if strings.HasPrefix(cleanPath, "/applications/") {
 		s.handleApplicationResource(w, r, cleanPath)
+		return
+	}
+	if strings.HasPrefix(cleanPath, "/secrets/") {
+		s.handleSecretResource(w, r, cleanPath)
 		return
 	}
 

@@ -513,6 +513,7 @@ func requiredRoleForTool(name string) (Role, bool) {
 		"instance_status", "instance_logs_tail":
 		return RoleOperate, true
 	case "config_apply", "management_endpoint_upsert", "management_endpoint_delete",
+		"rotate_secret",
 		"instance_start", "instance_stop", "instance_reload":
 		return RoleAdmin, true
 	default:
@@ -523,6 +524,7 @@ func requiredRoleForTool(name string) (Role, bool) {
 func toolRequiresMutationsFlag(name string) bool {
 	switch name {
 	case "config_apply", "management_endpoint_upsert", "management_endpoint_delete",
+		"rotate_secret",
 		"dlq_requeue", "dlq_delete", "messages_cancel", "messages_requeue", "messages_resume",
 		"messages_publish", "messages_cancel_by_filter", "messages_requeue_by_filter", "messages_resume_by_filter":
 		return true
@@ -543,6 +545,7 @@ func toolRequiresRuntimeControlFlag(name string) bool {
 func toolIsMutating(name string) bool {
 	switch name {
 	case "config_apply", "management_endpoint_upsert", "management_endpoint_delete",
+		"rotate_secret",
 		"dlq_requeue", "dlq_delete", "messages_cancel", "messages_requeue", "messages_resume",
 		"messages_publish", "messages_cancel_by_filter", "messages_requeue_by_filter", "messages_resume_by_filter",
 		"instance_start", "instance_stop", "instance_reload":
@@ -637,6 +640,8 @@ func (s *Server) callTool(name string, args map[string]any) toolsCallResult {
 		out, err = s.toolManagementEndpointUpsert(args)
 	case "management_endpoint_delete":
 		out, err = s.toolManagementEndpointDelete(args)
+	case "rotate_secret":
+		out, err = s.toolRotateSecret(args)
 	case "backlog_top_queued":
 		out, err = s.toolBacklogTopQueued(args)
 	case "backlog_oldest_queued":
@@ -1417,6 +1422,53 @@ func (s *Server) toolDescriptors() []toolDescriptor {
 						},
 					},
 					"required":             []string{"application", "endpoint_name", "reason"},
+					"additionalProperties": false,
+				},
+			},
+			toolDescriptor{
+				Name: "rotate_secret",
+				Description: "Add, list, or revoke HMAC verification secrets in a runtime-mutable pool via the admin API. " +
+					"Wraps POST/GET/DELETE /admin/secrets/{name}[/{id}]. Requires the pool to be declared `runtime true` in the Hookaidofile.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"operation": map[string]any{
+							"type":        "string",
+							"enum":        []string{"add", "list", "delete"},
+							"description": "add = POST new version; list = GET metadata only (no values); delete = DELETE a version",
+						},
+						"name": map[string]any{
+							"type":        "string",
+							"description": "Secret pool name (matches `secret \"<name>\" { runtime true }` in config)",
+						},
+						"id": map[string]any{
+							"type":        "string",
+							"description": "Secret version id (required for delete)",
+						},
+						"value": map[string]any{
+							"type":        "string",
+							"description": "HMAC signing key as received from the upstream provider (required for add)",
+						},
+						"not_before": map[string]any{
+							"type":        "string",
+							"description": "Optional RFC3339 timestamp; defaults to now when omitted on add",
+						},
+						"not_after": map[string]any{
+							"type":        "string",
+							"description": "Optional RFC3339 timestamp; omitted means no upper bound",
+						},
+						"reason": map[string]any{
+							"type":        "string",
+							"description": "Required audit reason for add/delete (maps to X-Hookaido-Audit-Reason semantics)",
+						},
+						"actor": map[string]any{
+							"type": "string",
+						},
+						"request_id": map[string]any{
+							"type": "string",
+						},
+					},
+					"required":             []string{"operation", "name"},
 					"additionalProperties": false,
 				},
 			},

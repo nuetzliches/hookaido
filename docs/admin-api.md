@@ -25,9 +25,11 @@ admin_api {
 
 Returns `200` when the instance is healthy.
 
+> **Always unauthenticated.** Even when `admin_api.auth token ...` is configured, bare `GET /healthz` (no query string) bypasses the bearer guard so orchestrator liveness probes (Docker healthcheck, Kubernetes `livenessProbe`, cloud load balancers) can probe without credentials. The response body is the static string `ok\n` — no deployment-sensitive information is exposed. Any query string on `/healthz` (including `?details=0`) keeps the route auth-gated.
+
 ### `GET /healthz?details=1`
 
-Returns detailed JSON diagnostics:
+Returns detailed JSON diagnostics (follows `admin_api.auth` — requires bearer token when configured):
 
 ```json
 {

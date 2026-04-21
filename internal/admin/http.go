@@ -220,12 +220,21 @@ func NewServer(store queue.Store) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cleanPath := path.Clean(r.URL.Path)
+
+	// Unauthenticated liveness probe: bare GET /healthz (no query string) bypasses
+	// the admin auth guard so orchestrator health checks (Docker healthcheck,
+	// Kubernetes livenessProbe, load balancers) can probe without a bearer token.
+	// /healthz with any query string (e.g. ?details=1) still follows admin auth.
+	if r.Method == http.MethodGet && cleanPath == "/healthz" && r.URL.RawQuery == "" {
+		s.handleHealthz(w, r)
+		return
+	}
+
 	if s.Authorize != nil && !s.Authorize(r) {
 		writeManagementError(w, http.StatusUnauthorized, readCodeUnauthorized, "request is not authorized")
 		return
 	}
-
-	cleanPath := path.Clean(r.URL.Path)
 	if strings.HasPrefix(cleanPath, "/applications/") {
 		s.handleApplicationResource(w, r, cleanPath)
 		return

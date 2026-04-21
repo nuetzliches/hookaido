@@ -1689,6 +1689,89 @@ func TestServer_DLQAuth(t *testing.T) {
 	}
 }
 
+func TestServer_HealthzBypassesAuth(t *testing.T) {
+	srv := NewServer(queue.NewMemoryStore())
+	srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("secret")})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example/healthz", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 without token, got %d", rr.Code)
+	}
+	if rr.Body.String() != "ok\n" {
+		t.Fatalf("unexpected body: %q", rr.Body.String())
+	}
+}
+
+func TestServer_HealthzDetailsRequiresAuth(t *testing.T) {
+	srv := NewServer(queue.NewMemoryStore())
+	srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("secret")})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example/healthz?details=1", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for details without token, got %d", rr.Code)
+	}
+	errResp := decodeManagementError(t, rr)
+	if errResp.Code != readCodeUnauthorized {
+		t.Fatalf("expected code=%q, got %q", readCodeUnauthorized, errResp.Code)
+	}
+}
+
+func TestServer_HealthzDetailsWithAuth(t *testing.T) {
+	srv := NewServer(queue.NewMemoryStore())
+	srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("secret")})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example/healthz?details=1", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 with token, got %d", rr.Code)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if ok, _ := out["ok"].(bool); !ok {
+		t.Fatalf("expected ok=true, body=%s", rr.Body.String())
+	}
+}
+
+func TestServer_HealthzEmptyQueryStringStillAuths(t *testing.T) {
+	// Guard against a regression where /healthz?details=0 (query present, value
+	// coerces to false) gets treated the same as bare /healthz. Per the acceptance
+	// criteria in issue #153, any query string keeps the route auth-gated.
+	srv := NewServer(queue.NewMemoryStore())
+	srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("secret")})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example/healthz?details=0", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for /healthz?details=0 without token, got %d", rr.Code)
+	}
+}
+
+func TestServer_HealthzPostRequiresAuth(t *testing.T) {
+	srv := NewServer(queue.NewMemoryStore())
+	srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("secret")})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example/healthz", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for POST /healthz without token, got %d", rr.Code)
+	}
+}
+
 func TestServer_ListDLQ(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return now }))

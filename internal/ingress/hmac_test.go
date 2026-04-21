@@ -388,7 +388,8 @@ func TestHMACAuth_VerifyStripe_MalformedHeader(t *testing.T) {
 	}
 }
 
-// Cituro reuses the Stripe scheme with a different header and sig tag.
+// Cituro reuses the Stripe scheme with a different header and sig tag,
+// plus millisecond-precision timestamps instead of seconds.
 func TestHMACAuth_VerifyCituro(t *testing.T) {
 	secret := []byte("whs_cituro_abc123")
 	body := []byte(`{"eventId":"11f0","type":"booking.created"}`)
@@ -399,10 +400,30 @@ func TestHMACAuth_VerifyCituro(t *testing.T) {
 	auth.Now = func() time.Time { return now }
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/cituro", bytes.NewReader(body))
-	req.Header.Set("X-CITURO-SIGNATURE", signStripe(now.Unix(), body, secret, "s"))
+	req.Header.Set("X-CITURO-SIGNATURE", signStripe(now.UnixMilli(), body, secret, "s"))
 
 	if err := auth.Verify(req, "/webhooks/cituro", body); err != nil {
 		t.Fatalf("expected verify ok for cituro alias, got %v", err)
+	}
+}
+
+func TestHMACAuth_VerifyCituro_RejectsSecondsTimestamp(t *testing.T) {
+	// Regression guard: a second-precision timestamp (Stripe-style) against
+	// the cituro provider must be rejected as out-of-tolerance (interpreted
+	// as 1970-era after the ms->ns conversion).
+	secret := []byte("whs_cituro_abc123")
+	body := []byte(`{"type":"booking.created"}`)
+	now := time.Unix(1735689600, 0).UTC()
+
+	auth := NewHMACAuth([][]byte{secret})
+	auth.Provider = "cituro"
+	auth.Now = func() time.Time { return now }
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/cituro", bytes.NewReader(body))
+	req.Header.Set("X-CITURO-SIGNATURE", signStripe(now.Unix(), body, secret, "s"))
+
+	if err := auth.Verify(req, "/webhooks/cituro", body); err == nil {
+		t.Fatalf("expected unauthorized when seconds-precision ts is used with cituro provider")
 	}
 }
 
@@ -416,7 +437,7 @@ func TestHMACAuth_VerifyCituro_InvalidSignature(t *testing.T) {
 	auth.Now = func() time.Time { return now }
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/cituro", bytes.NewReader(body))
-	req.Header.Set("X-CITURO-SIGNATURE", signStripe(now.Unix(), body, []byte("wrong"), "s"))
+	req.Header.Set("X-CITURO-SIGNATURE", signStripe(now.UnixMilli(), body, []byte("wrong"), "s"))
 
 	if err := auth.Verify(req, "/webhooks/cituro", body); err == nil {
 		t.Fatalf("expected unauthorized for invalid cituro signature")
@@ -435,7 +456,7 @@ func TestHMACAuth_VerifyCituro_WrongTag(t *testing.T) {
 	auth.Now = func() time.Time { return now }
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/cituro", bytes.NewReader(body))
-	req.Header.Set("X-CITURO-SIGNATURE", signStripe(now.Unix(), body, secret, "v1"))
+	req.Header.Set("X-CITURO-SIGNATURE", signStripe(now.UnixMilli(), body, secret, "v1"))
 
 	if err := auth.Verify(req, "/webhooks/cituro", body); err == nil {
 		t.Fatalf("expected unauthorized when sig tag doesn't match provider")

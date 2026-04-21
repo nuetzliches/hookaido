@@ -168,12 +168,15 @@ func (a *HMACAuth) verifyProvider(r *http.Request, body []byte) error {
 	case "gitea":
 		return a.verifyGitea(r, body, secrets)
 	case "stripe":
-		return a.verifyStripe(r, body, secrets, "Stripe-Signature", "v1")
+		return a.verifyStripe(r, body, secrets, "Stripe-Signature", "v1", time.Second)
 	case "cituro":
 		// Cituro uses the same "t=<ts>,<tag>=<hex>" header format and
 		// "<ts>.<body>" signed-payload scheme as Stripe, but with a
-		// different header name and signature tag.
-		return a.verifyStripe(r, body, secrets, "X-CITURO-SIGNATURE", "s")
+		// different header name, signature tag, and timestamp unit:
+		// Cituro emits t= as Unix milliseconds (13-digit), Stripe as
+		// Unix seconds (10-digit). The PDF's truncated "t=1592..." example
+		// hid the unit; confirmed from live X-CITURO-SIGNATURE headers.
+		return a.verifyStripe(r, body, secrets, "X-CITURO-SIGNATURE", "s", time.Millisecond)
 	default:
 		return ErrUnauthorized
 	}
@@ -235,12 +238,19 @@ func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) e
 // same scheme with different header + tag names — e.g. Cituro uses
 // `X-CITURO-SIGNATURE` with sigTag "s".)
 //
-// String-to-sign: "<ts>.<body>" (HMAC-SHA256, lowercase hex).
+// String-to-sign: "<ts>.<body>" (HMAC-SHA256, lowercase hex). The ts used
+// in the signed payload is the *raw string* from the header, so senders
+// that emit ms-precision timestamps and senders emitting second-precision
+// both work as long as their Hookaido-side tsUnit matches.
+//
+// tsUnit selects how the numeric t= value is interpreted for the
+// tolerance check: time.Second for Stripe (10-digit unix seconds),
+// time.Millisecond for Cituro (13-digit unix milliseconds).
 //
 // Replay protection: the timestamp must be within a.Tolerance of the current
 // time (default 5m). No nonce — retries within the tolerance window are
 // accepted, which matches Stripe/Cituro semantics.
-func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, headerName, sigTag string) error {
+func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, headerName, sigTag string, tsUnit time.Duration) error {
 	raw := strings.TrimSpace(r.Header.Get(headerName))
 	if raw == "" {
 		slog.Warn("hmac_stripe_failed", "reason", "header_missing", "header", headerName)
@@ -289,11 +299,14 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 	if a.Now != nil {
 		now = a.Now
 	}
-	t := time.Unix(ts, 0).UTC()
+	// Convert the raw numeric ts into absolute time via the provider-specific
+	// unit (seconds for stripe, milliseconds for cituro). time.Unix(0, ns)
+	// takes nanoseconds so we multiply by tsUnit (a time.Duration = int64 ns).
+	t := time.Unix(0, ts*int64(tsUnit)).UTC()
 	if d := now().UTC().Sub(t); d < -tolerance || d > tolerance {
 		slog.Warn("hmac_stripe_failed", "reason", "ts_out_of_tolerance",
-			"header", headerName, "ts_unix", ts, "delta_seconds", d.Seconds(),
-			"tolerance_seconds", tolerance.Seconds())
+			"header", headerName, "ts_unix", ts, "ts_unit", tsUnit.String(),
+			"delta_seconds", d.Seconds(), "tolerance_seconds", tolerance.Seconds())
 		return ErrUnauthorized
 	}
 

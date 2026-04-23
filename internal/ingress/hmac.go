@@ -168,19 +168,49 @@ func (a *HMACAuth) verifyProvider(r *http.Request, body []byte) error {
 	case "gitea":
 		return a.verifyGitea(r, body, secrets)
 	case "stripe":
-		return a.verifyStripe(r, body, secrets, "Stripe-Signature", "v1", time.Second)
+		return a.verifyStripeLike(r, body, secrets, stripeProviderConfig)
 	case "cituro":
-		// Cituro uses the same "t=<ts>,<tag>=<hex>" header format and
-		// "<ts>.<body>" signed-payload scheme as Stripe, but with a
-		// different header name, signature tag, and timestamp unit:
-		// Cituro emits t= as Unix milliseconds (13-digit), Stripe as
-		// Unix seconds (10-digit). The PDF's truncated "t=1592..." example
-		// hid the unit; confirmed from live X-CITURO-SIGNATURE headers.
-		return a.verifyStripe(r, body, secrets, "X-CITURO-SIGNATURE", "s", time.Millisecond)
+		return a.verifyStripeLike(r, body, secrets, cituroProviderConfig)
 	default:
 		return ErrUnauthorized
 	}
 }
+
+// stripeLikeConfig captures the wire-format differences between providers
+// that otherwise share the Stripe-invented signing scheme: a header of the
+// form "t=<unix-ts>,<sigTag>=<hex>[,...]" and a signed payload of
+// "<ts>.<body>" hashed via HMAC-SHA256. Adding a new such provider is a
+// one-line config addition plus a switch case -- no new code path.
+type stripeLikeConfig struct {
+	// Header is the HTTP header carrying the signature value.
+	Header string
+	// SigTag is the key within the header value holding the hex signature
+	// (Stripe uses "v1" / "v0" for rotation, Cituro uses "s").
+	SigTag string
+	// TSUnit is the unit of the numeric t= field. Stripe emits Unix seconds,
+	// Cituro emits Unix milliseconds; the PDF example "t=1592..." is
+	// truncated and does not show the difference. Determined from live
+	// headers.
+	TSUnit time.Duration
+}
+
+var (
+	// stripeProviderConfig matches docs.stripe.com/webhooks/signatures:
+	// Stripe-Signature header, sig tag v1, 10-digit Unix seconds.
+	stripeProviderConfig = stripeLikeConfig{
+		Header: "Stripe-Signature",
+		SigTag: "v1",
+		TSUnit: time.Second,
+	}
+	// cituroProviderConfig matches Cituro's webhook API (cituro_API.pdf
+	// §7.3): X-CITURO-SIGNATURE header, sig tag s, 13-digit Unix
+	// milliseconds.
+	cituroProviderConfig = stripeLikeConfig{
+		Header: "X-CITURO-SIGNATURE",
+		SigTag: "s",
+		TSUnit: time.Millisecond,
+	}
+)
 
 func (a *HMACAuth) verifyGitHub(r *http.Request, body []byte, secrets [][]byte) error {
 	sigHeader := strings.TrimSpace(r.Header.Get("X-Hub-Signature-256"))
@@ -231,29 +261,33 @@ func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) e
 	return ErrUnauthorized
 }
 
-// verifyStripe verifies a Stripe-style HMAC signature.
+// verifyStripeLike verifies HMAC signatures in the Stripe-invented scheme
+// used by Stripe, Cituro, and compatible providers.
 //
-// Header format: "t=<unix-ts>,<sigTag>=<hex>[,<sigTag>=<hex>...]"
-// (Stripe: `Stripe-Signature` with sigTag "v1". Other providers reuse the
-// same scheme with different header + tag names — e.g. Cituro uses
-// `X-CITURO-SIGNATURE` with sigTag "s".)
+// Wire format (per provider's cfg):
 //
-// String-to-sign: "<ts>.<body>" (HMAC-SHA256, lowercase hex). The ts used
-// in the signed payload is the *raw string* from the header, so senders
-// that emit ms-precision timestamps and senders emitting second-precision
-// both work as long as their Hookaido-side tsUnit matches.
+//	Header: cfg.Header (e.g. Stripe-Signature, X-CITURO-SIGNATURE)
+//	Value:  "t=<unix-ts>,<cfg.SigTag>=<hex>[,<cfg.SigTag>=<hex>...]"
+//	  ts is interpreted per cfg.TSUnit (seconds for Stripe, ms for Cituro)
 //
-// tsUnit selects how the numeric t= value is interpreted for the
-// tolerance check: time.Second for Stripe (10-digit unix seconds),
-// time.Millisecond for Cituro (13-digit unix milliseconds).
+// String-to-sign: "<ts>.<body>" hashed via HMAC-SHA256, lowercase hex. The
+// ts used in the signed payload is the *raw string* from the header, so
+// senders that emit ms-precision and those emitting second-precision both
+// work as long as their cfg.TSUnit matches.
 //
-// Replay protection: the timestamp must be within a.Tolerance of the current
-// time (default 5m). No nonce — retries within the tolerance window are
-// accepted, which matches Stripe/Cituro semantics.
-func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, headerName, sigTag string, tsUnit time.Duration) error {
-	raw := strings.TrimSpace(r.Header.Get(headerName))
+// Replay protection: the timestamp must be within a.Tolerance of the
+// current time (default 5m). No nonce — retries within the tolerance
+// window are accepted, which matches Stripe/Cituro semantics.
+//
+// Diagnostic WARN logs fire on every rejection path (header_missing,
+// parse_incomplete, ts_parse_error, ts_out_of_tolerance,
+// sig_hex_decode_error, no_secret_matched) with non-sensitive
+// fingerprints (byte counts, 8-char hex prefixes — never raw secrets or
+// full signatures).
+func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]byte, cfg stripeLikeConfig) error {
+	raw := strings.TrimSpace(r.Header.Get(cfg.Header))
 	if raw == "" {
-		slog.Warn("hmac_stripe_failed", "reason", "header_missing", "header", headerName)
+		slog.Warn("hmac_stripe_failed", "reason", "header_missing", "header", cfg.Header)
 		return ErrUnauthorized
 	}
 
@@ -270,7 +304,7 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 			if tsStr == "" {
 				tsStr = val
 			}
-		case sigTag:
+		case cfg.SigTag:
 			if sigHex == "" {
 				sigHex = val
 			}
@@ -278,7 +312,7 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 	}
 	if tsStr == "" || sigHex == "" {
 		slog.Warn("hmac_stripe_failed", "reason", "parse_incomplete",
-			"header", headerName, "sig_tag", sigTag,
+			"header", cfg.Header, "sig_tag", cfg.SigTag,
 			"ts_present", tsStr != "", "sig_present", sigHex != "",
 			"header_value", raw)
 		return ErrUnauthorized
@@ -287,7 +321,7 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
 		slog.Warn("hmac_stripe_failed", "reason", "ts_parse_error",
-			"header", headerName, "ts_str", tsStr, "err", err.Error())
+			"header", cfg.Header, "ts_str", tsStr, "err", err.Error())
 		return ErrUnauthorized
 	}
 
@@ -299,13 +333,12 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 	if a.Now != nil {
 		now = a.Now
 	}
-	// Convert the raw numeric ts into absolute time via the provider-specific
-	// unit (seconds for stripe, milliseconds for cituro). time.Unix(0, ns)
-	// takes nanoseconds so we multiply by tsUnit (a time.Duration = int64 ns).
-	t := time.Unix(0, ts*int64(tsUnit)).UTC()
+	// time.Unix(0, ns) takes nanoseconds; cfg.TSUnit (a time.Duration =
+	// int64 ns) scales the raw numeric ts into the correct absolute time.
+	t := time.Unix(0, ts*int64(cfg.TSUnit)).UTC()
 	if d := now().UTC().Sub(t); d < -tolerance || d > tolerance {
 		slog.Warn("hmac_stripe_failed", "reason", "ts_out_of_tolerance",
-			"header", headerName, "ts_unix", ts, "ts_unit", tsUnit.String(),
+			"header", cfg.Header, "ts_unix", ts, "ts_unit", cfg.TSUnit.String(),
 			"delta_seconds", d.Seconds(), "tolerance_seconds", tolerance.Seconds())
 		return ErrUnauthorized
 	}
@@ -313,7 +346,7 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 	gotSig, err := hex.DecodeString(sigHex)
 	if err != nil || len(gotSig) == 0 {
 		slog.Warn("hmac_stripe_failed", "reason", "sig_hex_decode_error",
-			"header", headerName, "sig_hex_len", len(sigHex), "sig_hex_prefix", safePrefix(sigHex, 6))
+			"header", cfg.Header, "sig_hex_len", len(sigHex), "sig_hex_prefix", safePrefix(sigHex, 6))
 		return ErrUnauthorized
 	}
 
@@ -346,7 +379,7 @@ func (a *HMACAuth) verifyStripe(r *http.Request, body []byte, secrets [][]byte, 
 		wantPrefix = hex.EncodeToString(mac.Sum(nil))[:8]
 	}
 	slog.Warn("hmac_stripe_failed", "reason", "no_secret_matched",
-		"header", headerName, "sig_tag", sigTag,
+		"header", cfg.Header, "sig_tag", cfg.SigTag,
 		"secrets_tried", len(secrets),
 		"ts_str", tsStr, "body_len", len(body),
 		"got_prefix", hex.EncodeToString(gotSig)[:min(8, 2*len(gotSig))],

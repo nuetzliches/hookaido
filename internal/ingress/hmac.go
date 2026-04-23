@@ -187,11 +187,11 @@ type stripeLikeConfig struct {
 	// SigTag is the key within the header value holding the hex signature
 	// (Stripe uses "v1" / "v0" for rotation, Cituro uses "s").
 	SigTag string
-	// TsUnit is the unit of the numeric t= field. Stripe emits Unix seconds,
+	// TSUnit is the unit of the numeric t= field. Stripe emits Unix seconds,
 	// Cituro emits Unix milliseconds; the PDF example "t=1592..." is
 	// truncated and does not show the difference. Determined from live
 	// headers.
-	TsUnit time.Duration
+	TSUnit time.Duration
 }
 
 var (
@@ -200,7 +200,7 @@ var (
 	stripeProviderConfig = stripeLikeConfig{
 		Header: "Stripe-Signature",
 		SigTag: "v1",
-		TsUnit: time.Second,
+		TSUnit: time.Second,
 	}
 	// cituroProviderConfig matches Cituro's webhook API (cituro_API.pdf
 	// §7.3): X-CITURO-SIGNATURE header, sig tag s, 13-digit Unix
@@ -208,7 +208,7 @@ var (
 	cituroProviderConfig = stripeLikeConfig{
 		Header: "X-CITURO-SIGNATURE",
 		SigTag: "s",
-		TsUnit: time.Millisecond,
+		TSUnit: time.Millisecond,
 	}
 )
 
@@ -268,12 +268,12 @@ func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) e
 //
 //	Header: cfg.Header (e.g. Stripe-Signature, X-CITURO-SIGNATURE)
 //	Value:  "t=<unix-ts>,<cfg.SigTag>=<hex>[,<cfg.SigTag>=<hex>...]"
-//	  ts is interpreted per cfg.TsUnit (seconds for Stripe, ms for Cituro)
+//	  ts is interpreted per cfg.TSUnit (seconds for Stripe, ms for Cituro)
 //
 // String-to-sign: "<ts>.<body>" hashed via HMAC-SHA256, lowercase hex. The
 // ts used in the signed payload is the *raw string* from the header, so
 // senders that emit ms-precision and those emitting second-precision both
-// work as long as their cfg.TsUnit matches.
+// work as long as their cfg.TSUnit matches.
 //
 // Replay protection: the timestamp must be within a.Tolerance of the
 // current time (default 5m). No nonce — retries within the tolerance
@@ -333,12 +333,12 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 	if a.Now != nil {
 		now = a.Now
 	}
-	// time.Unix(0, ns) takes nanoseconds; cfg.TsUnit (a time.Duration =
+	// time.Unix(0, ns) takes nanoseconds; cfg.TSUnit (a time.Duration =
 	// int64 ns) scales the raw numeric ts into the correct absolute time.
-	t := time.Unix(0, ts*int64(cfg.TsUnit)).UTC()
+	t := time.Unix(0, ts*int64(cfg.TSUnit)).UTC()
 	if d := now().UTC().Sub(t); d < -tolerance || d > tolerance {
 		slog.Warn("hmac_stripe_failed", "reason", "ts_out_of_tolerance",
-			"header", cfg.Header, "ts_unix", ts, "ts_unit", cfg.TsUnit.String(),
+			"header", cfg.Header, "ts_unix", ts, "ts_unit", cfg.TSUnit.String(),
 			"delta_seconds", d.Seconds(), "tolerance_seconds", tolerance.Seconds())
 		return ErrUnauthorized
 	}

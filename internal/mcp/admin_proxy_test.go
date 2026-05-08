@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
-	"github.com/nuetzliches/hookaido/modules/sqlite"
-	_ "github.com/nuetzliches/hookaido/modules/postgres"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
+	_ "github.com/nuetzliches/hookaido/v2/modules/postgres"
+	"github.com/nuetzliches/hookaido/v2/modules/sqlite"
 )
 
 func TestQueueBackendUsesAdminProxy(t *testing.T) {
@@ -1158,4 +1158,3 @@ pull_api { auth token "raw:t" }
 		t.Fatalf("expected ep1 managed_enabled=false, got %#v", pol1)
 	}
 }
-

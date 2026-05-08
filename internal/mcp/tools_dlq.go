@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/backlog"
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/backlog"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 func (s *Server) toolDLQList(args map[string]any) (any, error) {

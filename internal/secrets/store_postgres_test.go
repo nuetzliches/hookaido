@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/secrets"
-	"github.com/nuetzliches/hookaido/modules/postgres"
+	"github.com/nuetzliches/hookaido/v2/internal/secrets"
+	"github.com/nuetzliches/hookaido/v2/modules/postgres"
 )
 
 func init() {

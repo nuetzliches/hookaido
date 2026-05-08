@@ -5,7 +5,7 @@
 //
 // Install:
 //
-//	go install github.com/nuetzliches/hookaido/cmd/hookaido@latest
+//	go install github.com/nuetzliches/hookaido/v2/cmd/hookaido@latest
 //
 // Usage:
 //

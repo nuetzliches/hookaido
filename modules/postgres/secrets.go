@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/secrets"
+	"github.com/nuetzliches/hookaido/v2/internal/secrets"
 )
 
 // Compile-time check: *Store satisfies secrets.Store.

@@ -10,7 +10,7 @@ package main
 import (
 	"os"
 
-	"github.com/nuetzliches/hookaido/internal/app"
+	"github.com/nuetzliches/hookaido/v2/internal/app"
 )
 
 func main() {

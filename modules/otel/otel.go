@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/nuetzliches/hookaido/internal/config"
-	"github.com/nuetzliches/hookaido/internal/hookaido"
+	"github.com/nuetzliches/hookaido/v2/internal/config"
+	"github.com/nuetzliches/hookaido/v2/internal/hookaido"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"

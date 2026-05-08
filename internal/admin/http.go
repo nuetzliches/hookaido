@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/config"
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/config"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 const (
@@ -69,22 +69,22 @@ const (
 	managementCodeRouteBacklog     = "management_route_backlog_active"
 	managementCodeConflict         = "management_conflict"
 
-	secretCodeUnavailable    = "secret_management_unavailable"
-	secretCodePoolNotFound   = "secret_pool_not_found"
-	secretCodeNotRuntime     = "secret_not_runtime"
-	secretCodeValueEmpty     = "secret_value_empty"
-	secretCodeInvalidWindow  = "secret_invalid_window"
-	secretCodePoolFull       = "secret_pool_full"
-	secretCodeDuplicateID    = "secret_duplicate_id"
-	secretCodeIDNotFound     = "secret_id_not_found"
-	secretCodeSealFailure    = "secret_seal_failure"
-	secretCodePersistFailure = "secret_persist_failure"
-	readCodeUnauthorized           = "unauthorized"
-	readCodeMethodNotAllowed       = "method_not_allowed"
-	readCodeInvalidQuery           = "invalid_query"
-	readCodeNotFound               = "not_found"
-	readCodeBacklogUnavailable     = "backlog_unavailable"
-	readCodeManagementUnavailable  = "management_model_unavailable"
+	secretCodeUnavailable         = "secret_management_unavailable"
+	secretCodePoolNotFound        = "secret_pool_not_found"
+	secretCodeNotRuntime          = "secret_not_runtime"
+	secretCodeValueEmpty          = "secret_value_empty"
+	secretCodeInvalidWindow       = "secret_invalid_window"
+	secretCodePoolFull            = "secret_pool_full"
+	secretCodeDuplicateID         = "secret_duplicate_id"
+	secretCodeIDNotFound          = "secret_id_not_found"
+	secretCodeSealFailure         = "secret_seal_failure"
+	secretCodePersistFailure      = "secret_persist_failure"
+	readCodeUnauthorized          = "unauthorized"
+	readCodeMethodNotAllowed      = "method_not_allowed"
+	readCodeInvalidQuery          = "invalid_query"
+	readCodeNotFound              = "not_found"
+	readCodeBacklogUnavailable    = "backlog_unavailable"
+	readCodeManagementUnavailable = "management_model_unavailable"
 )
 
 type Authorizer func(r *http.Request) bool

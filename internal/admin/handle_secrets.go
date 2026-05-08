@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/v2/internal/config"
 )
 
 // SecretPool is the admin-facing view of a runtime-mutable secret pool. The

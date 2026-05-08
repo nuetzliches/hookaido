@@ -20,9 +20,9 @@ type Sealer struct {
 }
 
 const (
-	sealVersionV1  byte = 0x01
-	sealNonceLen        = 12
-	sealMinLength       = 1 + sealNonceLen + 16 // version + nonce + GCM tag (empty payload)
+	sealVersionV1 byte = 0x01
+	sealNonceLen       = 12
+	sealMinLength      = 1 + sealNonceLen + 16 // version + nonce + GCM tag (empty payload)
 )
 
 var (

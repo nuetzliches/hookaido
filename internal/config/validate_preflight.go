@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nuetzliches/hookaido/internal/secrets"
+	"github.com/nuetzliches/hookaido/v2/internal/secrets"
 )
 
 func validateSecretPreflight(compiled Compiled) []string {

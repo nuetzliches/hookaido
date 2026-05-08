@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/hookaido"
-	"github.com/nuetzliches/hookaido/internal/httpheader"
-	"github.com/nuetzliches/hookaido/internal/secrets"
+	"github.com/nuetzliches/hookaido/v2/internal/hookaido"
+	"github.com/nuetzliches/hookaido/v2/internal/httpheader"
+	"github.com/nuetzliches/hookaido/v2/internal/secrets"
 )
 
 const (
@@ -187,9 +187,9 @@ type APIConfig struct {
 
 	AuthTokens []string
 
-	MaxBatch        int
-	DefaultLeaseTTL time.Duration
-	MaxLeaseTTL     time.Duration
+	MaxBatch         int
+	DefaultLeaseTTL  time.Duration
+	MaxLeaseTTL      time.Duration
 	DefaultMaxWait   time.Duration
 	MaxWait          time.Duration
 	SSEKeepalive     time.Duration

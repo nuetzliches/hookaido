@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 func TestPullOpsDequeueClampsAndDefaults(t *testing.T) {

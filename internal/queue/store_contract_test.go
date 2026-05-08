@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
-	"github.com/nuetzliches/hookaido/modules/postgres"
-	"github.com/nuetzliches/hookaido/modules/sqlite"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/modules/postgres"
+	"github.com/nuetzliches/hookaido/v2/modules/sqlite"
 )
 
 type storeFactory struct {
@@ -63,6 +63,7 @@ func contractStoreFactories() []storeFactory {
 				if err != nil {
 					t.Fatalf("new postgres store: %v", err)
 				}
+				postgres.TruncateForTest(t, s)
 				t.Cleanup(func() { _ = s.Close() })
 				return s
 			},

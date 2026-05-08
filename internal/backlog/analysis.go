@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 // Shared constants for backlog analytics queries.

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
-	"github.com/nuetzliches/hookaido/modules/sqlite"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/modules/sqlite"
 )
 
 func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {

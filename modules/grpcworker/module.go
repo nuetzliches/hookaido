@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/nuetzliches/hookaido/internal/hookaido"
-	"github.com/nuetzliches/hookaido/internal/pullapi"
-	workerapipb "github.com/nuetzliches/hookaido/modules/grpcworker/proto"
+	"github.com/nuetzliches/hookaido/v2/internal/hookaido"
+	"github.com/nuetzliches/hookaido/v2/internal/pullapi"
+	workerapipb "github.com/nuetzliches/hookaido/v2/modules/grpcworker/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/secrets"
-	"github.com/nuetzliches/hookaido/modules/sqlite"
+	"github.com/nuetzliches/hookaido/v2/internal/secrets"
+	"github.com/nuetzliches/hookaido/v2/modules/sqlite"
 )
 
 func init() {

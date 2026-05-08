@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 // OpError is a transport-neutral operation error for pull worker flows.

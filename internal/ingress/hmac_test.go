@@ -370,8 +370,8 @@ func TestHMACAuth_VerifyStripe_MalformedHeader(t *testing.T) {
 	auth.Now = func() time.Time { return time.Unix(1735689600, 0).UTC() }
 
 	cases := []string{
-		"",                  // empty
-		"garbage",           // no comma-separated kv
+		"",        // empty
+		"garbage", // no comma-separated kv
 		"t=notanumber,v1=abcdef",
 		"v1=abcdef",         // timestamp missing
 		"t=1735689600",      // signature missing

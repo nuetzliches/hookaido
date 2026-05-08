@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 const (
@@ -30,23 +30,23 @@ const (
 )
 
 type Server struct {
-	Store           queue.Store
-	Target          string
-	ResolveRoute    func(endpoint string) (route string, ok bool)
-	Authorize       Authorizer
-	ObserveDequeue  func(route string, statusCode int, items []queue.Envelope)
-	ObserveAck      func(route string, statusCode int, leaseID string, leaseExpired bool)
-	ObserveNack     func(route string, statusCode int, leaseID string, leaseExpired bool)
-	ObserveExtend   func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool)
-	DefaultLeaseTTL time.Duration
-	MaxBatch        int
-	MaxLeaseBatch   int
-	MaxLeaseTTL     time.Duration
-	DefaultMaxWait   time.Duration
-	MaxWait          time.Duration
-	SSEKeepalive        time.Duration
-	SSEMaxConnection    time.Duration
-	ObserveSSEConnect   func(route string)
+	Store                queue.Store
+	Target               string
+	ResolveRoute         func(endpoint string) (route string, ok bool)
+	Authorize            Authorizer
+	ObserveDequeue       func(route string, statusCode int, items []queue.Envelope)
+	ObserveAck           func(route string, statusCode int, leaseID string, leaseExpired bool)
+	ObserveNack          func(route string, statusCode int, leaseID string, leaseExpired bool)
+	ObserveExtend        func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool)
+	DefaultLeaseTTL      time.Duration
+	MaxBatch             int
+	MaxLeaseBatch        int
+	MaxLeaseTTL          time.Duration
+	DefaultMaxWait       time.Duration
+	MaxWait              time.Duration
+	SSEKeepalive         time.Duration
+	SSEMaxConnection     time.Duration
+	ObserveSSEConnect    func(route string)
 	ObserveSSEDisconnect func(route string, statusCode int, messagesSent int, duration time.Duration)
 
 	RecentLeaseOpTTL time.Duration

@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
-	_ "github.com/nuetzliches/hookaido/modules/postgres"
-	"github.com/nuetzliches/hookaido/modules/sqlite"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
+	_ "github.com/nuetzliches/hookaido/v2/modules/postgres"
+	"github.com/nuetzliches/hookaido/v2/modules/sqlite"
 )
 
 func TestHandleRequest_ToolsList(t *testing.T) {

@@ -56,7 +56,7 @@ ADAPTIVE_MAX_READY_LAG_DELTA_SECONDS ?= 10
 ADAPTIVE_MAX_OLDEST_QUEUED_AGE_DELTA_SECONDS ?= 10
 ADAPTIVE_LAG_MIN_ACCEPTED ?= 100
 
-.PHONY: build build-minimal test fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation adaptive-ab-guardrail-check adaptive-ab-mixed-guardrail adaptive-ab-lag-guardrail-check adaptive-ab-mixed-lag-guardrail release-check dist dist-signed dist-verify
+.PHONY: build build-minimal test test-pg fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation adaptive-ab-guardrail-check adaptive-ab-mixed-guardrail adaptive-ab-lag-guardrail-check adaptive-ab-mixed-lag-guardrail release-check dist dist-signed dist-verify
 
 build:
 	@mkdir -p "$(BINDIR)"
@@ -68,6 +68,13 @@ build-minimal:
 
 test:
 	go test ./...
+
+# test-pg runs the full suite serialized (-p 1) so cross-package integration
+# tests don't race against each other on the shared HOOKAIDO_TEST_POSTGRES_DSN.
+# See docker-compose.test.yml for the test database setup.
+test-pg:
+	@test -n "$$HOOKAIDO_TEST_POSTGRES_DSN" || (echo "HOOKAIDO_TEST_POSTGRES_DSN must be set" && exit 1)
+	go test -p 1 ./...
 
 fmt:
 	go fmt ./...

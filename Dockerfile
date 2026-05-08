@@ -10,7 +10,7 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 RUN CGO_ENABLED=0 go build \
-    -ldflags "-s -w -X github.com/nuetzliches/hookaido/internal/app.version=${VERSION} -X github.com/nuetzliches/hookaido/internal/app.commit=${COMMIT} -X github.com/nuetzliches/hookaido/internal/app.buildDate=${BUILD_DATE}" \
+    -ldflags "-s -w -X github.com/nuetzliches/hookaido/v2/internal/app.version=${VERSION} -X github.com/nuetzliches/hookaido/v2/internal/app.commit=${COMMIT} -X github.com/nuetzliches/hookaido/v2/internal/app.buildDate=${BUILD_DATE}" \
     -o /hookaido ./cmd/hookaido
 
 # --- Runtime stage ---

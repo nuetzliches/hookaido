@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 // matchPath mirrors the MVP routing rule used in internal/app: exact match

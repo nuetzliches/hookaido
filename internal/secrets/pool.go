@@ -59,8 +59,8 @@ func NewPool(name string, runtime bool, maxVersions int, seed []Version) (*Pool,
 	return p, nil
 }
 
-func (p *Pool) Name() string    { return p.name }
-func (p *Pool) Runtime() bool   { return p.runtime }
+func (p *Pool) Name() string     { return p.name }
+func (p *Pool) Runtime() bool    { return p.runtime }
 func (p *Pool) MaxVersions() int { return p.maxVersions }
 
 // Size returns the number of versions currently in the pool.

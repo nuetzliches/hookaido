@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 // stubSecretPool is a minimal in-memory SecretPool for handler tests.
@@ -349,10 +349,10 @@ func TestHandleSecretDelete_MissingID_Reports404(t *testing.T) {
 
 func TestParseSecretResourcePath(t *testing.T) {
 	cases := []struct {
-		path    string
-		okName  string
-		okID    string
-		wantOK  bool
+		path   string
+		okName string
+		okID   string
+		wantOK bool
 	}{
 		{"/secrets/cituro", "cituro", "", true},
 		{"/secrets/cituro/sec_abc", "cituro", "sec_abc", true},

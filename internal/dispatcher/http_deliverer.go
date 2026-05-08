@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/secrets"
+	"github.com/nuetzliches/hookaido/v2/internal/secrets"
 )
 
 type HTTPDeliverer struct {

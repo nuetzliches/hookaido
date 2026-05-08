@@ -1,4 +1,4 @@
-module github.com/nuetzliches/hookaido
+module github.com/nuetzliches/hookaido/v2
 
 go 1.25.9
 

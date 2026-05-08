@@ -4,11 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
-	"github.com/nuetzliches/hookaido/internal/hookaido"
-	"github.com/nuetzliches/hookaido/internal/mcp"
+	"github.com/nuetzliches/hookaido/v2/internal/hookaido"
+	"github.com/nuetzliches/hookaido/v2/internal/mcp"
 )
 
 func init() {
@@ -19,24 +20,48 @@ type mcpModule struct{}
 
 func (m *mcpModule) Name() string { return "mcp" }
 
+// serveIO captures the I/O surface that `mcpServe` reaches into. Production
+// code uses defaultServeIO which wires up os.Stdin/os.Stdout/os.Stderr;
+// tests inject closed pipes and capture buffers to exercise the dispatcher
+// without touching global process state.
+type serveIO struct {
+	in         io.Reader
+	out        io.Writer
+	err        io.Writer
+	executable func() (string, error)
+}
+
+func defaultServeIO() serveIO {
+	return serveIO{
+		in:         os.Stdin,
+		out:        os.Stdout,
+		err:        os.Stderr,
+		executable: os.Executable,
+	}
+}
+
 func (m *mcpModule) ServeCommand(args []string) int {
+	return serveCommandWith(args, defaultServeIO())
+}
+
+func serveCommandWith(args []string, io serveIO) int {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "missing subcommand: serve")
+		fmt.Fprintln(io.err, "missing subcommand: serve")
 		return 2
 	}
 
 	switch args[0] {
 	case "serve":
-		return mcpServe(args[1:])
+		return mcpServe(args[1:], io)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mcp subcommand: %s\n", args[0])
+		fmt.Fprintf(io.err, "unknown mcp subcommand: %s\n", args[0])
 		return 2
 	}
 }
 
-func mcpServe(args []string) int {
+func mcpServe(args []string, sio serveIO) int {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(sio.err)
 	configPath := fs.String("config", "./Hookaidofile", "path to config file (read-only tools)")
 	dbPath := fs.String("db", "./hookaido.db", "path to sqlite db file (read-only tools)")
 	roleName := fs.String("role", "read", "MCP tool authorization role (read|operate|admin)")
@@ -54,25 +79,25 @@ func mcpServe(args []string) int {
 	}
 	role, err := mcp.ParseRole(*roleName)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(sio.err, err.Error())
 		return 2
 	}
 
 	bin := *runBinary
 	if bin == "" {
-		if exe, err := os.Executable(); err == nil {
+		if exe, err := sio.executable(); err == nil {
 			bin = exe
 		}
 	}
 
 	server := mcp.NewServer(
-		os.Stdin,
-		os.Stdout,
+		sio.in,
+		sio.out,
 		*configPath,
 		*dbPath,
 		mcp.WithRole(role),
 		mcp.WithPrincipal(*principal),
-		mcp.WithAuditWriter(os.Stderr),
+		mcp.WithAuditWriter(sio.err),
 		mcp.WithMutationsEnabled(*enableMutations),
 		mcp.WithRuntimeControlEnabled(*enableRuntimeControl),
 		mcp.WithRuntimeControlPIDFile(*pidFile),
@@ -83,7 +108,7 @@ func mcpServe(args []string) int {
 		mcp.WithAdminProxyEndpointAllowlist(parseCSVList(*adminEndpointAllowlist)),
 	)
 	if err := server.Serve(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(sio.err, err.Error())
 		return 1
 	}
 	return 0

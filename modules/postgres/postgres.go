@@ -14,8 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/nuetzliches/hookaido/internal/hookaido"
-	"github.com/nuetzliches/hookaido/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/hookaido"
+	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
 type Option func(*Store)
@@ -309,6 +309,9 @@ func (s *Store) Enqueue(env queue.Envelope) error {
 		}
 		if env.SchemaVersion == 0 {
 			env.SchemaVersion = 1
+		}
+		if env.Payload == nil {
+			env.Payload = []byte{}
 		}
 
 		headersJSON, err := encodeStringMapJSON(env.Headers)

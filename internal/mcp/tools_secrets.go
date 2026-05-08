@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nuetzliches/hookaido/internal/config"
+	"github.com/nuetzliches/hookaido/v2/internal/config"
 )
 
 // rotateSecretAllowedKeys enumerates every argument the rotate_secret tool

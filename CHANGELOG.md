@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-05-09
+
 ### Changed
 
 - **Module path now `github.com/nuetzliches/hookaido/v2`** (Go modules v2+ rule). Tools that resolve modules via `proxy.golang.org` (`go install`, `go get`, pkg.go.dev, Go Report Card, awesome-go) previously fell back to v1.5.1 because the unsuffixed import path is not allowed for v2.x.x tags. After this release:
@@ -15,6 +17,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - Release LDFLAGS (`internal/tools/release/main.go`, `Dockerfile`) updated to inject `-X` into the `/v2/internal/app` symbol path.
   - `modules/grpcworker/proto/workerapi.proto` `go_package` option and the generated `workerapi.pb.go` descriptor updated to `/v2`.
   - Repo-wide `gofmt -s` cleanup of 10 files (whitespace alignment) so Go Report Card stays at A+ once it can finally resolve current tags.
+
+### Fixed
+
+- Postgres `Enqueue` no longer rejects envelopes with nil `Payload`. The `payload BYTEA NOT NULL` schema constraint previously made the cross-package `queue.Store` contract tests fail for the Postgres backend while memory/sqlite tolerated it; nil is now coerced to `[]byte{}` to match contract behavior. Surfaced during the coverage uplift that lifted the project total from 70.6% to 75.2% (modules/postgres 14.4% → 80.8%, modules/otel 18.4% → 93.4%, modules/mcp 24.5% → 96.1%, internal/tools/release 32.4% → 84.3%, internal/release/sbom 67.6% → 97.2%, internal/app 54.9% → 61.1%). New `make test-pg` target runs the suite serialized (`-p 1`) so cross-package Postgres integration tests don't race on the shared DSN.
 
 ## [2.7.1] - 2026-04-21
 

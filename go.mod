@@ -3,13 +3,13 @@ module github.com/nuetzliches/hookaido/v2
 go 1.25.9
 
 require (
-	github.com/fsnotify/fsnotify v1.10.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/jackc/pgx/v5 v5.9.2
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
-	golang.org/x/sys v0.43.0
+	golang.org/x/sys v0.44.0
 	google.golang.org/grpc v1.81.0
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.50.0

@@ -7,6 +7,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-06-04
+
+### Security
+
+- Bump Go toolchain `1.25.9` → `1.26.4` to remediate two reachable standard-library vulnerabilities reported by `govulncheck`: **GO-2026-5039** (`net/textproto`, unescaped input in errors — reachable via `ingress.Server.ServeHTTP` → `ReadMIMEHeader`) and **GO-2026-5037** (`crypto/x509`, inefficient candidate hostname parsing — reachable via `dispatcher.HTTPDeliverer.Deliver` → `Certificate.Verify`/`VerifyHostname`). `govulncheck ./...` now reports no findings.
+
+### Changed
+
+- Routine dependency bumps since 2.8.0 (Go modules and GitHub Actions, via Dependabot `go-patch-minor` / `actions-patch-minor` groups), including the `golang:1.26-alpine` build-image digest.
+
 ## [2.8.0] - 2026-05-09
 
 ### Changed

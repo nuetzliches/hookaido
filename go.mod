@@ -1,6 +1,6 @@
 module github.com/nuetzliches/hookaido/v2
 
-go 1.25.9
+go 1.26.4
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1

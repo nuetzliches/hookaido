@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 go build \
     -o /hookaido ./cmd/hookaido
 
 # --- Runtime stage ---
-FROM alpine:3.23@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+FROM alpine:3.24@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4
 RUN apk add --no-cache ca-certificates tzdata su-exec && \
     adduser -D -u 1000 -h /app hookaido
 WORKDIR /app

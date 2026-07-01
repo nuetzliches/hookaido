@@ -154,6 +154,7 @@ func (s *Server) toolConfigCompile(args map[string]any) (any, error) {
 				compiled.Defaults.PublishPolicy.ActorPrefixes...,
 			),
 			"shared_listener":     compiled.SharedListener,
+			"ingress_shared":      compiled.IngressShared,
 			"route_count":         len(compiled.Routes),
 			"pull_route_count":    pullRouteCount,
 			"deliver_route_count": deliverRouteCount,

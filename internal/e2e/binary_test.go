@@ -248,6 +248,136 @@ func TestBinaryE2E_IngressToPull(t *testing.T) {
 	}
 }
 
+// startHookaidoSharedIngressPull runs a single-port deployment where ingress and
+// the Pull API share one listener (prefix-muxed): inbound webhooks arrive on the
+// bare route paths and the Pull API is reachable under /pull on the same port.
+// admin_api stays on its own port so the health probe is unambiguous.
+func startHookaidoSharedIngressPull(t *testing.T, sharedPort, adminPort int) *exec.Cmd {
+	t.Helper()
+	bin := ensureBinary(t)
+
+	cfgContent := fmt.Sprintf(`ingress {
+  listen "127.0.0.1:%d"
+}
+
+"/webhooks" {
+  queue "memory"
+  pull {
+    path "/webhooks"
+  }
+}
+
+pull_api {
+  listen "127.0.0.1:%d"
+  prefix "/pull"
+  auth token "raw:%s"
+}
+
+admin_api {
+  listen "127.0.0.1:%d"
+}
+`, sharedPort, sharedPort, binaryTestPullToken, adminPort)
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cmd := exec.Command(bin, "run", "--config", cfgPath)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start hookaido: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+
+	adminURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", adminPort)
+	waitForHealth(t, adminURL, 10*time.Second)
+	return cmd
+}
+
+// TestBinaryE2E_SinglePortIngressPull verifies the single-port round trip: an
+// event POSTed to /webhooks/... on the shared port can be dequeued via the Pull
+// API on the same port.
+func TestBinaryE2E_SinglePortIngressPull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping binary E2E in short mode")
+	}
+
+	sharedPort := freePort(t)
+	adminPort := freePort(t)
+	startHookaidoSharedIngressPull(t, sharedPort, adminPort)
+
+	// 1. POST a webhook to ingress on the shared port.
+	payload := `{"action":"opened","number":7}`
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/webhooks/events", sharedPort),
+		"application/json",
+		strings.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatalf("ingress POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("ingress status: got %d, want 202", resp.StatusCode)
+	}
+
+	// 2. Dequeue via the Pull API on the SAME port (muxed under /pull).
+	deqBody, _ := json.Marshal(map[string]any{"batch": 1, "lease_ttl": "30s"})
+	deqReq, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/pull/webhooks/dequeue", sharedPort),
+		bytes.NewReader(deqBody))
+	deqReq.Header.Set("Content-Type", "application/json")
+	deqReq.Header.Set("Authorization", "Bearer "+binaryTestPullToken)
+	deqResp, err := http.DefaultClient.Do(deqReq)
+	if err != nil {
+		t.Fatalf("dequeue POST: %v", err)
+	}
+	defer deqResp.Body.Close()
+	if deqResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(deqResp.Body)
+		t.Fatalf("dequeue status: got %d, body: %s", deqResp.StatusCode, body)
+	}
+
+	var deq dequeueResp
+	if err := json.NewDecoder(deqResp.Body).Decode(&deq); err != nil {
+		t.Fatalf("decode dequeue: %v", err)
+	}
+	if len(deq.Items) != 1 {
+		t.Fatalf("dequeue items: got %d, want 1", len(deq.Items))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(deq.Items[0].PayloadB64)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	if string(decoded) != payload {
+		t.Fatalf("payload mismatch: got %q, want %q", decoded, payload)
+	}
+
+	// 3. ACK on the same port.
+	ackBody, _ := json.Marshal(map[string]string{"lease_id": deq.Items[0].LeaseID})
+	ackReq, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/pull/webhooks/ack", sharedPort),
+		bytes.NewReader(ackBody))
+	ackReq.Header.Set("Content-Type", "application/json")
+	ackReq.Header.Set("Authorization", "Bearer "+binaryTestPullToken)
+	ackResp, err := http.DefaultClient.Do(ackReq)
+	if err != nil {
+		t.Fatalf("ack POST: %v", err)
+	}
+	ackResp.Body.Close()
+	if ackResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("ack status: got %d, want 204", ackResp.StatusCode)
+	}
+}
+
 func TestBinaryE2E_ConfigValidate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping binary E2E in short mode")

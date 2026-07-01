@@ -2286,105 +2286,117 @@ func startServers(
 		adminH.HealthDiagnostics = appMetrics.healthDiagnostics
 	}
 
-	ingressLn, err := listenWithTLS(compiled.Ingress.Listen, compiled.Ingress.TLS)
-	if err != nil {
-		return nil, fmt.Errorf("ingress listen %q: %w", compiled.Ingress.Listen, err)
+	// Build the HTTP components. Ingress serves its bare route paths; the API
+	// servers serve under their prefixes (stripped by mountPrefix). Each handler
+	// carries its own tracing/access-log component context.
+	buildAPIHandler := func(component, prefix string, h http.Handler) http.Handler {
+		mounted := mountPrefix(prefix, h)
+		mounted = wrapTracingHandler(compiled.Observability.TracingEnabled, component, mounted)
+		if accessLogger != nil {
+			mounted = withAccessLog(accessLogger.With(slog.String("component", component)), mounted)
+		}
+		return mounted
 	}
-	ingressHandler := http.Handler(ing)
-	ingressHandler = wrapTracingHandler(compiled.Observability.TracingEnabled, "ingress", ingressHandler)
+
+	ingressHandler := wrapTracingHandler(compiled.Observability.TracingEnabled, "ingress", http.Handler(ing))
 	if accessLogger != nil {
 		ingressHandler = withAccessLog(accessLogger.With(slog.String("component", "ingress")), ingressHandler)
 	}
-	ingressSrv := &http.Server{
-		Addr:    compiled.Ingress.Listen,
-		Handler: ingressHandler,
-	}
 
+	type httpComponent struct {
+		name    string
+		listen  string
+		prefix  string // empty for ingress (the default handler within a shared group)
+		tls     config.TLSConfig
+		handler http.Handler
+	}
+	components := []httpComponent{
+		{name: "ingress", listen: compiled.Ingress.Listen, tls: compiled.Ingress.TLS, handler: ingressHandler},
+	}
+	// The pull_api server only runs when pull routes exist.
+	if compiled.HasPullRoutes {
+		components = append(components, httpComponent{
+			name:    "pull_api",
+			listen:  compiled.PullAPI.Listen,
+			prefix:  compiled.PullAPI.Prefix,
+			tls:     compiled.PullAPI.TLS,
+			handler: buildAPIHandler("pull_api", compiled.PullAPI.Prefix, pullHandler),
+		})
+	}
+	components = append(components, httpComponent{
+		name:    "admin_api",
+		listen:  compiled.AdminAPI.Listen,
+		prefix:  compiled.AdminAPI.Prefix,
+		tls:     compiled.AdminAPI.TLS,
+		handler: buildAPIHandler("admin_api", compiled.AdminAPI.Prefix, adminH),
+	})
+
+	// Group components by listen address. Components sharing an address are
+	// served by a single http.Server, muxed by path prefix with ingress as the
+	// default handler. Sharing is opt-in via matching listen addresses; the
+	// default topology remains one listener per component. Compile-time
+	// validation guarantees distinct/non-overlapping prefixes, no ingress
+	// route/prefix collision, and identical TLS across a shared address.
 	type serverEntry struct {
 		name string
 		srv  *http.Server
 		ln   net.Listener
 	}
 	var entries []serverEntry
-	listeners := []net.Listener{ingressLn}
-	entries = append(entries, serverEntry{name: "ingress", srv: ingressSrv, ln: ingressLn})
-
+	var listeners []net.Listener
 	closeEntries := func() {
 		for _, ln := range listeners {
 			_ = ln.Close()
 		}
 	}
 
-	if compiled.SharedListener {
-		sharedLn, err := listenWithTLS(compiled.PullAPI.Listen, compiled.PullAPI.TLS)
-		if err != nil {
-			closeEntries()
-			return nil, fmt.Errorf("pull/admin listen %q: %w", compiled.PullAPI.Listen, err)
+	groupOrder := make([]string, 0, len(components))
+	groupMembers := make(map[string][]httpComponent, len(components))
+	for _, c := range components {
+		if _, ok := groupMembers[c.listen]; !ok {
+			groupOrder = append(groupOrder, c.listen)
 		}
-		listeners = append(listeners, sharedLn)
-		if compiled.HasPullRoutes {
-			pullMounted := mountPrefix(compiled.PullAPI.Prefix, pullHandler)
-			adminMounted := mountPrefix(compiled.AdminAPI.Prefix, adminH)
-			pullMounted = wrapTracingHandler(compiled.Observability.TracingEnabled, "pull_api", pullMounted)
-			adminMounted = wrapTracingHandler(compiled.Observability.TracingEnabled, "admin_api", adminMounted)
-			if accessLogger != nil {
-				pullMounted = withAccessLog(accessLogger.With(slog.String("component", "pull_api")), pullMounted)
-				adminMounted = withAccessLog(accessLogger.With(slog.String("component", "admin_api")), adminMounted)
-			}
-			shared := &http.Server{
-				Addr: compiled.PullAPI.Listen,
-				Handler: sharedPrefixMux(
-					compiled.PullAPI.Prefix, pullMounted,
-					compiled.AdminAPI.Prefix, adminMounted,
-				),
-			}
-			entries = append(entries, serverEntry{name: "pull+admin", srv: shared, ln: sharedLn})
-		} else {
-			adminMounted := mountPrefix(compiled.AdminAPI.Prefix, adminH)
-			adminMounted = wrapTracingHandler(compiled.Observability.TracingEnabled, "admin_api", adminMounted)
-			if accessLogger != nil {
-				adminMounted = withAccessLog(accessLogger.With(slog.String("component", "admin_api")), adminMounted)
-			}
-			adminSrv := &http.Server{
-				Addr:    compiled.AdminAPI.Listen,
-				Handler: adminMounted,
-			}
-			entries = append(entries, serverEntry{name: "admin_api", srv: adminSrv, ln: sharedLn})
+		groupMembers[c.listen] = append(groupMembers[c.listen], c)
+	}
+	groupName := func(members []httpComponent) string {
+		names := make([]string, 0, len(members))
+		for _, m := range members {
+			names = append(names, m.name)
 		}
-	} else {
-		if compiled.HasPullRoutes {
-			pullLn, err := listenWithTLS(compiled.PullAPI.Listen, compiled.PullAPI.TLS)
-			if err != nil {
-				closeEntries()
-				return nil, fmt.Errorf("pull_api listen %q: %w", compiled.PullAPI.Listen, err)
-			}
-			listeners = append(listeners, pullLn)
-			pullSrv := &http.Server{
-				Addr:    compiled.PullAPI.Listen,
-				Handler: mountPrefix(compiled.PullAPI.Prefix, pullHandler),
-			}
-			pullSrv.Handler = wrapTracingHandler(compiled.Observability.TracingEnabled, "pull_api", pullSrv.Handler)
-			if accessLogger != nil {
-				pullSrv.Handler = withAccessLog(accessLogger.With(slog.String("component", "pull_api")), pullSrv.Handler)
-			}
-			entries = append(entries, serverEntry{name: "pull_api", srv: pullSrv, ln: pullLn})
-		}
+		return strings.Join(names, "+")
+	}
 
-		adminLn, err := listenWithTLS(compiled.AdminAPI.Listen, compiled.AdminAPI.TLS)
+	for _, addr := range groupOrder {
+		members := groupMembers[addr]
+		// Validation guarantees identical TLS across a shared address, so the
+		// first member's TLS config is authoritative for the listener.
+		ln, err := listenWithTLS(addr, members[0].tls)
 		if err != nil {
 			closeEntries()
-			return nil, fmt.Errorf("admin_api listen %q: %w", compiled.AdminAPI.Listen, err)
+			return nil, fmt.Errorf("%s listen %q: %w", groupName(members), addr, err)
 		}
-		listeners = append(listeners, adminLn)
-		adminSrv := &http.Server{
-			Addr:    compiled.AdminAPI.Listen,
-			Handler: mountPrefix(compiled.AdminAPI.Prefix, adminH),
+		listeners = append(listeners, ln)
+
+		var handler http.Handler
+		if len(members) == 1 {
+			handler = members[0].handler
+		} else {
+			var defaultHandler http.Handler
+			routes := make([]prefixRoute, 0, len(members))
+			for _, m := range members {
+				if m.prefix == "" {
+					defaultHandler = m.handler
+					continue
+				}
+				routes = append(routes, prefixRoute{prefix: m.prefix, handler: m.handler})
+			}
+			handler = prefixMux(defaultHandler, routes...)
 		}
-		adminSrv.Handler = wrapTracingHandler(compiled.Observability.TracingEnabled, "admin_api", adminSrv.Handler)
-		if accessLogger != nil {
-			adminSrv.Handler = withAccessLog(accessLogger.With(slog.String("component", "admin_api")), adminSrv.Handler)
-		}
-		entries = append(entries, serverEntry{name: "admin_api", srv: adminSrv, ln: adminLn})
+		entries = append(entries, serverEntry{
+			name: groupName(members),
+			srv:  &http.Server{Addr: addr, Handler: handler},
+			ln:   ln,
+		})
 	}
 
 	servers := make([]shutdownServer, 0, len(entries)+2)
@@ -2454,26 +2466,22 @@ func startServers(
 		serveOnListener(runtimeLogger, "metrics", metricsSrv, metricsLn, cancel)
 	}
 
-	runtimeLogger.Info("ingress_listening", slog.String("addr", compiled.Ingress.Listen))
-	if compiled.SharedListener {
-		if compiled.HasPullRoutes {
-			runtimeLogger.Info("pull_admin_listening",
-				slog.String("addr", compiled.PullAPI.Listen),
-				slog.String("pull_prefix", compiled.PullAPI.Prefix),
-				slog.String("admin_prefix", compiled.AdminAPI.Prefix),
-			)
-		} else {
-			runtimeLogger.Info("admin_api_listening",
-				slog.String("addr", compiled.AdminAPI.Listen),
-				slog.String("prefix", compiled.AdminAPI.Prefix),
-			)
-		}
-	} else {
-		if compiled.HasPullRoutes {
-			runtimeLogger.Info("pull_api_listening", slog.String("addr", compiled.PullAPI.Listen), slog.String("prefix", compiled.PullAPI.Prefix))
-		}
-		runtimeLogger.Info("admin_api_listening", slog.String("addr", compiled.AdminAPI.Listen), slog.String("prefix", compiled.AdminAPI.Prefix))
+	runtimeLogger.Info("ingress_listening",
+		slog.String("addr", compiled.Ingress.Listen),
+		slog.Bool("shared", compiled.IngressShared),
+	)
+	if compiled.HasPullRoutes {
+		runtimeLogger.Info("pull_api_listening",
+			slog.String("addr", compiled.PullAPI.Listen),
+			slog.String("prefix", compiled.PullAPI.Prefix),
+			slog.Bool("shared", compiled.SharedListener || compiled.PullAPI.Listen == compiled.Ingress.Listen),
+		)
 	}
+	runtimeLogger.Info("admin_api_listening",
+		slog.String("addr", compiled.AdminAPI.Listen),
+		slog.String("prefix", compiled.AdminAPI.Prefix),
+		slog.Bool("shared", compiled.SharedListener || compiled.AdminAPI.Listen == compiled.Ingress.Listen),
+	)
 	if compiled.Observability.Metrics.Enabled {
 		runtimeLogger.Info("metrics_listening",
 			slog.String("addr", compiled.Observability.Metrics.Listen),
@@ -2525,14 +2533,29 @@ func mountPrefix(prefix string, next http.Handler) http.Handler {
 	})
 }
 
-func sharedPrefixMux(pullPrefix string, pull http.Handler, adminPrefix string, admin http.Handler) http.Handler {
+// prefixRoute pairs a URL path prefix with the handler serving that prefix on a
+// shared listener. The handler is expected to already strip the prefix (via
+// mountPrefix) before dispatching to its inner server.
+type prefixRoute struct {
+	prefix  string
+	handler http.Handler
+}
+
+// prefixMux serves multiple logical HTTP servers on one listener, dispatching by
+// path prefix. Prefixed routes are checked first (compile-time validation
+// guarantees they are non-overlapping, so order is irrelevant); anything not
+// matching a prefix falls through to defaultHandler (ingress, which serves its
+// bare route paths). With no defaultHandler, unmatched paths return 404.
+func prefixMux(defaultHandler http.Handler, routes ...prefixRoute) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hasPathPrefix(r.URL.Path, pullPrefix) {
-			pull.ServeHTTP(w, r)
-			return
+		for _, rt := range routes {
+			if hasPathPrefix(r.URL.Path, rt.prefix) {
+				rt.handler.ServeHTTP(w, r)
+				return
+			}
 		}
-		if hasPathPrefix(r.URL.Path, adminPrefix) {
-			admin.ServeHTTP(w, r)
+		if defaultHandler != nil {
+			defaultHandler.ServeHTTP(w, r)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -2953,6 +2976,7 @@ func dlqRetentionEqual(a, b config.DLQRetentionConfig) bool {
 
 func requiresRestartForReload(compiled, running config.Compiled) bool {
 	if compiled.SharedListener != running.SharedListener ||
+		compiled.IngressShared != running.IngressShared ||
 		compiled.HasPullRoutes != running.HasPullRoutes ||
 		compiled.HasDeliverRoutes != running.HasDeliverRoutes ||
 		queueBackendForCompiled(compiled) != queueBackendForCompiled(running) ||

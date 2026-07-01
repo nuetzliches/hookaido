@@ -112,9 +112,16 @@ type Compiled struct {
 	DeliveredRetention DeliveredRetentionConfig
 	DLQRetention       DLQRetentionConfig
 	QueueLimits        QueueLimitsConfig
-	SharedListener     bool
-	HasPullRoutes      bool
-	HasDeliverRoutes   bool
+	// SharedListener is set when pull_api and admin_api co-listen on the same
+	// address (prefix-muxed). Kept for backward-compatible semantics.
+	SharedListener bool
+	// IngressShared is set when ingress co-listens with pull_api and/or
+	// admin_api on the same address (single-port deployments). Ingress serves
+	// its bare route paths as the default handler; the API servers are muxed
+	// under their prefixes. Strictly opt-in via matching listen addresses.
+	IngressShared    bool
+	HasPullRoutes    bool
+	HasDeliverRoutes bool
 
 	// Routes are in evaluation order (top-down).
 	Routes []CompiledRoute
@@ -1305,10 +1312,6 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 		}
 	}
 
-	// Ingress is intentionally separate from Pull/Admin APIs in this MVP slice.
-	if compiled.Ingress.Listen == compiled.PullAPI.Listen || compiled.Ingress.Listen == compiled.AdminAPI.Listen {
-		res.Errors = append(res.Errors, "ingress.listen must not share a listener with pull_api/admin_api")
-	}
 	if compiled.PullAPI.GRPCListen != "" {
 		if compiled.PullAPI.GRPCListen == compiled.Ingress.Listen ||
 			compiled.PullAPI.GRPCListen == compiled.PullAPI.Listen ||
@@ -1332,26 +1335,7 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 		res.Errors = append(res.Errors, "queue_retention.prune_interval must be a positive duration when retention is enabled")
 	}
 
-	if hasPullRoutes && compiled.PullAPI.Listen == compiled.AdminAPI.Listen {
-		compiled.SharedListener = true
-		if compiled.PullAPI.Prefix == "" || compiled.AdminAPI.Prefix == "" {
-			res.Errors = append(res.Errors, "shared listener requires non-empty pull_api.prefix and admin_api.prefix")
-		} else if compiled.PullAPI.Prefix == compiled.AdminAPI.Prefix {
-			res.Errors = append(res.Errors, "shared listener requires distinct pull_api.prefix and admin_api.prefix")
-		} else if hasPathPrefix(compiled.PullAPI.Prefix, compiled.AdminAPI.Prefix) || hasPathPrefix(compiled.AdminAPI.Prefix, compiled.PullAPI.Prefix) {
-			res.Errors = append(res.Errors, "shared listener requires non-overlapping prefixes")
-		}
-		if compiled.PullAPI.TLS.Enabled != compiled.AdminAPI.TLS.Enabled {
-			res.Errors = append(res.Errors, "shared listener requires matching pull_api/admin_api tls settings")
-		} else if compiled.PullAPI.TLS.Enabled {
-			if compiled.PullAPI.TLS.CertFile != compiled.AdminAPI.TLS.CertFile ||
-				compiled.PullAPI.TLS.KeyFile != compiled.AdminAPI.TLS.KeyFile ||
-				compiled.PullAPI.TLS.ClientCA != compiled.AdminAPI.TLS.ClientCA ||
-				compiled.PullAPI.TLS.ClientAuth != compiled.AdminAPI.TLS.ClientAuth {
-				res.Errors = append(res.Errors, "shared listener requires identical pull_api/admin_api tls configuration")
-			}
-		}
-	}
+	validateSharedListeners(&compiled, hasPullRoutes, &res)
 
 	// Pull API is required only when pull routes are configured.
 	if hasPullRoutes && cfg.PullAPI == nil {
@@ -3546,4 +3530,125 @@ func hasPathPrefix(p, prefix string) bool {
 		return true
 	}
 	return false
+}
+
+// sharedListenComponent is one HTTP server that may co-listen with others on a
+// single address. Ingress serves its bare route paths (empty Prefix, matched as
+// the default handler at runtime); pull_api/admin_api serve under Prefix.
+type sharedListenComponent struct {
+	Name      string
+	Listen    string
+	Prefix    string
+	TLS       TLSConfig
+	IsIngress bool
+}
+
+// validateSharedListeners groups ingress, pull_api, and admin_api by their
+// listen address and validates any address shared by more than one of them.
+// Sharing is strictly opt-in (inferred from equal listen addresses) and the
+// multi-port topology remains the default. grpc_listen and
+// observability.metrics.listen always stay dedicated (guarded separately).
+//
+// For every shared address it enforces:
+//   - co-listening API servers have non-empty, distinct, non-overlapping prefixes;
+//   - when ingress co-listens, no ingress route path collides with (shadows or is
+//     shadowed by) a co-listening API prefix — ingress paths are user-defined and
+//     can clash with a pull/admin prefix in ways two API prefixes never could;
+//   - identical TLS configuration across everything on the shared address.
+func validateSharedListeners(compiled *Compiled, hasPullRoutes bool, res *ValidationResult) {
+	comps := []sharedListenComponent{
+		{Name: "ingress", Listen: compiled.Ingress.Listen, TLS: compiled.Ingress.TLS, IsIngress: true},
+	}
+	// The pull_api server only runs when pull routes exist; otherwise it does
+	// not participate in listener grouping.
+	if hasPullRoutes {
+		comps = append(comps, sharedListenComponent{Name: "pull_api", Listen: compiled.PullAPI.Listen, Prefix: compiled.PullAPI.Prefix, TLS: compiled.PullAPI.TLS})
+	}
+	comps = append(comps, sharedListenComponent{Name: "admin_api", Listen: compiled.AdminAPI.Listen, Prefix: compiled.AdminAPI.Prefix, TLS: compiled.AdminAPI.TLS})
+
+	order := make([]string, 0, len(comps))
+	groups := make(map[string][]sharedListenComponent, len(comps))
+	for _, c := range comps {
+		if _, ok := groups[c.Listen]; !ok {
+			order = append(order, c.Listen)
+		}
+		groups[c.Listen] = append(groups[c.Listen], c)
+	}
+
+	for _, addr := range order {
+		group := groups[addr]
+		if len(group) < 2 {
+			continue
+		}
+
+		var hasIngress, hasPull, hasAdmin bool
+		apis := make([]sharedListenComponent, 0, len(group))
+		for _, c := range group {
+			switch c.Name {
+			case "ingress":
+				hasIngress = true
+			case "pull_api":
+				hasPull = true
+			case "admin_api":
+				hasAdmin = true
+			}
+			if !c.IsIngress {
+				apis = append(apis, c)
+			}
+		}
+		if hasPull && hasAdmin {
+			compiled.SharedListener = true
+		}
+		if hasIngress {
+			compiled.IngressShared = true
+		}
+
+		// 1. Co-listening API servers need non-empty, distinct, non-overlapping prefixes.
+		for _, c := range apis {
+			if c.Prefix == "" {
+				res.Errors = append(res.Errors, fmt.Sprintf("shared listener requires non-empty prefix on %s (shared address %q)", c.Name, addr))
+			}
+		}
+		for i := 0; i < len(apis); i++ {
+			for j := i + 1; j < len(apis); j++ {
+				a, b := apis[i], apis[j]
+				if a.Prefix == "" || b.Prefix == "" {
+					continue
+				}
+				if a.Prefix == b.Prefix {
+					res.Errors = append(res.Errors, fmt.Sprintf("shared listener requires distinct prefixes on %s and %s (shared address %q)", a.Name, b.Name, addr))
+				} else if hasPathPrefix(a.Prefix, b.Prefix) || hasPathPrefix(b.Prefix, a.Prefix) {
+					res.Errors = append(res.Errors, fmt.Sprintf("shared listener requires non-overlapping prefixes on %s (%q) and %s (%q)", a.Name, a.Prefix, b.Name, b.Prefix))
+				}
+			}
+		}
+
+		// 2. When ingress co-listens, its (user-defined) route paths must not
+		//    collide with any co-listening API prefix, or they would be shadowed
+		//    by the prefix mux.
+		if hasIngress {
+			for _, c := range apis {
+				if c.Prefix == "" {
+					continue
+				}
+				for _, rt := range compiled.Routes {
+					if rt.Path == "" {
+						continue
+					}
+					if hasPathPrefix(rt.Path, c.Prefix) || hasPathPrefix(c.Prefix, rt.Path) {
+						res.Errors = append(res.Errors, fmt.Sprintf("shared listener: ingress route path %q collides with %s.prefix %q (choose a non-overlapping route path or %s.prefix)", rt.Path, c.Name, c.Prefix, c.Name))
+					}
+				}
+			}
+		}
+
+		// 3. TLS must be identical across everything on the shared address.
+		base := group[0].TLS
+		for _, c := range group[1:] {
+			if c.TLS != base {
+				res.Errors = append(res.Errors, fmt.Sprintf("shared listener requires identical tls configuration across co-listening servers (shared address %q)", addr))
+				break
+			}
+		}
+	}
 }

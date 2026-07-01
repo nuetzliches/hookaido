@@ -1692,7 +1692,11 @@ pull_api { auth token "raw:t" }
 	}
 }
 
-func TestCompile_IngressMustNotShareListener(t *testing.T) {
+// Ingress may share a listener with pull_api (single-port deployments), but the
+// co-listening API server must still define a non-empty prefix so the shared
+// listener can be prefix-muxed. Here ingress binds pull_api's default address
+// (":9443") without a pull_api.prefix, which must be rejected.
+func TestCompile_IngressShareWithoutPrefixRejected(t *testing.T) {
 	in := []byte(`
 ingress { listen ":9443" }
 pull_api { auth token "raw:t" }
@@ -1708,15 +1712,8 @@ pull_api { auth token "raw:t" }
 	if res.OK {
 		t.Fatalf("expected error, got ok")
 	}
-	found := false
-	for _, e := range res.Errors {
-		if strings.Contains(e, "ingress.listen") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected ingress listener error, got %#v", res.Errors)
+	if !compileErrorsContain(res.Errors, "shared listener requires non-empty prefix") {
+		t.Fatalf("expected shared-listener prefix error, got %#v", res.Errors)
 	}
 }
 
@@ -6293,6 +6290,134 @@ admin_api { listen ":9999" }
 	}
 	if !found {
 		t.Fatalf("expected shared listener error, got %#v", res.Errors)
+	}
+}
+
+func compileErrorsContain(errs []string, sub string) bool {
+	for _, e := range errs {
+		if strings.Contains(e, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCompile_IngressSharedWithPullSinglePort(t *testing.T) {
+	in := []byte(`
+ingress { listen ":8080" }
+pull_api { listen ":8080" prefix "/pull" auth token "raw:t" }
+
+"/webhooks" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+	if !compiled.IngressShared {
+		t.Fatalf("expected IngressShared=true")
+	}
+	// pull_api and admin_api are on different addresses, so the pull+admin
+	// shared-listener flag must stay false.
+	if compiled.SharedListener {
+		t.Fatalf("expected SharedListener=false (admin is on a separate port)")
+	}
+}
+
+func TestCompile_IngressSharedAllThreeSinglePort(t *testing.T) {
+	in := []byte(`
+ingress { listen ":8080" }
+pull_api { listen ":8080" prefix "/pull" auth token "raw:t" }
+admin_api { listen ":8080" prefix "/admin" }
+
+"/webhooks" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+	if !compiled.IngressShared {
+		t.Fatalf("expected IngressShared=true")
+	}
+	if !compiled.SharedListener {
+		t.Fatalf("expected SharedListener=true (pull and admin co-listen)")
+	}
+}
+
+func TestCompile_IngressSharedRoutePrefixCollision(t *testing.T) {
+	in := []byte(`
+ingress { listen ":8080" }
+pull_api { listen ":8080" prefix "/pull" auth token "raw:t" }
+
+"/pull/webhooks" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	if !compileErrorsContain(res.Errors, "collides with pull_api.prefix") {
+		t.Fatalf("expected route/prefix collision error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_IngressSharedRequiresPrefix(t *testing.T) {
+	in := []byte(`
+ingress { listen ":8080" }
+pull_api { listen ":8080" auth token "raw:t" }
+
+"/webhooks" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	if !compileErrorsContain(res.Errors, "shared listener requires non-empty prefix") {
+		t.Fatalf("expected empty-prefix error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_IngressSharedTLSMismatch(t *testing.T) {
+	in := []byte(`
+ingress { listen ":8080" tls { cert_file "certs/i.crt" key_file "certs/i.key" } }
+pull_api { listen ":8080" prefix "/pull" auth token "raw:t" }
+
+"/webhooks" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	if !compileErrorsContain(res.Errors, "identical tls configuration") {
+		t.Fatalf("expected tls mismatch error, got %#v", res.Errors)
 	}
 }
 

@@ -10,7 +10,7 @@ Thanks for contributing to Hookaido.
 
 ## Development Setup
 
-1. Install Go `1.25.x` (see [go.mod](go.mod)).
+1. Install Go `1.26.x` (see [go.mod](go.mod)).
 2. Clone the repository.
 3. Run tests:
 

@@ -369,7 +369,7 @@ Egress policy notes:
 - Inbound HMAC supports replay protection (timestamp + nonce + tolerance).
 - Outbound `deliver` HMAC signing is optional per target via `sign hmac`.
 - Egress is SSRF-safe by default (see defaults).
-- Admin API and Pull API are logically separated; separate listeners by default.
+- Ingress, Admin API, and Pull API are logically separated, with separate listeners by default. They may opt into sharing a single port (prefix-muxed) by using equal `listen` addresses: ingress serves its bare route paths as the default handler while `pull_api`/`admin_api` serve under their `prefix` values. Sharing requires non-empty/distinct/non-overlapping API prefixes, no ingress route path colliding with an API prefix, and identical TLS across the shared address. `pull_api.grpc_listen` and `observability.metrics.listen` always remain dedicated listeners.
 - TLS client auth: `tls.client_auth` values are `none`, `request`, `require`, `verify_if_given`, `require_and_verify` (`require` is the default when `client_ca` is set).
 
 ### Outbound Deliver Signing

@@ -195,7 +195,15 @@ admin_api {
 | `auth token` | —                | Optional bearer token allowlist     |
 | `tls`        | —                | TLS and optional mTLS configuration |
 
-> **Shared listener:** If `pull_api.listen == admin_api.listen`, both must define non-overlapping `prefix` values (e.g., `/pull` and `/admin`).
+> **Shared listener (single-port deployments):** `ingress`, `pull_api`, and `admin_api` can share one port by giving them the same `listen` address — Hookaido then serves them on a single listener and dispatches by path prefix. Ingress serves its bare route paths (e.g. `/webhooks/...`) as the default handler, while the co-listening API servers serve under their `prefix` values (e.g. `/pull`, `/admin`). This is strictly opt-in (inferred from equal `listen` addresses); separate ports remain the default and recommended posture.
+>
+> When an address is shared, `config validate` enforces:
+>
+> - each co-listening API server (`pull_api`/`admin_api`) has a **non-empty, distinct, non-overlapping** `prefix`;
+> - **no ingress route path collides** with (is shadowed by, or shadows) a co-listening API prefix — e.g. an `ingress` route `/pull/...` is rejected when `pull_api.prefix` is `/pull`;
+> - **identical TLS** settings across everything on the shared address.
+>
+> `pull_api.grpc_listen` and `observability.metrics.listen` always stay on dedicated listeners and may not share an address.
 
 ### `queue_limits`
 

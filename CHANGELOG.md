@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- **Single-port deployments — `ingress` can share a listener with `pull_api` (and, transitively, `admin_api`)** ([#183](https://github.com/nuetzliches/hookaido/issues/183)). When `ingress.listen` equals `pull_api.listen` (and/or `admin_api.listen`), the components are served on one `net.Listener`, disambiguated by path prefix: ingress serves its bare route paths (`/webhooks/...`) as the default handler while the API servers serve under their `prefix` values (e.g. `/pull`, `/admin`). This mirrors the existing `pull_api == admin_api` shared listener and is strictly opt-in via matching listen addresses — the default topology remains one listener per component. Compile-time validation requires co-listening API servers to have non-empty, distinct, non-overlapping prefixes, additionally rejects any ingress route path that collides with a co-listening API prefix, and enforces identical TLS across the shared address. `pull_api.grpc_listen` and `observability.metrics.listen` remain dedicated listeners. Motivated by reverse-proxy path-routing and single-published-port orchestrators. A new `ingress_shared` flag is surfaced alongside `shared_listener` in the MCP `config_compile` summary and runtime-control status; toggling the shared-listener mode is restart-required.
+
 ## [2.8.1] - 2026-06-04
 
 ### Security

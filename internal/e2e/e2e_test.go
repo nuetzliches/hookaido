@@ -233,6 +233,11 @@ func TestE2E_PushDLQLifecycle(t *testing.T) {
 	// Target fails for the first two calls -> Retry.Max=1 means one retry, then DLQ ->
 	// requeue → new dispatcher with high Max → target succeeds → delivered.
 	var deliveryCount atomic.Int32
+	// delivered signals a successful (HTTP 200) delivery. Only n>=3 succeeds,
+	// and the sole n>=3 delivery is the re-delivery of the requeued message, so
+	// a signal here is a deterministic notification that the requeued message
+	// was re-delivered. Non-blocking send keeps the HTTP handler from stalling.
+	delivered := make(chan struct{}, 1)
 
 	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := deliveryCount.Add(1)
@@ -241,6 +246,10 @@ func TestE2E_PushDLQLifecycle(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
 	}))
 	defer targetSrv.Close()
 
@@ -346,20 +355,21 @@ func TestE2E_PushDLQLifecycle(t *testing.T) {
 	pd2.Start()
 	defer pd2.Drain(5 * time.Second)
 
-	// Target returns 200 for n >= 3 -> next delivery should succeed.
-	beforeRequeueDeliveries := deliveryCount.Load()
-	deadline = time.After(10 * time.Second)
-	for deliveryCount.Load() <= beforeRequeueDeliveries {
-		select {
-		case <-deadline:
-			t.Fatalf("requeued message not re-delivered within 10s (deliveryCount=%d, before=%d)", deliveryCount.Load(), beforeRequeueDeliveries)
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
+	// The requeued message MUST be re-delivered. Target returns 200 for n >= 3,
+	// so the delivery callback signals `delivered` exactly on that re-delivery.
+	// Wait for that signal rather than racing a fixed wall-clock budget: this
+	// removes a TOCTOU race (pd2 is started above and can re-deliver before any
+	// polled snapshot is taken) and tolerates heavily-loaded CI runners. The
+	// 30s bound is a safety net, not the expected wait.
+	select {
+	case <-delivered:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("requeued message not re-delivered within 30s (deliveryCount=%d)", deliveryCount.Load())
 	}
 
-	// Queue should become empty (no queued, leased, or dead)
-	deadline = time.After(5 * time.Second)
+	// Queue should become empty (no queued, leased, or dead). Load-tolerant
+	// deadline so a slow CI runner doesn't relocate the flake here.
+	deadline = time.After(15 * time.Second)
 	for {
 		stats, _ := store.Stats()
 		if stats.ByState[queue.StateQueued] == 0 && stats.ByState[queue.StateLeased] == 0 && stats.ByState[queue.StateDead] == 0 {

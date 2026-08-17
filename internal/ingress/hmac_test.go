@@ -58,6 +58,108 @@ func TestHMACAuth_SelectSecretsEmptyDenied(t *testing.T) {
 	}
 }
 
+// newCanonicalAuth builds an HMACAuth with a fixed clock and one secret, plus a
+// helper that produces a request for a given nonce and signature.
+func newCanonicalAuth(t *testing.T, secret []byte, ts time.Time) (*HMACAuth, func(nonce, sig string) *http.Request, []byte, string) {
+	t.Helper()
+	body := []byte("payload")
+	path := "/hooks"
+
+	auth := NewHMACAuth([][]byte{secret})
+	auth.Now = func() time.Time { return ts }
+
+	mk := func(nonce, sig string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "http://example.com"+path, bytes.NewReader(body))
+		req.Header.Set(auth.TimestampHeader, strconv.FormatInt(ts.Unix(), 10))
+		req.Header.Set(auth.NonceHeader, nonce)
+		req.Header.Set(auth.SignatureHeader, sig)
+		return req
+	}
+	return auth, mk, body, path
+}
+
+// A request that fails signature verification must not claim its nonce.
+// Claiming it before verification let any unauthenticated caller burn a nonce,
+// so the genuine signed webhook carrying it was then rejected as a replay --
+// and let that same caller grow the cache without ever authenticating.
+func TestHMACAuth_RejectedRequestDoesNotClaimNonce(t *testing.T) {
+	secret := []byte("s1")
+	ts := time.Unix(1735689600, 0).UTC()
+	auth, mk, body, path := newCanonicalAuth(t, secret, ts)
+
+	valid := signHMAC(ts.Unix(), http.MethodPost, path, body, secret)
+
+	// An attacker who knows the nonce sends it with a bogus signature first.
+	if err := auth.Verify(mk("n-shared", "00"), path, body); err == nil {
+		t.Fatal("expected unauthorized for a bad signature")
+	}
+
+	// The genuine, correctly signed delivery carrying the same nonce must
+	// still be accepted.
+	if err := auth.Verify(mk("n-shared", valid), path, body); err != nil {
+		t.Fatalf("genuine request rejected after an unauthenticated caller used the same nonce: %v", err)
+	}
+}
+
+// Replay protection itself must keep working: a second delivery of the same
+// verified request is rejected.
+func TestHMACAuth_VerifiedNonceIsClaimedOnce(t *testing.T) {
+	secret := []byte("s1")
+	ts := time.Unix(1735689600, 0).UTC()
+	auth, mk, body, path := newCanonicalAuth(t, secret, ts)
+
+	sig := signHMAC(ts.Unix(), http.MethodPost, path, body, secret)
+
+	if err := auth.Verify(mk("n1", sig), path, body); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if err := auth.Verify(mk("n1", sig), path, body); err == nil {
+		t.Fatal("expected the replayed delivery to be rejected")
+	}
+}
+
+// A nonce we cannot track is not waved through: the route opted into replay
+// protection, and an unbounded nonce is also what let a single request occupy
+// megabytes of cache.
+func TestHMACAuth_OverlongNonceRejected(t *testing.T) {
+	secret := []byte("s1")
+	ts := time.Unix(1735689600, 0).UTC()
+	auth, mk, body, path := newCanonicalAuth(t, secret, ts)
+
+	sig := signHMAC(ts.Unix(), http.MethodPost, path, body, secret)
+
+	if err := auth.Verify(mk(strings.Repeat("a", nonceMaxLen), sig), path, body); err != nil {
+		t.Fatalf("nonce at the length limit should be accepted, got %v", err)
+	}
+	if err := auth.Verify(mk(strings.Repeat("b", nonceMaxLen+1), sig), path, body); err == nil {
+		t.Fatal("expected a nonce over the length limit to be rejected")
+	}
+}
+
+// The cache must not grow without bound, and must evict the entry closest to
+// expiring rather than refuse a validly signed request.
+func TestNonceCache_EvictsEarliestWhenFull(t *testing.T) {
+	now := time.Unix(1735689600, 0).UTC()
+	c := newNonceCache(func() time.Time { return now })
+
+	// Fill to capacity with entries expiring far out, plus one expiring soon.
+	c.m["soonest"] = now.Add(time.Second)
+	for i := 0; i < nonceMaxEntries-1; i++ {
+		c.m[strconv.Itoa(i)] = now.Add(time.Hour)
+	}
+	c.lastSweep = now // suppress the sweep so the cap path is exercised
+
+	if !c.recordIfAbsent("fresh", now.Add(time.Hour)) {
+		t.Fatal("a validly signed request must be recorded even when the cache is full")
+	}
+	if len(c.m) > nonceMaxEntries {
+		t.Fatalf("cache grew to %d, want <= %d", len(c.m), nonceMaxEntries)
+	}
+	if _, ok := c.m["soonest"]; ok {
+		t.Fatal("expected the entry closest to expiring to be evicted")
+	}
+}
+
 func signHMAC(ts int64, method, path string, body []byte, secret []byte) string {
 	bodyHash := sha256.Sum256(body)
 	msg := []byte(strconv.FormatInt(ts, 10) + "\n" + method + "\n" + path + "\n" + hex.EncodeToString(bodyHash[:]))

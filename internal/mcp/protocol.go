@@ -22,7 +22,15 @@ import (
 )
 
 const (
-	protocolVersion           = "2024-11-05"
+	protocolVersion = "2024-11-05"
+
+	// maxFrameBytes bounds a single JSON-RPC frame read from stdin. 8 MiB sits
+	// well above realistic traffic -- the largest frames carry a whole
+	// Hookaidofile (config_apply) or a batch of base64 payloads
+	// (messages_publish), against an Admin API body limit of 2 MiB -- while
+	// keeping a corrupt or hostile Content-Length from exhausting memory.
+	maxFrameBytes = 8 << 20
+
 	maxAuditReasonLength      = 512
 	maxAuditActorLength       = 256
 	maxAuditRequestIDLength   = 256
@@ -89,6 +97,22 @@ var (
 	instanceStartAllowedKeys = keySet(
 		"pid_file",
 		"timeout",
+	)
+	// instance_status and instance_logs_tail were the only two runtime-control
+	// tools with no argument allowlist. Both already declare
+	// "additionalProperties": false in their input schemas below, so the server
+	// was not enforcing the contract it advertises: a caller could pass
+	// undeclared keys and have them silently ignored -- a misspelled max_lines
+	// quietly yielding the 200-line default instead of an error. Both key sets
+	// mirror those schemas exactly.
+	instanceStatusAllowedKeys = keySet(
+		"pid_file",
+		"timeout",
+	)
+	instanceLogsTailAllowedKeys = keySet(
+		"pid_file",
+		"max_lines",
+		"max_bytes",
 	)
 	instanceStopAllowedKeys = keySet(
 		"pid_file",
@@ -2515,6 +2539,18 @@ func readFrame(r *bufio.Reader) ([]byte, error) {
 	}
 	if contentLength < 0 {
 		return nil, errors.New("missing content length")
+	}
+	// Bound the allocation. Content-Length was used to size this buffer with only
+	// a negative check, so a single header line could ask the process to reserve
+	// an arbitrary amount of memory before any content had been read -- a corrupt
+	// or hostile frame could take the server down without sending a payload.
+	//
+	// Like the other framing errors here, this returns without consuming the
+	// declared body, so the stream cannot be resynchronized afterwards; the
+	// caller answers -32700 and reads on, which is the existing behaviour for a
+	// malformed Content-Length.
+	if contentLength > maxFrameBytes {
+		return nil, fmt.Errorf("content length %d exceeds the %d byte frame limit", contentLength, maxFrameBytes)
 	}
 	payload := make([]byte, contentLength)
 	if _, err := io.ReadFull(r, payload); err != nil {

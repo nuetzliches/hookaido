@@ -5,6 +5,7 @@ Status: implemented (read tools + guarded mutation tools + guarded runtime contr
 Transport:
 - JSON-RPC 2.0 over stdio with `Content-Length` framing.
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized`.
+- A single frame is capped at 8 MiB. A larger `Content-Length` is rejected with a parse error (`-32700`) rather than allocating the declared size.
 
 Server capabilities:
 - `tools` only.
@@ -318,6 +319,33 @@ Notes:
 - When runtime queue context is available, delete is rejected while the current mapped route still has active `queued`/`leased` backlog (`management_route_backlog_active`) with the same backend rules as `management_endpoint_upsert`.
 - Returns an error if the management endpoint mapping does not exist.
 - Local mutation failures return normalized structured error text (`code=...`, `detail=...`), including `management_endpoint_not_found` when the mapping does not exist and `management_route_backlog_active` when active backlog guardrails block the delete.
+
+### `rotate_secret` (requires `--enable-mutations`)
+Add, list, or revoke HMAC verification secrets in a runtime-mutable pool. Wraps `POST`/`GET`/`DELETE /admin/secrets/{name}[/{id}]`.
+
+Arguments:
+```json
+{
+  "operation": "add",
+  "name": "github",
+  "value": "whsec_...",
+  "not_before": "2026-08-18T00:00:00Z",
+  "not_after": "2026-09-18T00:00:00Z",
+  "reason": "scheduled rotation",
+  "actor": "ops@example.test",
+  "request_id": "req-789"
+}
+```
+
+Notes:
+- `operation` and `name` are required; `operation` is one of `add`, `list`, `delete`.
+- `add` requires `value`; `delete` requires `id`. Both require `reason`.
+- `not_before` / `not_after` are optional RFC3339 timestamps on `add`; `not_before` defaults to now and omitting `not_after` means no upper bound.
+- Requires `role=admin` in addition to `--enable-mutations`.
+- The pool must be declared `secret "<name>" { runtime true }` in the Hookaidofile; otherwise the call is rejected.
+- Always proxies to the Admin API — it never edits the Hookaidofile, because the pool registry lives in the running process. A reachable, authorized `admin_api` is therefore required.
+- The plaintext `value` appears only in the request body. `list` returns version metadata only, never secret values.
+- `reason` aligns with Admin API audit-reason semantics (`X-Hookaido-Audit-Reason`).
 
 ### `messages_list`
 List queue messages with optional filters.
@@ -755,7 +783,7 @@ Notes:
   - `operate`: adds safe queue mutations + runtime inspect tools
   - `admin`: required for config-lifecycle mutations (`config_apply`, `management_endpoint_*`) and runtime process control (`instance_start|stop|reload`)
 - Mutating tool calls require a non-empty `--principal` identity.
-- Mutation tools use strict argument allowlists: unknown top-level arguments are rejected (and `messages_publish` additionally rejects unknown per-item keys).
+- Mutation tools and runtime-control tools use strict argument allowlists: unknown top-level arguments are rejected (and `messages_publish` additionally rejects unknown per-item keys). This matches the `"additionalProperties": false` each tool declares in its input schema.
 - Mutating tool calls emit structured JSONL audit events to stderr with:
   - `timestamp`, `principal`, `role`, `tool`, `input_hash`, `result`, `duration_ms` (and `error` when applicable)
   - Config-lifecycle mutation tools (`config_apply`, `management_endpoint_upsert`, `management_endpoint_delete`) include `metadata.config_mutation` (`operation`, `mode`, path/selector fields, and apply outcome flags such as `ok`, `applied`, `reloaded`, `rolled_back` when available).

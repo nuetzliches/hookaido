@@ -178,6 +178,9 @@ func (s *Server) toolInstanceStatus(args map[string]any) (any, error) {
 	if err := s.validateRuntimeControlSetup(); err != nil {
 		return nil, err
 	}
+	if err := validateAllowedKeys(args, instanceStatusAllowedKeys, "arguments"); err != nil {
+		return nil, err
+	}
 	pidFile, err := s.resolvePIDFilePath(args)
 	if err != nil {
 		return nil, err
@@ -290,6 +293,9 @@ func (s *Server) toolInstanceStatus(args map[string]any) (any, error) {
 
 func (s *Server) toolInstanceLogsTail(args map[string]any) (any, error) {
 	if err := s.validateRuntimeControlSetup(); err != nil {
+		return nil, err
+	}
+	if err := validateAllowedKeys(args, instanceLogsTailAllowedKeys, "arguments"); err != nil {
 		return nil, err
 	}
 	pidFile, err := s.resolvePIDFilePath(args)

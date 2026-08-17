@@ -376,3 +376,82 @@ func TestToolInstanceLogsTail(t *testing.T) {
 		t.Fatalf("unexpected lines: %#v", linesAny)
 	}
 }
+
+// newRuntimeInspectServer builds a server with the two runtime inspect tools
+// available, backed by a real config file and pid path.
+func newRuntimeInspectServer(t *testing.T) *Server {
+	t.Helper()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "Hookaidofile")
+	cfg := `"/r" {
+  deliver "https://example.com" {}
+}
+`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return NewServer(
+		nil,
+		nil,
+		cfgPath,
+		filepath.Join(tmp, "hookaido.db"),
+		WithRuntimeControlEnabled(true),
+		WithRole(RoleOperate),
+		WithRuntimeControlPIDFile(filepath.Join(tmp, "hookaido.pid")),
+		WithRuntimeControlRunBinary("/bin/true"),
+	)
+}
+
+// instance_status and instance_logs_tail were the only runtime-control tools
+// without an argument allowlist, even though both declare
+// "additionalProperties": false in their input schemas. An undeclared key was
+// silently ignored, so a misspelled max_lines quietly used the default instead
+// of reporting the mistake.
+func TestRuntimeInspectToolsRejectUnknownArguments(t *testing.T) {
+	cases := []struct {
+		tool string
+		args map[string]any
+		key  string
+	}{
+		{tool: "instance_status", args: map[string]any{"timeout": "500ms", "unknown": true}, key: "unknown"},
+		{tool: "instance_logs_tail", args: map[string]any{"max_lines": 5, "max_linez": 5}, key: "max_linez"},
+		{tool: "instance_logs_tail", args: map[string]any{"pid_file_typo": "x"}, key: "pid_file_typo"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tool+"/"+tc.key, func(t *testing.T) {
+			s := newRuntimeInspectServer(t)
+			resp := callTool(t, s, tc.tool, tc.args)
+			if !resp.IsError {
+				t.Fatalf("%s accepted unknown key %q", tc.tool, tc.key)
+			}
+			want := fmt.Sprintf("arguments contains unknown key %q", tc.key)
+			if len(resp.Content) == 0 || !strings.Contains(resp.Content[0].Text, want) {
+				t.Fatalf("expected %q, got %#v", want, resp.Content)
+			}
+		})
+	}
+}
+
+// The declared arguments must keep working.
+func TestRuntimeInspectToolsAcceptDeclaredArguments(t *testing.T) {
+	cases := []struct {
+		tool string
+		args map[string]any
+	}{
+		{tool: "instance_status", args: map[string]any{}},
+		{tool: "instance_status", args: map[string]any{"timeout": "500ms"}},
+		{tool: "instance_logs_tail", args: map[string]any{"max_lines": 5, "max_bytes": 2048}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			s := newRuntimeInspectServer(t)
+			resp := callTool(t, s, tc.tool, tc.args)
+			if resp.IsError && len(resp.Content) > 0 &&
+				strings.Contains(resp.Content[0].Text, "unknown key") {
+				t.Fatalf("%s rejected a declared argument: %s", tc.tool, resp.Content[0].Text)
+			}
+		})
+	}
+}

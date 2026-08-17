@@ -109,6 +109,54 @@ func TestStoreContract_DequeueAck(t *testing.T) {
 	}
 }
 
+// An empty Route or Target in a DequeueRequest means "any". The push
+// dispatcher relies on this: it dequeues per route without naming a target
+// and resolves the target per item afterwards. Every other contract test
+// names both fields explicitly, so this is the only coverage of the wildcard.
+func TestStoreContract_DequeueEmptyRouteOrTargetIsWildcard(t *testing.T) {
+	cases := []struct {
+		name string
+		req  queue.DequeueRequest
+	}{
+		{name: "target_wildcard", req: queue.DequeueRequest{Route: "/r"}},
+		{name: "route_wildcard", req: queue.DequeueRequest{Target: "https://example.com/hook"}},
+		{name: "both_wildcard", req: queue.DequeueRequest{}},
+	}
+
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					now := time.Date(2026, 2, 14, 21, 0, 0, 0, time.UTC)
+					store := factory.new(t, &now)
+
+					if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "https://example.com/hook"}); err != nil {
+						t.Fatalf("enqueue: %v", err)
+					}
+
+					req := tc.req
+					req.Batch = 1
+					req.LeaseTTL = 30 * time.Second
+					resp, err := store.Dequeue(req)
+					if err != nil {
+						t.Fatalf("dequeue: %v", err)
+					}
+					if len(resp.Items) != 1 {
+						t.Fatalf("dequeue with route=%q target=%q returned %d items, want 1",
+							tc.req.Route, tc.req.Target, len(resp.Items))
+					}
+					if got := resp.Items[0].ID; got != "evt_1" {
+						t.Fatalf("dequeued id=%q, want evt_1", got)
+					}
+					if got := resp.Items[0].Target; got != "https://example.com/hook" {
+						t.Fatalf("dequeued target=%q, want https://example.com/hook", got)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestStoreContract_NackDelayRequeue(t *testing.T) {
 	for _, factory := range contractStoreFactories() {
 		t.Run(factory.name, func(t *testing.T) {

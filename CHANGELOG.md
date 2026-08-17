@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **Push delivery never fired on the Postgres queue backend** ([#200](https://github.com/nuetzliches/hookaido/issues/200)). `Dequeue` filtered unconditionally on `route = $1 AND target = $2`, while the memory and SQLite backends treat an empty field as "any". The push dispatcher relies on that wildcard — it dequeues per route without naming a target and resolves the target per item afterwards — so on Postgres the query resolved to `target = ''` and matched nothing. Ingress enqueued normally, nothing was ever delivered, and the backlog grew until `max_depth` began rejecting, with no error logged because the queue simply looked empty to the dispatcher. Pull routes were unaffected, since those pass an explicit target. The `WHERE` clause is now built conditionally, matching the other two backends and the existing `ListMessages` query in the same file. A new `queue.Store` contract case covers all three wildcard combinations — every pre-existing contract test named both fields explicitly, which is why the divergence went unnoticed.
+
 ### Security
 
 - The `hmac_stripe_failed` / `reason=parse_incomplete` rejection log no longer contains the raw signature header. Previously the `header_value` field carried the untouched `cfg.Header` value, so a request that omitted `t=` but supplied a full `v1=<64 hex chars>` signature wrote that signature verbatim into the WARN log — an attacker-triggerable path, since malformed input is exactly what reaches it. The field is replaced by `pairs_parsed` (number of `k=v` pairs found) and `header_value_len`, which together with the already-logged, config-derived `sig_tag` still identify the realistic cause: the sender emits a different tag name than the route expects. This restores the fingerprints-only contract the other five rejection paths already followed. Reported by CodeQL as `go/clear-text-logging`.

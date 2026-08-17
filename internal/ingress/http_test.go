@@ -658,3 +658,37 @@ func sign(ts, method, path, body string, secret []byte) string {
 	_, _ = mac.Write([]byte(msg))
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+// When ResolveRequest is wired it must be the only source of per-request
+// configuration. If the handler still consulted the per-field hooks, a reload
+// could answer them differently from the snapshot -- which is the whole defect
+// the snapshot exists to close.
+func TestServeHTTP_SnapshotSupersedesPerFieldHooks(t *testing.T) {
+	store := queue.NewMemoryStore()
+	srv := NewServer(store)
+	srv.ResolveRequest = func(_ *http.Request, requestPath string) (RouteSnapshot, bool) {
+		if requestPath != "/hooks" {
+			return RouteSnapshot{}, false
+		}
+		return RouteSnapshot{Route: "/hooks", Targets: []string{"pull"}}, true
+	}
+
+	fail := func(what string) {
+		t.Helper()
+		t.Fatalf("handler consulted %s even though ResolveRequest was wired", what)
+	}
+	srv.ResolveRoute = func(*http.Request, string) (string, bool) { fail("ResolveRoute"); return "", false }
+	srv.BasicAuthFor = func(string) *BasicAuth { fail("BasicAuthFor"); return nil }
+	srv.ForwardAuthFor = func(string) *ForwardAuth { fail("ForwardAuthFor"); return nil }
+	srv.HMACAuthFor = func(string) *HMACAuth { fail("HMACAuthFor"); return nil }
+	srv.LimitsFor = func(string) (int64, int) { fail("LimitsFor"); return 0, 0 }
+	srv.TargetsFor = func(string) []string { fail("TargetsFor"); return nil }
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example/hooks", strings.NewReader(`{"x":1}`))
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202", rr.Code)
+	}
+}

@@ -701,7 +701,11 @@ func mapPoolErr(err error) error {
 func (s *runtimeState) resolveIngress(r *http.Request, requestPath string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.resolveIngressLocked(r, requestPath)
+}
 
+// resolveIngressLocked requires s.mu to be held for reading.
+func (s *runtimeState) resolveIngressLocked(r *http.Request, requestPath string) (string, bool) {
 	var reqHost string
 	if r != nil {
 		reqHost = normalizeHost(r.Host)
@@ -843,22 +847,47 @@ func (s *runtimeState) authorizeAdmin(r *http.Request) bool {
 	return auth(r)
 }
 
-func (s *runtimeState) hmacAuthFor(route string) *ingress.HMACAuth {
+// resolveIngressSnapshot resolves the route and everything the request is
+// served with, under a single read lock.
+//
+// The per-field accessors below each take their own lock, so a handler calling
+// them in sequence could observe two different configurations: reloadConfig
+// swaps the auth maps and the route table separately, and a request that had
+// already resolved its route against the old table would then miss in the new
+// auth maps. A miss yields nil, and ingress reads nil as "no auth configured" —
+// so the request was served unauthenticated. Taking everything at once removes
+// the window rather than narrowing it.
+func (s *runtimeState) resolveIngressSnapshot(r *http.Request, requestPath string) (ingress.RouteSnapshot, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.hmacByRoute[route]
-}
 
-func (s *runtimeState) basicAuthFor(route string) *ingress.BasicAuth {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.basicByRoute[route]
-}
+	route, ok := s.resolveIngressLocked(r, requestPath)
+	if !ok {
+		return ingress.RouteSnapshot{}, false
+	}
 
-func (s *runtimeState) forwardAuthFor(route string) *ingress.ForwardAuth {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.forwardByRoute[route]
+	snap := ingress.RouteSnapshot{
+		Route:       route,
+		BasicAuth:   s.basicByRoute[route],
+		ForwardAuth: s.forwardByRoute[route],
+		HMACAuth:    s.hmacByRoute[route],
+	}
+	for _, rt := range s.routes {
+		if rt.Path != route {
+			continue
+		}
+		snap.MaxBody = rt.MaxBodyBytes
+		snap.MaxHeaders = rt.MaxHeaderBytes
+		if len(rt.Deliveries) > 0 {
+			targets := make([]string, 0, len(rt.Deliveries))
+			for _, d := range rt.Deliveries {
+				targets = append(targets, d.URL)
+			}
+			snap.Targets = targets
+		}
+		break
+	}
+	return snap, true
 }
 
 func (s *runtimeState) limitsFor(route string) (int64, int) {
@@ -870,25 +899,6 @@ func (s *runtimeState) limitsFor(route string) (int64, int) {
 		}
 	}
 	return 0, 0
-}
-
-func (s *runtimeState) targetsFor(route string) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, rt := range s.routes {
-		if rt.Path != route {
-			continue
-		}
-		if len(rt.Deliveries) == 0 {
-			return nil
-		}
-		targets := make([]string, 0, len(rt.Deliveries))
-		for _, d := range rt.Deliveries {
-			targets = append(targets, d.URL)
-		}
-		return targets
-	}
-	return nil
 }
 
 func (s *runtimeState) targetsForRoute(route string) []string {
@@ -2173,15 +2183,16 @@ func startServers(
 	}
 
 	ing := ingress.NewServer(store)
-	ing.ResolveRoute = state.resolveIngress
+	// One snapshot per request, taken under one lock. The per-field accessors
+	// are deliberately not wired here: calling them in sequence is what let a
+	// reload land between the route lookup and the auth lookup.
+	ing.ResolveRequest = state.resolveIngressSnapshot
 	ing.AllowedMethodsFor = state.allowedMethodsFor
+	// Rate limiting and adaptive backpressure stay live lookups on purpose --
+	// they decide on current load, not on the configuration the request was
+	// resolved against.
 	ing.AllowRequestFor = state.allowIngress
 	ing.AllowEnqueueFor = state.allowIngressEnqueue
-	ing.BasicAuthFor = state.basicAuthFor
-	ing.ForwardAuthFor = state.forwardAuthFor
-	ing.HMACAuthFor = state.hmacAuthFor
-	ing.LimitsFor = state.limitsFor
-	ing.TargetsFor = state.targetsFor
 	ing.MaxBodyBytes = compiled.Defaults.MaxBodyBytes
 	ing.MaxHeaderBytes = compiled.Defaults.MaxHeaderBytes
 	ing.ObserveResult = func(accepted bool, enqueued int) {

@@ -11,9 +11,32 @@ import (
 	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
+// RouteSnapshot is the configuration a single request is served with.
+//
+// It exists so the handler can take everything it needs in one go. Resolving
+// the route and then looking each piece up again by route name lets a config
+// reload land in between: the lookups then miss, and a missing authenticator is
+// indistinguishable from "this route has no auth configured".
+type RouteSnapshot struct {
+	Route       string
+	BasicAuth   *BasicAuth
+	ForwardAuth *ForwardAuth
+	HMACAuth    *HMACAuth
+	MaxBody     int64
+	MaxHeaders  int
+	Targets     []string
+}
+
 type Server struct {
-	Store                 queue.Store
-	Target                string
+	Store  queue.Store
+	Target string
+
+	// ResolveRequest returns the whole per-request configuration at once and,
+	// when set, supersedes ResolveRoute, BasicAuthFor, ForwardAuthFor,
+	// HMACAuthFor, LimitsFor and TargetsFor. The runtime wires this so the
+	// snapshot is taken under a single lock; see snapshot below.
+	ResolveRequest func(r *http.Request, requestPath string) (RouteSnapshot, bool)
+
 	ResolveRoute          func(r *http.Request, requestPath string) (route string, ok bool)
 	AllowedMethodsFor     func(r *http.Request, requestPath string) []string
 	AllowRequestFor       func(route string) bool
@@ -41,9 +64,49 @@ func NewServer(store queue.Store) *Server {
 	}
 }
 
+// snapshot resolves the route and everything else the request is served with.
+//
+// When ResolveRequest is wired it is authoritative and takes all of it under a
+// single lock. That is the point: the handler used to resolve the route and
+// then look each piece up again by route name, so a reload landing between
+// those lookups returned nil for a route that had just been renamed or removed
+// — and nil reads as "no auth configured" a few lines further down.
+//
+// The per-hook fallback below has that interleaving problem by construction. It
+// exists for callers that wire the individual funcs, which in practice means
+// tests; the runtime wires ResolveRequest.
+func (s *Server) snapshot(r *http.Request, requestPath string) (RouteSnapshot, bool) {
+	if s.ResolveRequest != nil {
+		return s.ResolveRequest(r, requestPath)
+	}
+
+	route, ok := s.resolveRoute(r, requestPath)
+	if !ok {
+		return RouteSnapshot{}, false
+	}
+	snap := RouteSnapshot{Route: route}
+	if s.BasicAuthFor != nil {
+		snap.BasicAuth = s.BasicAuthFor(route)
+	}
+	if s.ForwardAuthFor != nil {
+		snap.ForwardAuth = s.ForwardAuthFor(route)
+	}
+	if s.HMACAuthFor != nil {
+		snap.HMACAuth = s.HMACAuthFor(route)
+	}
+	if s.LimitsFor != nil {
+		snap.MaxBody, snap.MaxHeaders = s.LimitsFor(route)
+	}
+	if s.TargetsFor != nil {
+		snap.Targets = s.TargetsFor(route)
+	}
+	return snap, true
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestPath := path.Clean(r.URL.Path)
-	route, ok := s.resolveRoute(r, requestPath)
+	snap, ok := s.snapshot(r, requestPath)
+	route := snap.Route
 	if !ok {
 		if s.AllowedMethodsFor != nil {
 			if allowed := s.AllowedMethodsFor(r, requestPath); len(allowed) > 0 {
@@ -82,27 +145,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.BasicAuthFor != nil {
-		if a := s.BasicAuthFor(route); a != nil {
-			if !a.Verify(r) {
-				w.WriteHeader(http.StatusUnauthorized)
-				s.observe(false, 0)
-				s.observeReject(route, http.StatusUnauthorized, "auth")
-				return
-			}
-		}
+	if a := snap.BasicAuth; a != nil && !a.Verify(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		s.observe(false, 0)
+		s.observeReject(route, http.StatusUnauthorized, "auth")
+		return
 	}
 
 	maxBody := s.MaxBodyBytes
 	maxHeaders := s.MaxHeaderBytes
-	if s.LimitsFor != nil {
-		mb, mh := s.LimitsFor(route)
-		if mb > 0 {
-			maxBody = mb
-		}
-		if mh > 0 {
-			maxHeaders = mh
-		}
+	if snap.MaxBody > 0 {
+		maxBody = snap.MaxBody
+	}
+	if snap.MaxHeaders > 0 {
+		maxHeaders = snap.MaxHeaders
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
@@ -121,27 +177,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var forwardCopied map[string]string
-	if s.ForwardAuthFor != nil {
-		if a := s.ForwardAuthFor(route); a != nil {
-			copied, status := a.Authorize(r, requestPath, body)
-			if status != 0 {
-				w.WriteHeader(status)
-				s.observe(false, 0)
-				s.observeReject(route, status, "auth")
-				return
-			}
-			forwardCopied = copied
+	if a := snap.ForwardAuth; a != nil {
+		copied, status := a.Authorize(r, requestPath, body)
+		if status != 0 {
+			w.WriteHeader(status)
+			s.observe(false, 0)
+			s.observeReject(route, status, "auth")
+			return
 		}
+		forwardCopied = copied
 	}
 
-	if s.HMACAuthFor != nil {
-		if a := s.HMACAuthFor(route); a != nil {
-			if err := a.Verify(r, requestPath, body); err != nil {
-				w.WriteHeader(http.StatusUnauthorized)
-				s.observe(false, 0)
-				s.observeReject(route, http.StatusUnauthorized, "auth")
-				return
-			}
+	if a := snap.HMACAuth; a != nil {
+		if err := a.Verify(r, requestPath, body); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			s.observe(false, 0)
+			s.observeReject(route, http.StatusUnauthorized, "auth")
+			return
 		}
 	}
 
@@ -163,10 +215,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	env.Headers = headers
 
 	targets := []string{s.Target}
-	if s.TargetsFor != nil {
-		if t := s.TargetsFor(route); len(t) > 0 {
-			targets = t
-		}
+	if len(snap.Targets) > 0 {
+		targets = snap.Targets
 	}
 
 	enqueued := 0

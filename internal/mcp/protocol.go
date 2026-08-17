@@ -1938,15 +1938,28 @@ func (s *Server) resolveIDMutationPolicyContext() (idMutationPolicyContext, erro
 	return out, nil
 }
 
-func (s *Server) queueToolsUseAdminProxy() (config.Compiled, bool) {
+// queueToolsUseAdminProxy reports whether the queue tools must go through the
+// Admin API instead of opening the local SQLite file.
+//
+// It returns an error when that cannot be decided, rather than answering
+// "false". False does not mean "unknown" here, it means "sqlite, open --db
+// directly" — so a Postgres or memory deployment whose config is briefly
+// unreadable would silently lose the Admin API's authorization and policy
+// enforcement and mutate whatever stale database file happened to be lying next
+// to it, while reporting success.
+func (s *Server) queueToolsUseAdminProxy() (config.Compiled, bool, error) {
 	if strings.TrimSpace(s.ConfigPath) == "" {
-		return config.Compiled{}, false
+		// No config at all is the documented standalone mode: local SQLite.
+		return config.Compiled{}, false, nil
 	}
 	compiled, res, err := s.loadCompiledConfig()
-	if err != nil || !res.OK {
-		return config.Compiled{}, false
+	if err != nil {
+		return config.Compiled{}, false, fmt.Errorf("cannot determine the queue backend from %s: %w", s.ConfigPath, err)
 	}
-	return compiled, queueBackendUsesAdminProxy(compiledQueueBackend(compiled))
+	if !res.OK {
+		return config.Compiled{}, false, fmt.Errorf("cannot determine the queue backend: %s does not compile", s.ConfigPath)
+	}
+	return compiled, queueBackendUsesAdminProxy(compiledQueueBackend(compiled)), nil
 }
 
 func (s *Server) validateRouteScopedManagedAuditPolicyForFilterMutation(audit mutationAuditArgs, route string) error {

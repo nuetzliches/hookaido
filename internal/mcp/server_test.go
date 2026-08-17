@@ -2520,7 +2520,12 @@ func TestToolIDMutationsConfigUnavailableFailOpenWhenPolicyDisabledInSQLiteMode(
 	}
 }
 
-func TestToolMessagesFilterMutationsFailClosedWhenConfigUnavailableByPolicyInSQLiteMode(t *testing.T) {
+// The same refusal must hold with fail_closed on: once the config does not
+// compile the queue backend is unknown, and that check refuses before the
+// publish policy is ever consulted. The policy's own fail-closed behaviour is
+// covered by the id-mutation test above, which reaches it on a path that does
+// not first need the backend.
+func TestToolMessagesFilterMutationsRefuseWhenBackendUndeterminableFailClosed(t *testing.T) {
 	tests := []struct {
 		tool  string
 		state queue.State
@@ -2578,10 +2583,10 @@ defaults {
 				"reason": "operator_cleanup",
 			})
 			if !resp.IsError {
-				t.Fatalf("expected fail-closed %s error when config compile is unavailable", tc.tool)
+				t.Fatalf("expected %s to refuse while the queue backend is undeterminable", tc.tool)
 			}
-			if len(resp.Content) == 0 || !strings.Contains(resp.Content[0].Text, "cannot evaluate scoped managed filter mutation policy") {
-				t.Fatalf("expected fail-closed policy error text, got %#v", resp.Content)
+			if len(resp.Content) == 0 || !strings.Contains(resp.Content[0].Text, "queue backend") {
+				t.Fatalf("expected the error to name the undeterminable backend, got %#v", resp.Content)
 			}
 
 			verifyStore, err := sqlite.NewStore(dbPath)
@@ -2600,7 +2605,14 @@ defaults {
 	}
 }
 
-func TestToolMessagesFilterMutationsConfigUnavailableFailOpenWhenPolicyDisabledInSQLiteMode(t *testing.T) {
+// When the config does not compile, the queue backend is unknown -- not
+// "sqlite". This config declares `backend memory` on one route, so treating the
+// local --db file as authoritative could mutate a stale database while the real
+// queue lives elsewhere, and report success for it.
+//
+// This test previously asserted the opposite: that the mutation went through
+// against the local file. That was the behaviour reported as GHSA-r796-6hmg-f838.
+func TestToolMessagesFilterMutationsRefuseWhenBackendUndeterminable(t *testing.T) {
 	tests := []struct {
 		tool          string
 		state         queue.State
@@ -2654,17 +2666,15 @@ func TestToolMessagesFilterMutationsConfigUnavailableFailOpenWhenPolicyDisabledI
 				"limit":  10,
 				"reason": "operator_cleanup",
 			})
-			if resp.IsError {
-				t.Fatalf("unexpected %s error with fail-open policy: %s", tc.tool, resp.Content[0].Text)
+			if !resp.IsError {
+				t.Fatalf("expected %s to refuse while the queue backend is undeterminable", tc.tool)
 			}
-			out, ok := resp.StructuredContent.(map[string]any)
-			if !ok {
-				t.Fatalf("unexpected structured content type %T", resp.StructuredContent)
-			}
-			if changed := intFromAny(out[tc.changedKey]); changed != 1 {
-				t.Fatalf("expected %s=1, got %#v", tc.changedKey, out[tc.changedKey])
+			if msg := resp.Content[0].Text; !strings.Contains(msg, "queue backend") {
+				t.Fatalf("expected the error to name the undeterminable backend, got: %s", msg)
 			}
 
+			// The local database must be untouched: the point is that it may not
+			// be the queue this deployment actually uses.
 			verifyStore, err := sqlite.NewStore(dbPath)
 			if err != nil {
 				t.Fatalf("reopen sqlite store: %v", err)
@@ -2674,8 +2684,8 @@ func TestToolMessagesFilterMutationsConfigUnavailableFailOpenWhenPolicyDisabledI
 			if err != nil {
 				t.Fatalf("lookup evt_direct_1: %v", err)
 			}
-			if len(lookup.Items) != 1 || lookup.Items[0].State != tc.expectedState {
-				t.Fatalf("expected state %q, got %#v", tc.expectedState, lookup.Items)
+			if len(lookup.Items) != 1 || lookup.Items[0].State != tc.state {
+				t.Fatalf("expected the local message to stay in state %q, got %#v", tc.state, lookup.Items)
 			}
 		})
 	}

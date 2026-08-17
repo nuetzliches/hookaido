@@ -9,6 +9,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Security
 
+- The `hmac_stripe_failed` / `reason=parse_incomplete` rejection log no longer contains the raw signature header. Previously the `header_value` field carried the untouched `cfg.Header` value, so a request that omitted `t=` but supplied a full `v1=<64 hex chars>` signature wrote that signature verbatim into the WARN log — an attacker-triggerable path, since malformed input is exactly what reaches it. The field is replaced by `pairs_parsed` (number of `k=v` pairs found) and `header_value_len`, which together with the already-logged, config-derived `sig_tag` still identify the realistic cause: the sender emits a different tag name than the route expects. This restores the fingerprints-only contract the other five rejection paths already followed. Reported by CodeQL as `go/clear-text-logging`.
+
 - Bump Go toolchain `1.26.4` → `1.26.6` to remediate eight reachable standard-library vulnerabilities reported by `govulncheck`:
   - **GO-2026-6218** (`net/url`, quadratic complexity in `resolvePath` — reachable via `dispatcher.HTTPDeliverer.Deliver` → `http.Client.Do` → `url.URL.Parse`)
   - **GO-2026-6091** (`html/template`, JavaScript regexp context tracking — reachable via `app.serveOnListener` → `http.Server.Serve` → `template.Template.Execute`)

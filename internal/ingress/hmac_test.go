@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -384,6 +385,51 @@ func TestHMACAuth_VerifyStripe_MalformedHeader(t *testing.T) {
 		}
 		if err := auth.Verify(req, "/webhooks/stripe", body); err == nil {
 			t.Fatalf("expected unauthorized for malformed header %q", h)
+		}
+	}
+}
+
+// The parse_incomplete rejection path must not move header material into the
+// log. A header that fails to parse can still carry a complete signature --
+// here the tag name simply does not match what the route expects. Guards the
+// diagnostic fingerprint contract documented on verifyStripeLike.
+func TestHMACAuth_VerifyStripe_ParseIncompleteDoesNotLogHeaderValue(t *testing.T) {
+	secret := []byte("stripe-webhook-secret")
+	body := []byte(`{"id":"evt_123"}`)
+	now := time.Unix(1735689600, 0).UTC()
+
+	// Valid signature under an unexpected tag and without "t=", so parsing
+	// fails while the signature itself is fully present in the header.
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte("1735689600." + string(body)))
+	sigHex := hex.EncodeToString(mac.Sum(nil))
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	auth := NewHMACAuth([][]byte{secret})
+	auth.Provider = "stripe"
+	auth.Now = func() time.Time { return now }
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/stripe", bytes.NewReader(body))
+	req.Header.Set("Stripe-Signature", "v0="+sigHex)
+
+	if err := auth.Verify(req, "/webhooks/stripe", body); err == nil {
+		t.Fatalf("expected unauthorized for header without timestamp")
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "parse_incomplete") {
+		t.Fatalf("expected parse_incomplete warning, got: %s", out)
+	}
+	if strings.Contains(out, sigHex) {
+		t.Fatalf("signature leaked into log output: %s", out)
+	}
+	for _, want := range []string{"pairs_parsed=1", "header_value_len=", "sig_present=false", "ts_present=false"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in log output, got: %s", want, out)
 		}
 	}
 }

@@ -292,11 +292,13 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 	}
 
 	var tsStr, sigHex string
+	pairs := 0
 	for _, part := range strings.Split(raw, ",") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
 		if len(kv) != 2 {
 			continue
 		}
+		pairs++
 		key := strings.TrimSpace(kv[0])
 		val := strings.TrimSpace(kv[1])
 		switch key {
@@ -311,10 +313,16 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		}
 	}
 	if tsStr == "" || sigHex == "" {
+		// Never log `raw` here: this path is reached with attacker-controlled
+		// input, and a header that is missing "t=" can still carry a full
+		// signature (and vice versa). `pairs_parsed` alongside the *configured*
+		// `sig_tag` pins down the realistic cause -- the sender emits a
+		// different tag name than the route expects -- without moving header
+		// material into the log.
 		slog.Warn("hmac_stripe_failed", "reason", "parse_incomplete",
 			"header", cfg.Header, "sig_tag", cfg.SigTag,
 			"ts_present", tsStr != "", "sig_present", sigHex != "",
-			"header_value", raw)
+			"pairs_parsed", pairs, "header_value_len", len(raw))
 		return ErrUnauthorized
 	}
 

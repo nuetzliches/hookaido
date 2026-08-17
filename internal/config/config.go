@@ -809,6 +809,12 @@ type ValidationResult struct {
 	OK       bool     `json:"ok"`
 	Errors   []string `json:"errors,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+
+	// untrustedSource marks a compile over content that did not come from the
+	// operator's own config file. It rides on the result rather than being
+	// threaded through every compile helper because res is already passed to
+	// each of them; see CompileUntrusted for what it changes.
+	untrustedSource bool
 }
 
 type ValidationOptions struct {

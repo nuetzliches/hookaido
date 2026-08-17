@@ -96,7 +96,62 @@ func resolvePlaceholders(in string) (string, []string, []string) {
 	return out.String(), errs, warns
 }
 
+// stripPlaceholders removes `{$...}`, `{env.*}` and `{file.*}` placeholders
+// without reading the environment or the filesystem, warning about each one it
+// dropped. Used for content that did not come from the operator's own config
+// file; see CompileUntrusted.
+func stripPlaceholders(in string) (string, []string) {
+	forms := []struct {
+		prefix string
+		label  string
+	}{
+		{"{$", "{$...}"},
+		{"{env.", "{env.*}"},
+		{"{file.", "{file.*}"},
+	}
+
+	var warns []string
+	var out strings.Builder
+	out.Grow(len(in))
+
+	for i := 0; i < len(in); {
+		dropped := false
+		for _, f := range forms {
+			if !strings.HasPrefix(in[i:], f.prefix) {
+				continue
+			}
+			end := strings.IndexByte(in[i+len(f.prefix):], '}')
+			if end == -1 {
+				// Unterminated: leave it as literal text rather than swallowing
+				// the rest of the value.
+				continue
+			}
+			warns = append(warns, fmt.Sprintf(
+				"%s placeholder not expanded: this config came from a caller, so the environment and filesystem are not read",
+				f.label))
+			i += len(f.prefix) + end + 1
+			dropped = true
+			break
+		}
+		if dropped {
+			continue
+		}
+		out.WriteByte(in[i])
+		i++
+	}
+
+	return out.String(), warns
+}
+
 func resolveValue(in, field string, res *ValidationResult) string {
+	if res != nil && res.untrustedSource {
+		val, warns := stripPlaceholders(in)
+		for _, warn := range warns {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: %s", field, warn))
+		}
+		return val
+	}
+
 	val, errs, warns := resolvePlaceholders(in)
 	for _, err := range errs {
 		res.Errors = append(res.Errors, fmt.Sprintf("%s: %s", field, err))

@@ -446,13 +446,35 @@ type DLQRetentionConfig struct {
 // Compile validates the config and returns a runtime-ready, normalized version
 // with defaults applied.
 func Compile(cfg *Config) (Compiled, ValidationResult) {
-	var res ValidationResult
+	return compileConfig(cfg, false)
+}
+
+// CompileUntrusted compiles configuration content supplied by a caller rather
+// than read from the operator's own config file.
+//
+// It behaves like Compile except that `{file.*}`, `{env.*}` and `{$...}`
+// placeholders are not expanded. Expansion performs an unrestricted
+// os.ReadFile and os.LookupEnv, and the resolved value is interpolated into
+// validation errors that are handed straight back to the caller — so a
+// read-role MCP session calling config_diff with crafted content could read
+// any file the process could, and any variable in its environment.
+//
+// Unexpanded placeholders resolve to the empty string with a warning naming
+// them, which is the same path an unset environment variable already takes.
+// Validation of a config that relies on placeholders is therefore less precise
+// here than on a real load; that is the intended trade.
+func CompileUntrusted(cfg *Config) (Compiled, ValidationResult) {
+	return compileConfig(cfg, true)
+}
+
+func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
+	res := ValidationResult{untrustedSource: untrusted}
 	if cfg == nil {
 		res.Errors = append(res.Errors, "nil config")
 		return Compiled{}, res
 	}
 
-	vars, varsRes := compileVars(cfg.Vars)
+	vars, varsRes := compileVars(cfg.Vars, untrusted)
 	res.Errors = append(res.Errors, varsRes.Errors...)
 	res.Warnings = append(res.Warnings, varsRes.Warnings...)
 
@@ -3133,8 +3155,10 @@ func compileEgressRules(field string, values []string, res *ValidationResult) []
 	return out
 }
 
-func compileVars(in *VarsBlock) (map[string]string, ValidationResult) {
-	var res ValidationResult
+func compileVars(in *VarsBlock, untrusted bool) (map[string]string, ValidationResult) {
+	// vars are resolved through resolveValue too, so this result needs the same
+	// marker or `vars { x "{file./etc/shadow}" }` would still be expanded.
+	res := ValidationResult{untrustedSource: untrusted}
 	if in == nil || len(in.Items) == 0 {
 		return nil, res
 	}

@@ -1796,6 +1796,75 @@ pull_api {
 	}
 }
 
+// Placeholder expansion performs an unrestricted os.ReadFile and os.LookupEnv,
+// and the resolved value lands in validation errors. Those errors are returned
+// to whoever supplied the config, so content that did not come from the
+// operator's own file must not be expanded.
+func TestCompileUntrusted_DoesNotExpandFileOrEnvPlaceholders(t *testing.T) {
+	secretFile := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("TOPSECRET-abc123"), 0o600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+	t.Setenv("HOOKAIDO_TEST_SECRET_ENV", "ENVSECRET-xyz789")
+
+	cases := []struct {
+		name    string
+		src     string
+		leaking string
+	}{
+		{
+			name:    "file placeholder in a route path",
+			src:     "ingress { listen \":8080\" }\n\"/x{file." + filepath.ToSlash(secretFile) + "}\" { }\n",
+			leaking: "TOPSECRET-abc123",
+		},
+		{
+			name:    "env placeholder in a route path",
+			src:     "ingress { listen \":8080\" }\n\"/x{env.HOOKAIDO_TEST_SECRET_ENV}\" { }\n",
+			leaking: "ENVSECRET-xyz789",
+		},
+		{
+			name:    "file placeholder inside a vars block",
+			src:     "vars { v \"{file." + filepath.ToSlash(secretFile) + "}\" }\ningress { listen \":8080\" }\n\"/x{vars.v}\" { }\n",
+			leaking: "TOPSECRET-abc123",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tc.src))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			// The trusted path must keep expanding -- that is the documented
+			// feature, and this test would otherwise pass for the wrong reason.
+			_, trusted := Compile(cfg)
+			if !containsAny(append(trusted.Errors, trusted.Warnings...), tc.leaking) {
+				t.Fatalf("expected the trusted Compile to expand the placeholder; errors=%#v warnings=%#v",
+					trusted.Errors, trusted.Warnings)
+			}
+
+			_, untrusted := CompileUntrusted(cfg)
+			if containsAny(append(untrusted.Errors, untrusted.Warnings...), tc.leaking) {
+				t.Fatalf("CompileUntrusted leaked %q; errors=%#v warnings=%#v",
+					tc.leaking, untrusted.Errors, untrusted.Warnings)
+			}
+			if !containsAny(untrusted.Warnings, "placeholder not expanded") {
+				t.Fatalf("expected a warning naming the skipped placeholder, got %#v", untrusted.Warnings)
+			}
+		})
+	}
+}
+
+func containsAny(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCompile_PullAPIGrpcListenMustNotShareListener(t *testing.T) {
 	in := []byte(`
 ingress { listen ":8443" }

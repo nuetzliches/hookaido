@@ -296,10 +296,18 @@ defaults {
 
 **Evaluation order:** Deny rules first, then allowlist (if configured, target must match).
 
+**Matching across multiple addresses.** A hostname commonly resolves to several addresses, and the dialer may use any of them:
+
+- **Deny** and `dns_rebind_protection` are satisfied by one bad address — a single denied or non-routable address refuses the target.
+- **Allow** CIDR rules require **all** resolved addresses to be covered. Any-match would be fail-open here: a host answering with one in-range address plus `169.254.169.254` would otherwise clear the allowlist and could then be connected on the metadata address.
+- **Allow** host rules stay any-match, since the request carries exactly one host.
+
 **Wildcard support:**
 
 - `*` — matches any host
 - `*.example.com` — matches subdomains only (not the apex)
+
+**Ranges blocked by `dns_rebind_protection`.** Beyond loopback, link-local, multicast and the unspecified address, delivery is refused to `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT, hosts Alibaba's metadata endpoint), `127.0.0.0/8`, `169.254.0.0/16` (AWS/GCP/Azure metadata), `172.16.0.0/12`, `192.0.0.0/24` (hosts Oracle's metadata endpoint), `192.168.0.0/16`, `198.18.0.0/15`, `240.0.0.0/4`, `::/96`, `64:ff9b::/96` (NAT64, reaches `169.254.169.254` by translation) and `fc00::/7`. IPv4-mapped IPv6 forms such as `::ffff:169.254.169.254` are unmapped before the check, so they cannot be used to slip past it.
 
 ## Publish Policy
 

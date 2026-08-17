@@ -347,14 +347,18 @@ defaults {
 }
 ```
 
-- Deny rules are evaluated first.
+- Deny rules are evaluated first. A single match denies — for a CIDR rule it is enough that **one** of the target's resolved addresses falls in range.
 - If an allowlist is configured, the target must match.
+  - A **host** rule is any-match: naming the host permits it however it resolves.
+  - A **CIDR** rule requires **every** resolved address to be covered by some allow CIDR rule. The dialer picks freely among the addresses a hostname returns, so a host answering with one in-range and one out-of-range address is denied rather than permitted on the strength of the in-range one.
 - Wildcards: `*` matches any host, `*.example.com` matches subdomains only.
 
 See [Security](security.md) for more on egress protection.
 
 !!! note "Docker and Private Networks"
     The default `dns_rebind_protection on` may block delivery to private-network targets in Docker environments where DNS resolves to internal IPs. If your deliver targets are on private networks (e.g., `*.internal`, `10.x.x.x`), either add them to the `allow` list or set `dns_rebind_protection off` in your egress defaults.
+
+    Prefer a host rule (`allow "*.internal"`) over a CIDR rule here: a CIDR allow rule only admits a target whose addresses are *all* inside the range, so a host that also answers with a public or link-local address stays blocked.
 
 ---
 

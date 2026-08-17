@@ -398,8 +398,17 @@ func TestHMACAuth_StripeTimestampIsBoundedInLog(t *testing.T) {
 	if strings.Contains(out, huge) {
 		t.Fatalf("rejection log echoed the full %d-byte timestamp", len(huge))
 	}
+	// Not even a bounded prefix: the timestamp is attacker-controlled header
+	// material, and CodeQL's go/clear-text-logging flags any of it reaching a
+	// log call. A run of the padding character is enough to catch a prefix.
+	if strings.Contains(out, strings.Repeat("9", 8)) {
+		t.Fatalf("rejection log echoed a prefix of the timestamp, got: %s", out)
+	}
 	if !strings.Contains(out, "ts_len=4096") {
 		t.Fatalf("expected the length to be reported instead, got: %s", out)
+	}
+	if !strings.Contains(out, "cause=out_of_range") {
+		t.Fatalf("expected a parse-failure classification, got: %s", out)
 	}
 }
 

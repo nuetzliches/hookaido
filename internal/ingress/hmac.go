@@ -344,13 +344,17 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
-		// tsStr is unbounded attacker-controlled input, so log a bounded prefix
-		// and its length rather than echoing it whole.
+		// tsStr is attacker-controlled header material, so none of it reaches the
+		// log: only its length and a classification of why it would not parse.
+		// This matches the parse_incomplete path above, which reports
+		// pairs_parsed and header_value_len rather than the header value.
 		//
 		// err.Error() is deliberately not logged: strconv.ParseInt returns a
 		// *strconv.NumError whose message embeds the entire input, so passing
-		// it through would reintroduce the unbounded echo by the back door.
-		// The classification below carries the same diagnostic value.
+		// it through would reintroduce the echo by the back door. The
+		// classification below carries the same diagnostic value -- a sender
+		// emitting a non-numeric t= is not_a_number, one emitting an oversized
+		// numeric is out_of_range.
 		cause := "invalid"
 		switch {
 		case errors.Is(err, strconv.ErrRange):
@@ -360,7 +364,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		}
 		slog.Warn("hmac_stripe_failed", "reason", "ts_parse_error",
 			"header", cfg.Header,
-			"ts_prefix", safePrefix(tsStr, 16), "ts_len", len(tsStr),
+			"ts_len", len(tsStr),
 			"cause", cause)
 		return ErrUnauthorized
 	}

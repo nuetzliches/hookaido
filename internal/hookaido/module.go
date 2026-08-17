@@ -71,7 +71,12 @@ type TracingProvider interface {
 	WrapHandler(name string, h http.Handler) http.Handler
 
 	// HTTPClient returns an HTTP client with trace propagation, or nil.
-	HTTPClient() *http.Client
+	//
+	// base is the transport the instrumentation must wrap. Delivery passes a
+	// transport that enforces the egress policy at connect time, so ignoring it
+	// and reaching for http.DefaultTransport would silently drop that
+	// enforcement. A nil base means "use the default".
+	HTTPClient(base http.RoundTripper) *http.Client
 }
 
 // WorkerTransportConfig holds configuration for starting a worker transport.

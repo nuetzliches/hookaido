@@ -3227,7 +3227,7 @@ func startPushDispatcher(compiled config.Compiled, store queue.Store, logger *sl
 		Allow:               mapEgressRules(compiled.Defaults.EgressPolicy.Allow),
 		Deny:                mapEgressRules(compiled.Defaults.EgressPolicy.Deny),
 	}
-	client := tracingHTTPClient(compiled.Observability.TracingEnabled)
+	client := deliveryHTTPClient(compiled.Observability.TracingEnabled, policy)
 	httpDeliverer := dispatcher.NewHTTPDeliverer(client, policy)
 	var deliverer dispatcher.Deliverer = httpDeliverer
 	if hasExecRoutes(compiled) {
@@ -3287,13 +3287,20 @@ func wrapTracingHandler(enabled bool, name string, h http.Handler) http.Handler 
 	return tp.WrapHandler(name, h)
 }
 
-func tracingHTTPClient(enabled bool) *http.Client {
-	if !enabled {
-		return nil
+// deliveryHTTPClient builds the client the push dispatcher delivers with.
+//
+// The transport enforces the address-level egress policy in its dialer, so it
+// has to be the base the tracing instrumentation wraps rather than something
+// bolted on beside it — otherwise enabling tracing would quietly turn the
+// enforcement off.
+func deliveryHTTPClient(tracingEnabled bool, policy dispatcher.EgressPolicy) *http.Client {
+	base := dispatcher.NewEgressTransport(policy)
+	if !tracingEnabled {
+		return &http.Client{Transport: base}
 	}
 	tp, ok := hookaido.LookupTracingProvider("otel")
 	if !ok {
-		return nil
+		return &http.Client{Transport: base}
 	}
-	return tp.HTTPClient()
+	return tp.HTTPClient(base)
 }

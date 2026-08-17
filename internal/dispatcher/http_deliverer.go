@@ -32,6 +32,12 @@ func NewHTTPDeliverer(client *http.Client, policy EgressPolicy) *HTTPDeliverer {
 	if client == nil {
 		client = &http.Client{}
 	}
+	// A caller that did not bring its own transport gets the guarded one, so
+	// the address-level policy is enforced at connect time rather than only
+	// against addresses a prior lookup happened to return.
+	if client.Transport == nil {
+		client.Transport = NewEgressTransport(policy)
+	}
 	d := &HTTPDeliverer{
 		Client:   client,
 		Policy:   policy,

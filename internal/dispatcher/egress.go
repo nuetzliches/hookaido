@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"strings"
+	"syscall"
+	"time"
 )
 
 var ErrPolicyDenied = errors.New("egress policy denied")
@@ -125,6 +128,76 @@ func resolveHostIPs(ctx context.Context, host string, needIPs bool, r resolver) 
 		return nil, fmt.Errorf("dns lookup returned no addresses for %q", host)
 	}
 	return ips, nil
+}
+
+// matchEgressCIDRRules reports whether ip falls inside any CIDR rule. Host
+// rules are ignored: at dial time only the address is known, and a hostname
+// rule cannot be decided from it.
+func matchEgressCIDRRules(ip net.IP, rules []EgressRule) bool {
+	addr, ok := netipFromIP(ip)
+	if !ok {
+		return false
+	}
+	for _, r := range rules {
+		if r.IsCIDR && r.CIDR.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// egressDialControl returns a net.Dialer Control hook that re-checks the
+// address the connection is actually being made to.
+//
+// checkEgressPolicyURL resolves the host and validates the answers, but then
+// hands the *hostname* to the transport, which resolves it again independently.
+// Between those two lookups the answer can change — which is precisely what DNS
+// rebinding is, and what dns_rebind_protection claims to stop. Control runs
+// after resolution with the concrete peer address, so validating here checks
+// the address that will actually be connected to rather than one that merely
+// was returned earlier.
+//
+// Scope is deliberately narrow: rebind protection and deny rules, both of which
+// a bare IP decides unambiguously. Allow rules stay at the URL level, because a
+// hostname allow rule cannot be evaluated from an address alone.
+func egressDialControl(policy EgressPolicy) func(network, address string, c syscall.RawConn) error {
+	return func(_, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return fmt.Errorf("%w: malformed dial address %q", ErrPolicyDenied, address)
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			// Control is documented to receive a resolved address; if it ever
+			// does not, refusing is the safe reading.
+			return fmt.Errorf("%w: dial address %q is not an ip", ErrPolicyDenied, address)
+		}
+		if policy.DNSRebindProtection && !isAllowedIP(ip) {
+			return fmt.Errorf("%w: connection to disallowed ip %s", ErrPolicyDenied, ip)
+		}
+		if len(policy.Deny) > 0 && matchEgressCIDRRules(ip, policy.Deny) {
+			return fmt.Errorf("%w: ip %s denied by egress policy", ErrPolicyDenied, ip)
+		}
+		return nil
+	}
+}
+
+// NewEgressTransport returns a transport that enforces the address-level parts
+// of policy at connect time. It clones http.DefaultTransport rather than
+// mutating it, since that value is process-global.
+func NewEgressTransport(policy EgressPolicy) *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	tr := base.Clone()
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   egressDialControl(policy),
+	}
+	tr.DialContext = dialer.DialContext
+	return tr
 }
 
 func matchEgressRules(host string, ips []net.IP, rules []EgressRule) bool {

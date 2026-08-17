@@ -472,24 +472,33 @@ func (s *Store) dequeueOnce(req queue.DequeueRequest, batch int, leaseTTL time.D
 		return queue.DequeueResponse{}, err
 	}
 
-	rows, err := tx.QueryContext(ctx, `
+	// An empty Route or Target means "any", matching the memory and SQLite
+	// backends. The push dispatcher depends on it: it dequeues per route
+	// without naming a target and resolves the target per item afterwards.
+	query := `
 SELECT id, route, target, state, received_at, attempt, next_run_at,
        payload, headers_json, trace_json, dead_reason, schema_version
 FROM queue_items
-WHERE route = $1
-  AND target = $2
-  AND state = $3
-  AND next_run_at <= $4
-ORDER BY next_run_at ASC, received_at ASC, id ASC
-LIMIT $5
+WHERE state = $1
+  AND next_run_at <= $2
+`
+	args := make([]any, 0, 5)
+	args = append(args, string(queue.StateQueued), now)
+	if req.Route != "" {
+		query += fmt.Sprintf("  AND route = $%d\n", len(args)+1)
+		args = append(args, req.Route)
+	}
+	if req.Target != "" {
+		query += fmt.Sprintf("  AND target = $%d\n", len(args)+1)
+		args = append(args, req.Target)
+	}
+	query += fmt.Sprintf(`ORDER BY next_run_at ASC, received_at ASC, id ASC
+LIMIT $%d
 FOR UPDATE SKIP LOCKED
-`,
-		req.Route,
-		req.Target,
-		string(queue.StateQueued),
-		now,
-		batch,
-	)
+`, len(args)+1)
+	args = append(args, batch)
+
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return queue.DequeueResponse{}, err
 	}

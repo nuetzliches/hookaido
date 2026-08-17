@@ -149,45 +149,64 @@ Use an internal channel as a durable job queue. Jobs are published via Admin API
 ```hcl
 admin_api {
   listen :2019
+  auth token "env:HOOKAIDO_ADMIN_TOKEN"
 }
 
-queue {
-  backend postgres
-  dead_letter {
-    max_retries 5
-  }
+pull_api {
+  listen :8081
+  auth token "env:HOOKAIDO_PULL_TOKEN"
+}
+
+dlq_retention {
+  max_age 30d
+  max_depth 10000
 }
 
 internal {
   /jobs/deploy {
+    queue { backend postgres }
     pull { path /pull/deploy }
   }
+}
 
+outbound {
   /jobs/reports {
+    queue { backend postgres }
     deliver "https://reports.internal/generate" {
       timeout 120s
-      retry exponential max 3 base 5s cap 1m jitter 0.1
+      retry exponential max 5 base 5s cap 1m jitter 0.1
     }
   }
 }
 ```
 
+Note that the two jobs live in different channels. `internal` routes must use `pull` and forbid `deliver`; `outbound` routes are the reverse. See [Deployment Modes](deployment-modes.md) for the full channel constraint matrix.
+
 **Publish a job:**
 
 ```bash
 curl -X POST http://localhost:2019/messages/publish \
+  -H "Authorization: Bearer $HOOKAIDO_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "X-Hookaido-Audit-Reason: deploy v2.1.0 to production" \
   -d '{
-    "route": "/jobs/deploy",
-    "payload": {"ref": "v2.1.0", "env": "production"}
+    "items": [
+      {
+        "route": "/jobs/deploy",
+        "target": "pull",
+        "payload_b64": "eyJyZWYiOiJ2Mi4xLjAiLCJlbnYiOiJwcm9kdWN0aW9uIn0="
+      }
+    ]
   }'
 ```
+
+`payload_b64` is the base64 encoding of `{"ref":"v2.1.0","env":"production"}`. The `X-Hookaido-Audit-Reason` header is required on every publish; see [Admin API](admin-api.md#post-messagespublish) for the full request shape.
 
 **Key points:**
 - Internal channels have no ingress listener — jobs enter only via Admin API or gRPC
 - `/jobs/deploy` uses pull mode: workers lease and ack jobs at their own pace
 - `/jobs/reports` uses push mode: Hookaido delivers with retry and timeout
-- Failed jobs land in DLQ after 5 attempts, recoverable via `POST /dlq/requeue`
+- Failed jobs land in DLQ after the configured `retry ... max` attempts, recoverable via `POST /dlq/requeue`
 
 ---
 

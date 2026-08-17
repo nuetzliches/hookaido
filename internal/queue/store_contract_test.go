@@ -73,6 +73,192 @@ func contractStoreFactories() []storeFactory {
 	return out
 }
 
+// contractRetentionStoreFactories mirrors contractStoreFactories but configures
+// delivered-item retention, so retention behaviour can be exercised across every
+// backend. Queue retention stays at zero -- only the prune interval is set --
+// so pruning runs on every pass without the queued probe items being collected.
+func contractRetentionStoreFactories(deliveredMaxAge time.Duration) []storeFactory {
+	out := []storeFactory{
+		{
+			name: "memory",
+			new: func(t *testing.T, now *time.Time) queue.Store {
+				t.Helper()
+				return queue.NewMemoryStore(
+					queue.WithNowFunc(func() time.Time { return now.UTC() }),
+					queue.WithQueueRetention(0, time.Millisecond),
+					queue.WithDeliveredRetention(deliveredMaxAge),
+				)
+			},
+		},
+		{
+			name: "sqlite",
+			new: func(t *testing.T, now *time.Time) queue.Store {
+				t.Helper()
+				dbPath := filepath.Join(t.TempDir(), "hookaido.db")
+				s, err := sqlite.NewStore(
+					dbPath,
+					sqlite.WithNowFunc(func() time.Time { return now.UTC() }),
+					sqlite.WithPollInterval(5*time.Millisecond),
+					sqlite.WithCheckpointInterval(0),
+					sqlite.WithRetention(0, time.Millisecond),
+					sqlite.WithDeliveredRetention(deliveredMaxAge),
+				)
+				if err != nil {
+					t.Fatalf("new sqlite store: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		},
+	}
+
+	dsn := strings.TrimSpace(os.Getenv("HOOKAIDO_TEST_POSTGRES_DSN"))
+	if dsn != "" {
+		out = append(out, storeFactory{
+			name: "postgres",
+			new: func(t *testing.T, now *time.Time) queue.Store {
+				t.Helper()
+				s, err := postgres.NewStore(
+					dsn,
+					postgres.WithNowFunc(func() time.Time { return now.UTC() }),
+					postgres.WithPollInterval(5*time.Millisecond),
+					postgres.WithRetention(0, time.Millisecond),
+					postgres.WithDeliveredRetention(deliveredMaxAge),
+				)
+				if err != nil {
+					t.Fatalf("new postgres store: %v", err)
+				}
+				postgres.TruncateForTest(t, s)
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		})
+	}
+
+	return out
+}
+
+// deliveredCount reports how many items sit in the delivered state.
+func deliveredCount(t *testing.T, store queue.Store) int {
+	t.Helper()
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	return stats.ByState[queue.StateDelivered]
+}
+
+// triggerPrune forces a retention pass. Every backend prunes from Enqueue, so a
+// throwaway queued item is the portable way to reach it.
+func triggerPrune(t *testing.T, store queue.Store, probeID string) {
+	t.Helper()
+	if err := store.Enqueue(queue.Envelope{ID: probeID, Route: "/probe", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue prune probe %s: %v", probeID, err)
+	}
+}
+
+// Delivered retention must be measured from when an item was delivered, not from
+// when it arrived. Ack stamps NextRunAt with the delivery time on all three
+// backends, so that -- not ReceivedAt -- is the field retention has to key on.
+//
+// Postgres pruned on received_at, so an item that had sat queued for longer than
+// delivered_retention_max_age was deleted on the first prune after delivery: a
+// slow route lost its delivery history immediately while a fast route kept the
+// configured window.
+func TestStoreContract_DeliveredRetentionAgesFromDeliveryTime(t *testing.T) {
+	const deliveredWindow = time.Hour
+
+	for _, factory := range contractRetentionStoreFactories(deliveredWindow) {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			if err := store.Enqueue(queue.Envelope{ID: "evt_slow", Route: "/r", Target: "pull"}); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+
+			// Let it sit queued for far longer than the delivered window, so
+			// ReceivedAt and NextRunAt disagree by more than the retention age.
+			now = now.Add(3 * deliveredWindow)
+
+			resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: time.Minute})
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			if len(resp.Items) != 1 {
+				t.Fatalf("dequeue items=%d, want 1", len(resp.Items))
+			}
+			if err := store.Ack(resp.Items[0].LeaseID); err != nil {
+				t.Fatalf("ack: %v", err)
+			}
+			if got := deliveredCount(t, store); got != 1 {
+				t.Fatalf("delivered=%d immediately after ack, want 1", got)
+			}
+
+			// One minute after delivery the window has not elapsed.
+			now = now.Add(time.Minute)
+			triggerPrune(t, store, "evt_probe_1")
+			if got := deliveredCount(t, store); got != 1 {
+				t.Fatalf("delivered=%d one minute after delivery, want 1 -- retention is keyed on arrival time, not delivery time", got)
+			}
+
+			// Well past the window measured from delivery, it must be collected.
+			now = now.Add(2 * deliveredWindow)
+			triggerPrune(t, store, "evt_probe_2")
+			if got := deliveredCount(t, store); got != 0 {
+				t.Fatalf("delivered=%d past the retention window, want 0", got)
+			}
+		})
+	}
+}
+
+// Stats must report per-bucket backlog age and ready lag, not just a count.
+// These are what an operator reads to spot a stalled target; Postgres left both
+// at zero, so a route stuck for hours reported an age of 0s.
+func TestStoreContract_StatsTopBacklogReportsAgeAndLag(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+
+			const stalled = 90 * time.Minute
+			now = now.Add(stalled)
+
+			stats, err := store.Stats()
+			if err != nil {
+				t.Fatalf("stats: %v", err)
+			}
+			if len(stats.TopQueued) != 1 {
+				t.Fatalf("TopQueued buckets=%d, want 1", len(stats.TopQueued))
+			}
+
+			b := stats.TopQueued[0]
+			if b.Route != "/r" || b.Target != "pull" {
+				t.Fatalf("bucket route/target=%q/%q, want /r/pull", b.Route, b.Target)
+			}
+			if b.Queued != 1 {
+				t.Fatalf("bucket queued=%d, want 1", b.Queued)
+			}
+			if b.OldestQueuedReceivedAt.IsZero() {
+				t.Fatal("bucket OldestQueuedReceivedAt is zero, want the enqueue time")
+			}
+			if b.OldestQueuedAge != stalled {
+				t.Fatalf("bucket OldestQueuedAge=%s, want %s", b.OldestQueuedAge, stalled)
+			}
+			if b.EarliestQueuedNextRun.IsZero() {
+				t.Fatal("bucket EarliestQueuedNextRun is zero, want the next-run time")
+			}
+			if b.ReadyLag != stalled {
+				t.Fatalf("bucket ReadyLag=%s, want %s", b.ReadyLag, stalled)
+			}
+		})
+	}
+}
+
 func TestStoreContract_DequeueAck(t *testing.T) {
 	for _, factory := range contractStoreFactories() {
 		t.Run(factory.name, func(t *testing.T) {

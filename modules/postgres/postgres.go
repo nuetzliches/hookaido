@@ -615,6 +615,24 @@ WHERE id = $1
 	})
 }
 
+// AckBatch, NackBatch and MarkDeadBatch acknowledge one lease per statement,
+// each in its own transaction. queue.LeaseBatchStore asks implementations to use
+// a single transaction "where possible" -- SQLite does, via withLeaseBatch, so
+// there a failed batch really did change nothing and returning a zero result is
+// accurate. Here it is not: by the time an unexpected error surfaces on lease N,
+// leases 1..N-1 are already committed.
+//
+// These used to return queue.LeaseBatchResult{} on that path, which told the
+// caller nothing had succeeded. The dispatcher treats an un-acked delivered item
+// as still leased, so those already-acked messages were redelivered once the
+// lease TTL expired -- duplicate delivery on the at-least-once contract, and for
+// MarkDeadBatch a redelivery of items already classified dead. The accumulated
+// result is now returned alongside the error so the caller can see which leases
+// were actually settled.
+//
+// Making the whole batch atomic would be the stronger fix and would match
+// SQLite, but it is a larger change to withLease; it is tracked separately in
+// issue #207. Reporting the truth is the prerequisite either way.
 func (s *Store) AckBatch(leaseIDs []string) (queue.LeaseBatchResult, error) {
 	res := queue.LeaseBatchResult{Conflicts: make([]queue.LeaseBatchConflict, 0)}
 
@@ -639,7 +657,9 @@ func (s *Store) AckBatch(leaseIDs []string) (queue.LeaseBatchResult, error) {
 		case errors.Is(err, queue.ErrLeaseNotFound):
 			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
 		default:
-			return queue.LeaseBatchResult{}, err
+			// Return what has already been committed alongside the error.
+			// See the note on partial results above AckBatch.
+			return res, err
 		}
 	}
 
@@ -693,7 +713,9 @@ func (s *Store) NackBatch(leaseIDs []string, delay time.Duration) (queue.LeaseBa
 		case errors.Is(err, queue.ErrLeaseNotFound):
 			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
 		default:
-			return queue.LeaseBatchResult{}, err
+			// Return what has already been committed alongside the error.
+			// See the note on partial results above AckBatch.
+			return res, err
 		}
 	}
 
@@ -768,7 +790,9 @@ func (s *Store) MarkDeadBatch(leaseIDs []string, reason string) (queue.LeaseBatc
 		case errors.Is(err, queue.ErrLeaseNotFound):
 			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
 		default:
-			return queue.LeaseBatchResult{}, err
+			// Return what has already been committed alongside the error.
+			// See the note on partial results above AckBatch.
+			return res, err
 		}
 	}
 
@@ -1310,7 +1334,7 @@ WHERE state = $1
 		}
 
 		topRows, err := s.db.QueryContext(context.Background(), `
-SELECT route, target, COUNT(*)
+SELECT route, target, COUNT(*), MIN(received_at), MIN(next_run_at)
 FROM queue_items
 WHERE state = $1
 GROUP BY route, target
@@ -1327,8 +1351,28 @@ LIMIT $2
 
 		for topRows.Next() {
 			var b queue.BacklogBucket
-			if err := topRows.Scan(&b.Route, &b.Target, &b.Queued); err != nil {
+			var oldest sql.NullTime
+			var earliest sql.NullTime
+			if err := topRows.Scan(&b.Route, &b.Target, &b.Queued, &oldest, &earliest); err != nil {
 				return queue.Stats{}, err
+			}
+			// Per-bucket age and lag were left zero here, so the top-backlog
+			// buckets reported "queued 0s ago" on Postgres however long the
+			// route had been stalled -- the metric an operator uses to spot a
+			// stuck target. The process-wide aggregates above were already
+			// populated; only the per-bucket ones were missing. Derived exactly
+			// as the SQLite backend does.
+			if oldest.Valid {
+				b.OldestQueuedReceivedAt = oldest.Time.UTC()
+			}
+			if earliest.Valid {
+				b.EarliestQueuedNextRun = earliest.Time.UTC()
+			}
+			if !b.OldestQueuedReceivedAt.IsZero() && !now.Before(b.OldestQueuedReceivedAt) {
+				b.OldestQueuedAge = now.Sub(b.OldestQueuedReceivedAt)
+			}
+			if !b.EarliestQueuedNextRun.IsZero() && now.After(b.EarliestQueuedNextRun) {
+				b.ReadyLag = now.Sub(b.EarliestQueuedNextRun)
 			}
 			stats.TopQueued = append(stats.TopQueued, b)
 		}
@@ -2019,7 +2063,7 @@ func (s *Store) maybePrune(now time.Time) error {
 		if _, err := s.db.ExecContext(ctx, `
 DELETE FROM queue_items
 WHERE state = $1
-  AND received_at < $2
+  AND received_at <= $2
 `,
 			string(queue.StateQueued),
 			cutoff,
@@ -2029,10 +2073,18 @@ WHERE state = $1
 	}
 	if s.deliveredRetentionMaxAge > 0 {
 		cutoff := now.Add(-s.deliveredRetentionMaxAge).UTC()
+		// Delivered items age from when they were delivered, not from when they
+		// arrived: Ack stamps next_run_at with the delivery time (see Ack and
+		// AckBatch above). Pruning on received_at instead measured the wrong
+		// interval -- an item that sat queued for longer than
+		// delivered_retention_max_age was eligible for deletion the moment it
+		// was delivered, so a slow route lost its delivery history immediately
+		// while a fast route kept the configured window. SQLite already keys
+		// this predicate on next_run_at.
 		if _, err := s.db.ExecContext(ctx, `
 DELETE FROM queue_items
 WHERE state = $1
-  AND received_at < $2
+  AND next_run_at <= $2
 `,
 			string(queue.StateDelivered),
 			cutoff,
@@ -2045,7 +2097,7 @@ WHERE state = $1
 		if _, err := s.db.ExecContext(ctx, `
 DELETE FROM queue_items
 WHERE state = $1
-  AND received_at < $2
+  AND received_at <= $2
 `,
 			string(queue.StateDead),
 			cutoff,

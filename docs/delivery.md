@@ -187,10 +187,12 @@ deliver exec "python /app/handler.py" {
 |---|---|
 | `0` | Success — message is acked |
 | `75` | Temporary failure (EX_TEMPFAIL) — retriable |
-| `1-125` | General failure — retriable with backoff |
-| `126`, `127` | Command not found / not executable — non-retriable, immediate DLQ |
+| Any other non-zero exit code | General failure — retriable with backoff. This includes `126` and `127`: once the process has run and exited, Hookaido sees only an exit code, so a shell wrapper that exits `127` because an inner tool was missing is retried like any other failure |
 | Signal | Process killed by signal — retriable |
 | Timeout | Context deadline exceeded — retriable |
+| Command could not be started | Non-retriable, immediate DLQ. Applies when the binary is not on `PATH`, the file does not exist, or it is not executable — detected before the process runs, so no exit code exists |
+
+> If you need a missing inner command to dead-letter immediately rather than retry, let the wrapper script itself fail to start (for example by pointing `deliver exec` straight at the tool), or have the script exit `0` after reporting the problem through its own channel. There is currently no exit code that requests immediate dead-lettering.
 
 ### Constraints
 

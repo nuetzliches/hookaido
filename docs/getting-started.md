@@ -8,7 +8,7 @@ This guide walks you through installing Hookaido and running your first webhook 
 
 Download the latest binary for your platform from [GitHub Releases](https://github.com/nuetzliches/hookaido/releases).
 
-**Build from source** (requires Go 1.25+):
+**Build from source** (requires Go 1.26+):
 
 ```bash
 go build -o hookaido ./cmd/hookaido
@@ -235,7 +235,7 @@ curl http://127.0.0.1:2019/healthz?details=1
 | Flag          | Default               | Description                              |
 | ------------- | --------------------- | ---------------------------------------- |
 | `--config`    | `./Hookaidofile`      | Path to config file                      |
-| `--db`        | `./.data/hookaido.db` | Path to SQLite database                  |
+| `--db`        | `./hookaido.db`       | Path to SQLite database. The container image overrides this with `/app/.data/hookaido.db`, which is the declared volume |
 | `--postgres-dsn` | —                  | PostgreSQL DSN (when `queue.backend` is `postgres`) |
 | `--pid-file`  | —                     | Write PID file (enables `SIGHUP` reload) |
 | `--watch`     | `false`               | Hot-reload on config file changes        |

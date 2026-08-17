@@ -120,9 +120,9 @@ String-to-sign: `METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + hex(sha256(bod
 
 Verification tries all secrets valid at the request timestamp (from the timestamp header), not just wall-clock time. This allows safe key rotation with overlapping validity windows.
 
-**Provider mode** (GitHub, Gitea/Forgejo):
+**Provider mode** (GitHub, Gitea/Forgejo, Stripe, Cituro):
 
-For webhook providers with their own signature format, use provider mode. This verifies the provider's native signature without timestamp/nonce replay protection:
+For webhook providers with their own signature format, use provider mode. This verifies the provider's native signature:
 
 ```hcl
 /webhooks/github {
@@ -140,14 +140,26 @@ For webhook providers with their own signature format, use provider mode. This v
   }
   pull { path /pull/gitea }
 }
+
+/webhooks/stripe {
+  auth hmac {
+    provider stripe
+    secret env:STRIPE_WEBHOOK_SECRET
+  }
+  pull { path /pull/stripe }
+}
 ```
 
-| Provider | Signature Header | Format | Notes |
-|---|---|---|---|
-| `github` | `X-Hub-Signature-256` | `sha256=<hex>` | SHA-256 HMAC of raw body |
-| `gitea` | `X-Gitea-Signature` | `<hex>` | SHA-256 HMAC of raw body |
+| Provider | Signature Header | Format | Signed payload | Replay protection |
+|---|---|---|---|---|
+| `github` | `X-Hub-Signature-256` | `sha256=<hex>` | raw body | none (GitHub omits a timestamp) |
+| `gitea` | `X-Gitea-Signature` | `<hex>` | raw body | none |
+| `stripe` | `Stripe-Signature` | `t=<ts>,v1=<hex>` | `<ts>.<body>` | 5 min fixed tolerance |
+| `cituro` | `X-CITURO-SIGNATURE` | `t=<ts>,s=<hex>` | `<ts>.<body>` | 5 min fixed tolerance |
 
-When `provider` is set, `signature_header`, `timestamp_header`, `nonce_header`, and `tolerance` are forbidden (compile error). Replay protection is not applied.
+`stripe` and `cituro` share the timestamped scheme Stripe invented; `cituro` differs only in header name and signature tag. Both accept several comma-separated `<tag>=<hex>` pairs, and any matching signature verifies the request — which is what makes Stripe's `v0`/`v1` rotation work.
+
+When `provider` is set, `signature_header`, `timestamp_header`, `nonce_header`, and `tolerance` are forbidden (compile error) — the format is fixed by the provider. Replay protection therefore applies to `stripe` and `cituro` only, and its 5-minute window is not configurable.
 
 ### Basic Auth
 

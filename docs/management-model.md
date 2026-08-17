@@ -72,9 +72,11 @@ curl http://127.0.0.1:2019/applications
 
 ```json
 {
-  "applications": [
-    { "name": "billing", "path_count": 2 },
-    { "name": "notifications", "path_count": 1 }
+  "application_count": 2,
+  "endpoint_count": 3,
+  "items": [
+    { "name": "billing", "endpoint_count": 2 },
+    { "name": "notifications", "endpoint_count": 1 }
   ]
 }
 ```
@@ -87,7 +89,9 @@ curl http://127.0.0.1:2019/applications/billing/endpoints
 
 ```json
 {
-  "endpoints": [
+  "application": "billing",
+  "endpoint_count": 2,
+  "items": [
     {
       "name": "invoice.created",
       "route": "/webhooks/billing",

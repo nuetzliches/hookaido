@@ -58,7 +58,7 @@ Docs: https://nuetzliches.github.io/hookaido/
 
 **Download a binary** from the [latest release](https://github.com/nuetzliches/hookaido/releases) — no Go required.
 
-**Or build from source** (requires Go 1.25+):
+**Or build from source** (requires Go 1.26+):
 
 ```bash
 go build ./cmd/hookaido
@@ -206,7 +206,7 @@ Releases ship with signed checksums (Ed25519), SPDX SBOM, and GitHub provenance 
 ## Requirements
 
 - Pre-built binaries: no dependencies (download from [Releases](https://github.com/nuetzliches/hookaido/releases))
-- Build from source: Go 1.25+
+- Build from source: Go 1.26+
 - Docker: use the official image `ghcr.io/nuetzliches/hookaido` (or build locally), see [Docker quickstart](docs/docker.md)
 - No external runtime dependencies
 

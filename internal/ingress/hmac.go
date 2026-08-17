@@ -93,7 +93,10 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) erro
 	} else {
 		a.nonce.setNow(now)
 	}
-	if !a.nonce.seenOnce(nonce, t.Add(a.Tolerance)) {
+	// Reject a nonce we could not remember before doing any work with it: the
+	// route opted into replay protection, so a nonce we cannot track is not
+	// something to wave through.
+	if len(nonce) > nonceMaxLen {
 		return ErrUnauthorized
 	}
 
@@ -122,6 +125,13 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) erro
 		_, _ = mac.Write(msg)
 		want := mac.Sum(nil)
 		if subtle.ConstantTimeCompare(gotSig, want) == 1 {
+			// Claim the nonce only now. Claiming it before verification let any
+			// unauthenticated caller grow the cache, and let anyone who could
+			// observe or predict a nonce claim it first so that the genuine
+			// signed webhook carrying it was rejected as a replay.
+			if !a.nonce.recordIfAbsent(nonce, t.Add(a.Tolerance)) {
+				return ErrUnauthorized
+			}
 			return nil
 		}
 	}
@@ -405,10 +415,30 @@ func safePrefix(s string, n int) string {
 	return s[:n]
 }
 
+const (
+	// nonceMaxLen bounds a nonce we are willing to remember. Nonces are opaque
+	// uniqueness tokens -- a UUID is 36 characters -- so this is generous,
+	// while stopping a single entry from being megabytes wide. Without it the
+	// only bound was Go's default 1 MiB header limit.
+	nonceMaxLen = 256
+
+	// nonceMaxEntries caps the cache. Entries are written only after a
+	// signature verifies, so reaching this takes a legitimate sender at very
+	// high sustained volume rather than an attacker; it is a memory backstop,
+	// not the primary defence.
+	nonceMaxEntries = 100_000
+
+	// nonceSweepInterval bounds how often the expired-entry sweep runs. The
+	// sweep is O(entries) while holding the lock, so running it on every call
+	// made each request on the route pay for the whole cache.
+	nonceSweepInterval = 30 * time.Second
+)
+
 type nonceCache struct {
-	mu  sync.Mutex
-	now func() time.Time
-	m   map[string]time.Time
+	mu        sync.Mutex
+	now       func() time.Time
+	m         map[string]time.Time
+	lastSweep time.Time
 }
 
 func newNonceCache(now func() time.Time) *nonceCache {
@@ -430,25 +460,65 @@ func (c *nonceCache) setNow(now func() time.Time) {
 	c.mu.Unlock()
 }
 
-func (c *nonceCache) seenOnce(nonce string, expiresAt time.Time) bool {
-	if nonce == "" {
+// recordIfAbsent claims nonce until expiresAt and reports whether it was
+// previously unclaimed.
+//
+// This is the authority on replay detection: call it only after the signature
+// has verified, and reject the request when it returns false. Claiming a nonce
+// before verification let any unauthenticated caller grow the cache, and let
+// anyone able to observe or predict a nonce claim it first so that the genuine
+// signed webhook carrying it was rejected as a replay.
+func (c *nonceCache) recordIfAbsent(nonce string, expiresAt time.Time) bool {
+	if nonce == "" || len(nonce) > nonceMaxLen {
 		return false
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Opportunistic cleanup.
 	now := c.now().UTC()
+	c.sweepLocked(now)
+
+	if exp, ok := c.m[nonce]; ok && now.Before(exp) {
+		return false
+	}
+	if len(c.m) >= nonceMaxEntries {
+		// Still full after sweeping. Drop the entry closest to expiring: its
+		// replay window is nearly over anyway, and refusing a validly signed
+		// request would turn a capacity problem into dropped webhooks.
+		c.evictEarliestLocked()
+	}
+	c.m[nonce] = expiresAt.UTC()
+	return true
+}
+
+// sweepLocked removes expired entries, at most once per nonceSweepInterval.
+// Entries that outlive their expiry until the next sweep are harmless: the
+// lookup in recordIfAbsent compares against the stored expiry rather than
+// treating mere presence as a replay.
+func (c *nonceCache) sweepLocked(now time.Time) {
+	if !c.lastSweep.IsZero() && now.Sub(c.lastSweep) < nonceSweepInterval {
+		return
+	}
+	c.lastSweep = now
 	for k, exp := range c.m {
 		if !now.Before(exp) {
 			delete(c.m, k)
 		}
 	}
+}
 
-	if exp, ok := c.m[nonce]; ok && now.Before(exp) {
-		return false
+func (c *nonceCache) evictEarliestLocked() {
+	var (
+		earliestKey string
+		earliestExp time.Time
+	)
+	for k, exp := range c.m {
+		if earliestKey == "" || exp.Before(earliestExp) {
+			earliestKey, earliestExp = k, exp
+		}
 	}
-	c.m[nonce] = expiresAt.UTC()
-	return true
+	if earliestKey != "" {
+		delete(c.m, earliestKey)
+	}
 }

@@ -156,6 +156,81 @@ func TestIntegration_AckBatch_ExpiredLease(t *testing.T) {
 	}
 }
 
+// A batch that fails partway must still report the leases it already settled.
+//
+// This backend settles one lease per transaction, so when an unexpected error
+// surfaces on lease N, leases 1..N-1 are already committed. Returning a zero
+// result there told the caller nothing had succeeded; the dispatcher treats an
+// un-acked delivered item as still leased, so those already-settled messages
+// were redelivered once the lease TTL expired.
+//
+// leaseIDPoison contains a NUL byte, which Postgres rejects for a text
+// parameter (SQLSTATE 22021). That is neither ErrLeaseNotFound nor
+// ErrLeaseExpired, so it reaches exactly the unexpected-error branch under test
+// without needing to break the connection.
+func TestIntegration_LeaseBatchReportsPartialProgressOnError(t *testing.T) {
+	const leaseIDPoison = "poison\x00lease"
+
+	cases := []struct {
+		name string
+		call func(s *Store, leaseIDs []string) (queue.LeaseBatchResult, error)
+		// wantState is the state the settled item must be left in.
+		// Empty means the row is expected to be gone.
+		wantState queue.State
+	}{
+		{
+			name:      "AckBatch",
+			call:      func(s *Store, ids []string) (queue.LeaseBatchResult, error) { return s.AckBatch(ids) },
+			wantState: "",
+		},
+		{
+			name:      "NackBatch",
+			call:      func(s *Store, ids []string) (queue.LeaseBatchResult, error) { return s.NackBatch(ids, 0) },
+			wantState: queue.StateQueued,
+		},
+		{
+			name: "MarkDeadBatch",
+			call: func(s *Store, ids []string) (queue.LeaseBatchResult, error) {
+				return s.MarkDeadBatch(ids, "partial-progress-test")
+			},
+			wantState: queue.StateDead,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := freshIntegrationStore(t)
+			enqueueTest(t, store, "pp_1", "/r", "pull")
+			item := dequeueOne(t, store, "/r", "pull", 30*time.Second)
+
+			res, err := tc.call(store, []string{item.LeaseID, leaseIDPoison})
+			if err == nil {
+				t.Fatal("expected an error from the poisoned lease ID")
+			}
+			if res.Succeeded != 1 {
+				t.Fatalf("Succeeded=%d alongside the error, want 1 -- the first lease was committed and must be reported, or the caller redelivers it", res.Succeeded)
+			}
+
+			// Confirm the reported success matches what is actually in the
+			// database: the point of the fix is that the two agree.
+			var state string
+			queryErr := store.db.QueryRow(`SELECT state FROM queue_items WHERE id = $1`, "pp_1").Scan(&state)
+			if tc.wantState == "" {
+				if queryErr == nil {
+					t.Fatalf("row still present in state %q, want deleted", state)
+				}
+			} else {
+				if queryErr != nil {
+					t.Fatalf("select state: %v", queryErr)
+				}
+				if queue.State(state) != tc.wantState {
+					t.Fatalf("state=%q, want %q", state, tc.wantState)
+				}
+			}
+		})
+	}
+}
+
 // --- DLQ list / requeue / delete ---
 
 func TestIntegration_DeadDelete_RemovesOnlyMatching(t *testing.T) {

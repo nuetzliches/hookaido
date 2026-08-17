@@ -17,6 +17,19 @@ import (
 	"github.com/nuetzliches/hookaido/v2/internal/secrets"
 )
 
+// maxDrainBytes bounds how much of a delivery response body is read before the
+// connection is closed.
+//
+// The body is discarded — it is read only so keep-alive can reuse the
+// connection — but the read itself was unbounded, while ingress caps inbound
+// bodies at 2 MiB. A target that answers 2xx and then streams at line rate held
+// a delivery goroutine for the whole per-attempt timeout (10s by default) and
+// still had its message acked, so deliver_concurrency goroutines (20 by default)
+// could all be parked on one uncooperative target. Past the cap the body is left
+// unread and the connection is dropped rather than reused, which is the right
+// trade for a target behaving that way.
+const maxDrainBytes = 64 << 10
+
 type HTTPDeliverer struct {
 	Client *http.Client
 	Policy EgressPolicy
@@ -85,7 +98,8 @@ func (d *HTTPDeliverer) Deliver(ctx context.Context, delivery Delivery) Result {
 		return Result{Err: err}
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	// io.EOF is the ordinary outcome for a body shorter than the cap.
+	_, _ = io.CopyN(io.Discard, resp.Body, maxDrainBytes)
 	return Result{StatusCode: resp.StatusCode}
 }
 

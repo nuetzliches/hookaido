@@ -199,3 +199,124 @@ func TestEgressPolicy_DNSResolverError(t *testing.T) {
 		t.Fatal("expected DNS resolver error to deny request")
 	}
 }
+
+func TestEgressPolicy_AllowCIDRRequiresEveryResolvedAddress(t *testing.T) {
+	// The documented workaround for private-network delivery targets. A host
+	// answering with one in-range address must not clear the allowlist while the
+	// dialer is still free to pick the metadata address alongside it.
+	policy := EgressPolicy{Allow: []EgressRule{{CIDR: mustPrefix(t, "10.0.0.0/8"), IsCIDR: true}}}
+	resolver := fakeResolver{
+		records: map[string][]net.IPAddr{
+			"internal.example": {{IP: net.ParseIP("10.1.1.5")}},
+			"split.example": {
+				{IP: net.ParseIP("10.1.1.5")},
+				{IP: net.ParseIP("169.254.169.254")},
+			},
+		},
+	}
+
+	if err := checkEgressPolicy(context.Background(), "https://internal.example/hook", policy, resolver); err != nil {
+		t.Fatalf("expected fully in-range host to pass, got %v", err)
+	}
+	if err := checkEgressPolicy(context.Background(), "https://split.example/hook", policy, resolver); err == nil {
+		t.Fatalf("expected host with an out-of-range address to be denied")
+	}
+}
+
+func TestEgressPolicy_AllowCIDRAcceptsAddressesSpreadAcrossRules(t *testing.T) {
+	// Every address is covered by some allow rule, just not all by the same one.
+	policy := EgressPolicy{Allow: []EgressRule{
+		{CIDR: mustPrefix(t, "10.0.0.0/8"), IsCIDR: true},
+		{CIDR: mustPrefix(t, "203.0.113.0/24"), IsCIDR: true},
+	}}
+	resolver := fakeResolver{
+		records: map[string][]net.IPAddr{
+			"dual.example": {
+				{IP: net.ParseIP("10.1.1.5")},
+				{IP: net.ParseIP("203.0.113.9")},
+			},
+		},
+	}
+
+	if err := checkEgressPolicy(context.Background(), "https://dual.example/hook", policy, resolver); err != nil {
+		t.Fatalf("expected host covered by the union of allow rules to pass, got %v", err)
+	}
+}
+
+func TestEgressPolicy_AllowHostRuleKeepsAnyMatchSemantics(t *testing.T) {
+	// A hostname rule names the one host the request carries, so it stays
+	// any-match even when a CIDR rule sits beside it and matches nothing.
+	policy := EgressPolicy{Allow: []EgressRule{
+		{Host: "good.example"},
+		{CIDR: mustPrefix(t, "10.0.0.0/8"), IsCIDR: true},
+	}}
+	resolver := fakeResolver{
+		records: map[string][]net.IPAddr{
+			"good.example": {
+				{IP: net.ParseIP("93.184.216.34")},
+				{IP: net.ParseIP("198.51.100.7")},
+			},
+		},
+	}
+
+	if err := checkEgressPolicy(context.Background(), "https://good.example/hook", policy, resolver); err != nil {
+		t.Fatalf("expected allowlisted hostname to pass, got %v", err)
+	}
+}
+
+func TestIsAllowedIP_NonRoutableRanges(t *testing.T) {
+	denied := []string{
+		"0.0.0.0",
+		"0.1.2.3",
+		"10.0.0.1",
+		"100.64.0.1",
+		"100.100.100.200", // Alibaba instance metadata
+		"127.0.0.1",
+		"169.254.169.254", // AWS/GCP/Azure instance metadata
+		"172.16.0.1",
+		"192.0.0.170",
+		"192.0.0.192", // Oracle instance metadata
+		"192.168.1.1",
+		"198.18.0.1",
+		"240.0.0.1",
+		"255.255.255.254",
+		"::",
+		"::1",
+		"::127.0.0.1",
+		"::ffff:10.0.0.1",        // IPv4-mapped private
+		"::ffff:169.254.169.254", // IPv4-mapped metadata
+		"64:ff9b::a9fe:a9fe",     // 169.254.169.254 behind NAT64
+		"fc00::1",
+		"fe80::1",
+		"ff02::1",
+	}
+	for _, s := range denied {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("test setup: %q is not an ip", s)
+		}
+		if isAllowedIP(ip) {
+			t.Errorf("isAllowedIP(%s) = true, want false", s)
+		}
+	}
+
+	allowed := []string{
+		"93.184.216.34",
+		"8.8.8.8",
+		"192.0.2.1", // RFC5737 documentation range, used as a public stand-in
+		"2606:2800:220:1:248:1893:25c8:1946",
+	}
+	for _, s := range allowed {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("test setup: %q is not an ip", s)
+		}
+		if !isAllowedIP(ip) {
+			t.Errorf("isAllowedIP(%s) = false, want true", s)
+		}
+	}
+
+	if isAllowedIP(nil) {
+		t.Errorf("isAllowedIP(nil) = true, want false")
+	}
+}

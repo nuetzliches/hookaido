@@ -529,3 +529,85 @@ func TestHTTPDeliverer_CustomHeadersBeforeSigning(t *testing.T) {
 		t.Fatalf("signature mismatch: got %q, want %q (custom headers must NOT affect HMAC)", gotSignature, wantSignature)
 	}
 }
+
+// countingBody serves size bytes and records how many were actually read.
+type countingBody struct {
+	size int64
+	read int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	if b.read >= b.size {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if remaining := b.size - b.read; n > remaining {
+		n = remaining
+	}
+	b.read += n
+	return int(n), nil
+}
+
+func (b *countingBody) Close() error { return nil }
+
+type staticRoundTripper struct {
+	resp *http.Response
+}
+
+func (rt staticRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return rt.resp, nil
+}
+
+func TestHTTPDeliverer_DrainsAtMostMaxDrainBytes(t *testing.T) {
+	body := &countingBody{size: 8 << 20}
+	client := &http.Client{Transport: staticRoundTripper{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       body,
+		Header:     http.Header{},
+	}}}
+
+	d := NewHTTPDeliverer(client, EgressPolicy{})
+	res := d.Deliver(context.Background(), Delivery{
+		Method: http.MethodPost,
+		URL:    "https://target.example/hook",
+		Header: http.Header{},
+		Body:   []byte(`{}`),
+	})
+	if res.Err != nil {
+		t.Fatalf("deliver err: %v", res.Err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", res.StatusCode)
+	}
+	if body.read > maxDrainBytes {
+		t.Fatalf("drained %d bytes, want at most %d", body.read, int64(maxDrainBytes))
+	}
+}
+
+func TestHTTPDeliverer_DrainsShortBodyFully(t *testing.T) {
+	// A body below the cap must still be read to the end so the connection stays
+	// reusable; io.CopyN's io.EOF on a short read is not an error here.
+	body := &countingBody{size: 512}
+	client := &http.Client{Transport: staticRoundTripper{resp: &http.Response{
+		StatusCode: http.StatusAccepted,
+		Body:       body,
+		Header:     http.Header{},
+	}}}
+
+	d := NewHTTPDeliverer(client, EgressPolicy{})
+	res := d.Deliver(context.Background(), Delivery{
+		Method: http.MethodPost,
+		URL:    "https://target.example/hook",
+		Header: http.Header{},
+		Body:   []byte(`{}`),
+	})
+	if res.Err != nil {
+		t.Fatalf("deliver err: %v", res.Err)
+	}
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202", res.StatusCode)
+	}
+	if body.read != 512 {
+		t.Fatalf("drained %d bytes, want 512", body.read)
+	}
+}

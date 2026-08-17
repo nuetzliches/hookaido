@@ -28,6 +28,7 @@ Path matching rules:
 - `"/path"` matches `/path` and `/path/...` at segment boundaries.
 - `"/path"` does **not** match `/path-foo` (segment boundary enforced).
 - Route paths must start with `/` and must be unique.
+- Order matters: put the **more specific path first**. `/hooks` listed before `/hooks/github` swallows every request the latter was meant to handle, so `config validate` rejects that arrangement as unreachable. See [Routing Semantics](configuration.md#routing-semantics).
 
 ### Additional Matchers
 

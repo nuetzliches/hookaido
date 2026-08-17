@@ -6481,7 +6481,7 @@ func TestCompile_IngressSharedAllThreeSinglePort(t *testing.T) {
 	in := []byte(`
 ingress { listen ":8080" }
 pull_api { listen ":8080" prefix "/pull" auth token "raw:t" }
-admin_api { listen ":8080" prefix "/admin" }
+admin_api { listen ":8080" prefix "/admin" auth token "raw:a" }
 
 "/webhooks" {
   pull { path "/e" }
@@ -8970,5 +8970,201 @@ pull_api { auth token "raw:t" }
 	}
 	if !found {
 		t.Fatalf("expected env-requires-exec error, got: %v", res.Errors)
+	}
+}
+
+func TestCompile_RejectsRouteShadowedByEarlierPrefix(t *testing.T) {
+	// The parent route carries no matchers, so every POST /hooks/github is
+	// answered by it — unauthenticated and pointed at the wrong target — and the
+	// authenticated child route never runs.
+	in := []byte(`
+"/hooks" {
+  deliver "https://a.example.com/open" { }
+}
+
+"/hooks/github" {
+  auth hmac "raw:s"
+  deliver "https://b.example.com/gh" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	if !compileErrorsContain(res.Errors, `route "/hooks/github" is unreachable`) {
+		t.Fatalf("expected unreachable-route error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_RejectsRoutesShadowedByCatchAll(t *testing.T) {
+	// "/" matches every request path, so it swallows the whole config.
+	in := []byte(`
+"/" {
+  deliver "https://a.example.com/all" { }
+}
+
+"/hooks" {
+  deliver "https://b.example.com/hooks" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	if !compileErrorsContain(res.Errors, `route "/hooks" is unreachable`) {
+		t.Fatalf("expected unreachable-route error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_AllowsSpecificRouteBeforeCatchAll(t *testing.T) {
+	// The sane ordering: the specific path is reachable and the parent acts as
+	// the fallback for everything else under it.
+	in := []byte(`
+"/hooks/github" {
+  auth hmac "raw:s"
+  deliver "https://b.example.com/gh" { }
+}
+
+"/hooks" {
+  deliver "https://a.example.com/open" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+}
+
+func TestCompile_AllowsShadowedRouteWhenEarlierRouteHasMatchers(t *testing.T) {
+	// An earlier route constrained to POST lets every other method fall through,
+	// so the child route is genuinely reachable.
+	in := []byte(`
+"/hooks" {
+  match { method POST }
+  deliver "https://a.example.com/open" { }
+}
+
+"/hooks/github" {
+  auth hmac "raw:s"
+  deliver "https://b.example.com/gh" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+}
+
+func TestCompile_AllowsSiblingRoutesSharingAPathSegmentPrefix(t *testing.T) {
+	// "/hooks-internal" starts with "/hooks" as a string but not on a segment
+	// boundary, so neither route shadows the other.
+	in := []byte(`
+"/hooks" {
+  deliver "https://a.example.com/open" { }
+}
+
+"/hooks-internal" {
+  deliver "https://b.example.com/internal" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+}
+
+func TestCompile_AdminAPIRequiresAuthOffLoopback(t *testing.T) {
+	cases := []struct {
+		name      string
+		listen    string
+		wantError bool
+	}{
+		{name: "default loopback", listen: "", wantError: false},
+		{name: "explicit ipv4 loopback", listen: "127.0.0.1:2019", wantError: false},
+		{name: "alternate ipv4 loopback", listen: "127.0.0.53:2019", wantError: false},
+		{name: "ipv6 loopback", listen: "[::1]:2019", wantError: false},
+		{name: "localhost", listen: "localhost:2019", wantError: false},
+		{name: "wildcard port only", listen: ":2019", wantError: true},
+		{name: "ipv4 wildcard", listen: "0.0.0.0:2019", wantError: true},
+		{name: "ipv6 wildcard", listen: "[::]:2019", wantError: true},
+		{name: "routable address", listen: "10.0.0.5:2019", wantError: true},
+		{name: "unresolvable hostname", listen: "admin.internal:2019", wantError: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			block := "admin_api { }"
+			if tc.listen != "" {
+				block = fmt.Sprintf("admin_api { listen %q }", tc.listen)
+			}
+			cfg, err := Parse([]byte(block + "\n\n\"/x\" {\n  deliver \"https://a.example.com/x\" { }\n}\n"))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			_, res := Compile(cfg)
+			got := compileErrorsContain(res.Errors, "admin_api requires auth token allowlist")
+			if got != tc.wantError {
+				t.Fatalf("admin_api auth error = %v, want %v (errors: %#v)", got, tc.wantError, res.Errors)
+			}
+		})
+	}
+}
+
+func TestCompile_AdminAPIWithAuthTokenAllowsAnyListenAddress(t *testing.T) {
+	in := []byte(`
+admin_api { listen "0.0.0.0:2019" auth token "env:ADMIN_TOKEN" }
+
+"/x" {
+  deliver "https://a.example.com/x" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+}
+
+func TestCompile_AdminAPIRequiresAuthWhenSharingIngressListener(t *testing.T) {
+	// Loopback on its own is not enough here: the address that serves public
+	// webhook traffic must not also serve an unauthenticated control plane.
+	in := []byte(`
+ingress { listen "127.0.0.1:8080" }
+admin_api { listen "127.0.0.1:8080" prefix "/admin" }
+
+"/x" {
+  deliver "https://a.example.com/x" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !compileErrorsContain(res.Errors, "admin_api requires auth token allowlist when it co-listens with ingress") {
+		t.Fatalf("expected co-listen auth error, got %#v", res.Errors)
 	}
 }

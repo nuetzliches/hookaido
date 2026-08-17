@@ -253,6 +253,19 @@ type MatchConfig struct {
 	QueryExists  []string
 }
 
+// isUnconstrained reports whether the matcher imposes no conditions at all, so
+// every request whose path matches the route path is handled by that route and
+// nothing can fall through to a later one.
+func (m MatchConfig) isUnconstrained() bool {
+	return len(m.Methods) == 0 &&
+		len(m.Hosts) == 0 &&
+		len(m.Headers) == 0 &&
+		len(m.Query) == 0 &&
+		len(m.RemoteIPs) == 0 &&
+		len(m.HeaderExists) == 0 &&
+		len(m.QueryExists) == 0
+}
+
 type HeaderMatchConfig struct {
 	Name  string
 	Value string
@@ -1344,6 +1357,8 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 	compiled.HasPullRoutes = hasPullRoutes
 	compiled.HasDeliverRoutes = hasDeliverRoutes
 
+	validateRouteShadowing(compiled.Routes, &res)
+
 	if len(compiled.Routes) > 1 {
 		selected := strings.TrimSpace(compiled.Routes[0].QueueBackend)
 		if selected == "" {
@@ -1398,6 +1413,23 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 	if (hasPullRoutes || cfg.PullAPI != nil) && len(compiled.PullAPI.AuthTokens) == 0 {
 		if !hasPullRoutes || pullRoutesMissingAuth {
 			res.Errors = append(res.Errors, "pull_api requires auth token allowlist (use: pull_api { auth token \"env:VAR\" } or pull { auth token \"env:VAR\" })")
+		}
+	}
+
+	// The admin API server always runs, and with an empty token list
+	// admin.BearerTokenAuthorizer permits every request. Off loopback that makes
+	// the whole control plane — DLQ delete, messages/publish, cancel_by_filter,
+	// and management-endpoint mutations that rewrite the Hookaidofile and trigger
+	// a reload — reachable by anyone who can route to the port. The default
+	// listen is loopback, so this only fires once an operator overrides it.
+	if len(compiled.AdminAPI.AuthTokens) == 0 {
+		switch {
+		case compiled.AdminAPI.Listen == compiled.Ingress.Listen:
+			// Co-listening with ingress puts the control plane on whichever
+			// address receives public webhook traffic, loopback or not.
+			res.Errors = append(res.Errors, "admin_api requires auth token allowlist when it co-listens with ingress (use: admin_api { auth token \"env:VAR\" })")
+		case !isLoopbackListenAddr(compiled.AdminAPI.Listen):
+			res.Errors = append(res.Errors, fmt.Sprintf("admin_api requires auth token allowlist on non-loopback listen address %q (use: admin_api { auth token \"env:VAR\" }, or bind to 127.0.0.1)", compiled.AdminAPI.Listen))
 		}
 	}
 
@@ -3568,6 +3600,93 @@ func normalizePathValue(s string) (string, error) {
 		c = "/" + c
 	}
 	return c, nil
+}
+
+// routePathShadows reports whether every request matched by candidate is also
+// matched by the route path earlier.
+//
+// It mirrors the runtime matching rule in internal/app.matchPath — exact match,
+// segment-boundary prefix match, or a "/" catch-all that matches everything.
+// The two must agree: this function decides at compile time what that one
+// decides per request. Keep them in sync.
+func routePathShadows(earlier, candidate string) bool {
+	if earlier == "" {
+		return false
+	}
+	if earlier == "/" {
+		return true
+	}
+	if candidate == earlier {
+		return true
+	}
+	return strings.HasPrefix(candidate, earlier) &&
+		len(candidate) > len(earlier) &&
+		candidate[len(earlier)] == '/'
+}
+
+// validateRouteShadowing flags routes that can never be reached.
+//
+// Duplicate paths are already rejected in the route loop, but that check is
+// exact-string while runtime matching is segment-boundary prefix matching with
+// first-match-wins. A route whose path sits underneath an earlier route's path
+// is therefore unreachable — every request that would select it is answered by
+// the earlier one, with that route's auth, matchers and targets rather than its
+// own. Left unflagged this compiles clean and silently sends traffic somewhere
+// other than where the config says.
+//
+// An earlier route that carries match constraints can legitimately act as a
+// filter and let the rest fall through, so only an unconstrained earlier route
+// shadows. Ordering the specific path first — the sane arrangement — is
+// unaffected.
+func validateRouteShadowing(routes []CompiledRoute, res *ValidationResult) {
+	for i, rt := range routes {
+		if rt.Path == "" {
+			continue
+		}
+		for _, earlier := range routes[:i] {
+			if earlier.Path == "" || !earlier.Match.isUnconstrained() {
+				continue
+			}
+			if !routePathShadows(earlier.Path, rt.Path) {
+				continue
+			}
+			res.Errors = append(res.Errors, fmt.Sprintf(
+				"route %q is unreachable: the earlier route %q matches every request path under it and declares no match constraints (put the more specific path first, or add a match block to %q)",
+				rt.Path, earlier.Path, earlier.Path))
+			break
+		}
+	}
+}
+
+// isLoopbackListenAddr reports whether addr can only be reached over a loopback
+// interface. An empty or wildcard host (":2019", "0.0.0.0:2019", "[::]:2019")
+// binds every interface and is not loopback. A hostname other than "localhost"
+// cannot be resolved at compile time, so it is treated as non-loopback — the
+// safe reading, since the caller uses this to decide whether authentication is
+// mandatory.
+func isLoopbackListenAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Not host:port. A bare host is still worth inspecting; anything else
+		// simply will not parse as an address below.
+		host = addr
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(host), "["), "]")
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func hasPathPrefix(p, prefix string) bool {

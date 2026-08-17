@@ -126,7 +126,7 @@ docker run -d \
 - Use a named volume (not a bind mount) for `/app/.data` to keep SQLite WAL durable.
 - The image starts as root to fix volume ownership (`chown`), then drops to non-root user `hookaido` (UID 1000) via `su-exec`. This prevents `SQLITE_CANTOPEN` errors when Docker creates volumes as `root:root`. If you run with `--user hookaido`, the entrypoint skips `chown` and runs directly.
 - For TLS, mount cert/key files and reference them in your `Hookaidofile`.
-- Admin API defaults to `127.0.0.1:2019`. To expose it from Docker, set `admin_api { listen :2019 }` in your Hookaidofile.
+- Admin API defaults to `127.0.0.1:2019`, which inside a container is not reachable from the host. To expose it, bind a wider address **and set a token** — `admin_api { listen :2019, auth token "env:HOOKAIDO_ADMIN_TOKEN" }`. With an empty token list every request is authorized, so `config validate` rejects a non-loopback `admin_api` listener that has no `auth token`.
 
 ---
 

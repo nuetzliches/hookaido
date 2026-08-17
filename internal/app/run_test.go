@@ -564,7 +564,7 @@ func TestRuntimeState_TargetsForRoute(t *testing.T) {
 func TestRuntimeState_ManagementModel(t *testing.T) {
 	compiled := compileForReloadTest(t, `
 pull_api { auth token "raw:t" }
-"/billing/invoice" {
+"/billing/invoice/created" {
   application "billing"
   endpoint_name "invoice.created"
   pull { path "/pull/invoice" }

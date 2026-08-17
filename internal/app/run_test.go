@@ -181,7 +181,11 @@ pull_api { auth token "raw:global" }
 	if err := state.loadAuth(compiled); err != nil {
 		t.Fatalf("loadAuth: %v", err)
 	}
-	hmacAuth := state.hmacAuthFor("/x")
+	snap, ok := state.resolveIngressSnapshot(httptest.NewRequest(http.MethodPost, "http://example.com/x", nil), "/x")
+	if !ok {
+		t.Fatalf("expected route /x to resolve")
+	}
+	hmacAuth := snap.HMACAuth
 	if hmacAuth == nil {
 		t.Fatalf("expected route hmac auth config")
 	}
@@ -196,6 +200,71 @@ pull_api { auth token "raw:global" }
 	}
 	if hmacAuth.Tolerance != 12*time.Minute {
 		t.Fatalf("tolerance: got %s", hmacAuth.Tolerance)
+	}
+}
+
+// A request resolves its route and its authenticators together, so a config
+// reload landing mid-request cannot leave it holding a route from the old table
+// and a nil authenticator from the new maps -- which ingress reads as "no auth
+// configured".
+func TestResolveIngressSnapshot_SurvivesReloadThatRemovesTheRoute(t *testing.T) {
+	withHMAC := []byte(`
+pull_api { auth token "raw:t" }
+
+"/x" {
+  auth hmac { secret "raw:secret" }
+  pull { path "/e" }
+}
+`)
+	renamed := []byte(`
+pull_api { auth token "raw:t" }
+
+"/y" {
+  auth hmac { secret "raw:secret" }
+  pull { path "/e" }
+}
+`)
+
+	compiledOf := func(src []byte) config.Compiled {
+		t.Helper()
+		cfg, err := config.Parse(src)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		compiled, res := config.Compile(cfg)
+		if !res.OK {
+			t.Fatalf("compile: %#v", res)
+		}
+		return compiled
+	}
+
+	before := compiledOf(withHMAC)
+	state := newRuntimeState(before)
+	if err := state.loadAuth(before); err != nil {
+		t.Fatalf("loadAuth: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/x", nil)
+	snap, ok := state.resolveIngressSnapshot(req, "/x")
+	if !ok {
+		t.Fatal("expected /x to resolve")
+	}
+	if snap.HMACAuth == nil {
+		t.Fatal("expected the snapshot to carry the route's HMAC auth")
+	}
+
+	// The reload the in-flight request has to survive: /x is gone.
+	after := compiledOf(renamed)
+	if err := state.loadAuth(after); err != nil {
+		t.Fatalf("loadAuth after reload: %v", err)
+	}
+	state.updateAll(after)
+
+	if snap.HMACAuth == nil {
+		t.Fatal("the in-flight request lost its authenticator across a reload")
+	}
+	if _, ok := state.resolveIngressSnapshot(req, "/x"); ok {
+		t.Fatal("expected /x to stop resolving after the reload")
 	}
 }
 
@@ -226,7 +295,11 @@ pull_api { auth token "raw:global" }
 		t.Fatalf("loadAuth: %v", err)
 	}
 
-	forward := state.forwardAuthFor("/x")
+	snap, ok := state.resolveIngressSnapshot(httptest.NewRequest(http.MethodPost, "http://example.com/x", nil), "/x")
+	if !ok {
+		t.Fatalf("expected route /x to resolve")
+	}
+	forward := snap.ForwardAuth
 	if forward == nil {
 		t.Fatalf("expected route forward auth config")
 	}

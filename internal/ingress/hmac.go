@@ -291,9 +291,15 @@ func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) e
 //
 // Diagnostic WARN logs fire on every rejection path (header_missing,
 // parse_incomplete, ts_parse_error, ts_out_of_tolerance,
-// sig_hex_decode_error, no_secret_matched) with non-sensitive
-// fingerprints (byte counts, 8-char hex prefixes — never raw secrets or
-// full signatures).
+// sig_hex_decode_error, no_secret_matched). They describe only what the
+// caller sent — byte counts and bounded prefixes of received values.
+//
+// Nothing derived from a secret is logged, not even truncated. Both halves
+// of the signed message are attacker-controlled, so any value computed as
+// HMAC(secret, msg) would be a chosen-message oracle regardless of how few
+// bits of it were emitted. "never raw secrets or full signatures" is not a
+// strong enough rule here, and reading it that way is what previously
+// admitted a truncated expected-MAC into the no_secret_matched line.
 func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]byte, cfg stripeLikeConfig) error {
 	raw := strings.TrimSpace(r.Header.Get(cfg.Header))
 	if raw == "" {
@@ -338,8 +344,24 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
+		// tsStr is unbounded attacker-controlled input, so log a bounded prefix
+		// and its length rather than echoing it whole.
+		//
+		// err.Error() is deliberately not logged: strconv.ParseInt returns a
+		// *strconv.NumError whose message embeds the entire input, so passing
+		// it through would reintroduce the unbounded echo by the back door.
+		// The classification below carries the same diagnostic value.
+		cause := "invalid"
+		switch {
+		case errors.Is(err, strconv.ErrRange):
+			cause = "out_of_range"
+		case errors.Is(err, strconv.ErrSyntax):
+			cause = "not_a_number"
+		}
 		slog.Warn("hmac_stripe_failed", "reason", "ts_parse_error",
-			"header", cfg.Header, "ts_str", tsStr, "err", err.Error())
+			"header", cfg.Header,
+			"ts_prefix", safePrefix(tsStr, 16), "ts_len", len(tsStr),
+			"cause", cause)
 		return ErrUnauthorized
 	}
 
@@ -385,23 +407,21 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		}
 	}
 
-	// No secret matched: emit diagnostic fingerprint (never raw secrets or full signatures).
-	// "got_prefix" and "want_prefix" are the first 8 hex chars of the received vs.
-	// the computed signature for the *first* secret in the pool -- enough to spot
-	// a wholesale mismatch (wrong key material / wrong body framing) without
-	// leaking the full MAC.
-	var wantPrefix string
-	if len(secrets) > 0 && len(secrets[0]) > 0 {
-		mac := hmac.New(sha256.New, secrets[0])
-		_, _ = mac.Write(msg)
-		wantPrefix = hex.EncodeToString(mac.Sum(nil))[:8]
-	}
+	// No secret matched. The fields below describe what arrived; none is derived
+	// from a secret.
+	//
+	// This deliberately does not log the *expected* signature, not even a
+	// prefix. Both halves of the signed message are attacker-controlled, so
+	// emitting HMAC(secret, msg) for a caller-chosen msg -- truncated or not --
+	// is a chosen-message oracle: each rejected request would hand out verified
+	// bits of the correct MAC for a message of the attacker's choosing, which
+	// materially assists offline brute force of a weak secret. A mismatch is
+	// diagnosable from secrets_tried, body_len and got_prefix without it.
 	slog.Warn("hmac_stripe_failed", "reason", "no_secret_matched",
 		"header", cfg.Header, "sig_tag", cfg.SigTag,
 		"secrets_tried", len(secrets),
-		"ts_str", tsStr, "body_len", len(body),
-		"got_prefix", hex.EncodeToString(gotSig)[:min(8, 2*len(gotSig))],
-		"want_prefix_first_secret", wantPrefix)
+		"ts_len", len(tsStr), "body_len", len(body),
+		"got_prefix", hex.EncodeToString(gotSig)[:min(8, 2*len(gotSig))])
 	return ErrUnauthorized
 }
 

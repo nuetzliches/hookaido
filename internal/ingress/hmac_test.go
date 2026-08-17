@@ -327,6 +327,82 @@ func TestHMACAuth_VerifyProvider_NoSecrets(t *testing.T) {
 	}
 }
 
+// The rejection log must never carry a value derived from the secret. Both
+// halves of the signed message are attacker-controlled, so emitting
+// HMAC(secret, msg) for a caller-chosen msg -- even truncated to a few hex
+// characters -- is a chosen-message oracle: every rejected request hands out
+// verified bits of the correct MAC for a message the attacker picked.
+func TestHMACAuth_StripeRejectionLogCarriesNoSecretDerivedValue(t *testing.T) {
+	secret := []byte("stripe-webhook-secret")
+	body := []byte(`{"id":"evt_123"}`)
+	now := time.Unix(1735689600, 0).UTC()
+
+	// What an oracle would have leaked: the expected MAC over the attacker's
+	// chosen message.
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(strconv.FormatInt(now.Unix(), 10) + "." + string(body)))
+	expectedMAC := hex.EncodeToString(mac.Sum(nil))
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	auth := NewHMACAuth([][]byte{secret})
+	auth.Provider = "stripe"
+	auth.Now = func() time.Time { return now }
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/stripe", bytes.NewReader(body))
+	req.Header.Set("Stripe-Signature", "t="+strconv.FormatInt(now.Unix(), 10)+",v1=deadbeef")
+
+	if err := auth.Verify(req, "/webhooks/stripe", body); err == nil {
+		t.Fatal("expected unauthorized for a bogus signature")
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "no_secret_matched") {
+		t.Fatalf("expected the no_secret_matched warning, got: %s", out)
+	}
+	// Even the first 8 hex characters must not appear.
+	if strings.Contains(out, expectedMAC[:8]) {
+		t.Fatalf("rejection log leaked a prefix of the expected MAC (%s): %s", expectedMAC[:8], out)
+	}
+	if strings.Contains(out, "want_prefix") {
+		t.Fatalf("rejection log still carries a want_prefix field: %s", out)
+	}
+}
+
+// Attacker-controlled strings must not be echoed into the log sink whole.
+func TestHMACAuth_StripeTimestampIsBoundedInLog(t *testing.T) {
+	secret := []byte("stripe-webhook-secret")
+	body := []byte(`{"id":"evt_123"}`)
+	huge := strings.Repeat("9", 4096)
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	auth := NewHMACAuth([][]byte{secret})
+	auth.Provider = "stripe"
+	auth.Now = func() time.Time { return time.Unix(1735689600, 0).UTC() }
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/webhooks/stripe", bytes.NewReader(body))
+	req.Header.Set("Stripe-Signature", "t="+huge+",v1=abcdef")
+
+	if err := auth.Verify(req, "/webhooks/stripe", body); err == nil {
+		t.Fatal("expected unauthorized for an unparseable timestamp")
+	}
+
+	out := logs.String()
+	if strings.Contains(out, huge) {
+		t.Fatalf("rejection log echoed the full %d-byte timestamp", len(huge))
+	}
+	if !strings.Contains(out, "ts_len=4096") {
+		t.Fatalf("expected the length to be reported instead, got: %s", out)
+	}
+}
+
 // signStripe produces a Stripe-style signature header value:
 // "t=<unix-ts>,<sigTag>=hex(HMAC-SHA256(secret, <ts>.<body>))"
 func signStripe(ts int64, body, secret []byte, sigTag string) string {

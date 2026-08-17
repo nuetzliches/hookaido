@@ -508,7 +508,10 @@ Provider mode uses the provider's native signature format (`X-Hub-Signature-256`
 
 ```hcl
 auth basic "username" "password"
+auth basic "webhook-user" "{env.WEBHOOK_PASSWORD}"
 ```
+
+Credentials are compared literally. The `env:` / `file:` / `vault:` / `raw:` reference syntax accepted by `auth token`, `auth hmac` and `secret` blocks is **not** resolved here and is rejected at compile time — use the `{env.NAME}` placeholder form, which is expanded when the config is compiled.
 
 **Forward auth:**
 

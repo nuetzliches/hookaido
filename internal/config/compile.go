@@ -791,6 +791,23 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth basic must include user and password", rPath))
 				continue
 			}
+			// Unlike auth token, auth hmac and secret blocks, basic-auth
+			// credentials are never passed through secrets.LoadRef -- the value
+			// here is compared literally. A config written as
+			// `auth basic "u" "env:PASSWORD"` would therefore accept the string
+			// "env:PASSWORD" as the password, silently and with no warning.
+			// Reject anything that parses as a well-formed reference rather
+			// than let that happen; the placeholder form does resolve.
+			for _, field := range []struct {
+				name  string
+				value string
+			}{{"user", user}, {"password", pass}} {
+				if secrets.ValidateRef(field.value) == nil {
+					res.Errors = append(res.Errors, fmt.Sprintf(
+						"route %q auth basic %s[%d] looks like a secret reference; basic auth compares the value literally and does not resolve env:/file:/vault:/raw: references -- use the placeholder form {env.NAME} instead",
+						rPath, field.name, j))
+				}
+			}
 			if _, ok := basicAuth[user]; ok {
 				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth basic duplicate user %q", rPath, user))
 				continue

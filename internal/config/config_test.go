@@ -1717,6 +1717,85 @@ pull_api { auth token "raw:t" }
 	}
 }
 
+// Basic-auth credentials are compared literally -- they are never passed
+// through secrets.LoadRef the way auth token, auth hmac and secret blocks are.
+// A config written with ref syntax would therefore accept the ref string
+// itself as the credential, silently. Reject it instead.
+func TestCompile_AuthBasicRejectsSecretRefSyntax(t *testing.T) {
+	cases := []struct {
+		name  string
+		creds string
+		field string
+	}{
+		{name: "env password", creds: `"ci" "env:CI_PASSWORD"`, field: "password"},
+		{name: "file password", creds: `"ci" "file:/etc/hookaido/pw"`, field: "password"},
+		{name: "vault password", creds: `"ci" "vault:secret/data/ci#pw"`, field: "password"},
+		{name: "raw password", creds: `"ci" "raw:s3cret"`, field: "password"},
+		{name: "env user", creds: `"env:CI_USER" "s3cret"`, field: "user"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []byte(`
+ingress { listen ":8080" }
+"/hooks" {
+  auth basic ` + tc.creds + `
+  pull { path "/e" }
+}
+pull_api {
+  listen ":8081"
+  auth token "raw:t"
+}
+`)
+			cfg, err := Parse(in)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			_, res := Compile(cfg)
+			if res.OK {
+				t.Fatalf("expected error for %s, got ok -- the ref string would be accepted as the credential", tc.creds)
+			}
+			if !compileErrorsContain(res.Errors, "auth basic "+tc.field+"[0] looks like a secret reference") {
+				t.Fatalf("expected secret-reference error for %s, got %#v", tc.field, res.Errors)
+			}
+		})
+	}
+}
+
+// The placeholder form does resolve for basic auth, so it must keep working --
+// it is what the error message above points operators at.
+func TestCompile_AuthBasicAcceptsPlaceholderAndLiteral(t *testing.T) {
+	t.Setenv("CI_PASSWORD", "s3cret-from-env")
+
+	for _, creds := range []string{`"ci" "{env.CI_PASSWORD}"`, `"ci" "s3cret"`} {
+		in := []byte(`
+ingress { listen ":8080" }
+"/hooks" {
+  auth basic ` + creds + `
+  pull { path "/e" }
+}
+pull_api {
+  listen ":8081"
+  auth token "raw:t"
+}
+`)
+		cfg, err := Parse(in)
+		if err != nil {
+			t.Fatalf("parse %s: %v", creds, err)
+		}
+		compiled, res := Compile(cfg)
+		if !res.OK {
+			t.Fatalf("expected ok for %s, got %#v", creds, res.Errors)
+		}
+		if len(compiled.Routes) != 1 {
+			t.Fatalf("expected 1 route, got %d", len(compiled.Routes))
+		}
+		if got := compiled.Routes[0].AuthBasic["ci"]; got == "" {
+			t.Fatalf("expected a password for user ci with %s", creds)
+		}
+	}
+}
+
 func TestCompile_PullAPIGrpcListenMustNotShareListener(t *testing.T) {
 	in := []byte(`
 ingress { listen ":8443" }

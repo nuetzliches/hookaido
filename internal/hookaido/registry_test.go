@@ -27,7 +27,7 @@ func (s stubTracingProvider) Init(context.Context, any, string, func(error)) (fu
 	return nil, nil
 }
 func (s stubTracingProvider) WrapHandler(_ string, h http.Handler) http.Handler { return h }
-func (s stubTracingProvider) HTTPClient() *http.Client                          { return nil }
+func (s stubTracingProvider) HTTPClient(http.RoundTripper) *http.Client         { return nil }
 
 type stubWorkerTransport struct{ name string }
 

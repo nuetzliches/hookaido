@@ -127,9 +127,12 @@ func (m *otelModule) WrapHandler(name string, h http.Handler) http.Handler {
 	return otelhttp.NewHandler(h, name)
 }
 
-func (m *otelModule) HTTPClient() *http.Client {
+func (m *otelModule) HTTPClient(base http.RoundTripper) *http.Client {
+	if base == nil {
+		base = http.DefaultTransport
+	}
 	return &http.Client{
-		Transport: otelhttp.NewTransport(http.DefaultTransport),
+		Transport: otelhttp.NewTransport(base),
 	}
 }
 

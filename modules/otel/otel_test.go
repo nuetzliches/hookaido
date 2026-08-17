@@ -245,7 +245,7 @@ func TestOtelModule_WrapHandler(t *testing.T) {
 
 func TestOtelModule_HTTPClient(t *testing.T) {
 	m := &otelModule{}
-	client := m.HTTPClient()
+	client := m.HTTPClient(nil)
 	if client == nil {
 		t.Fatalf("HTTPClient returned nil")
 	}

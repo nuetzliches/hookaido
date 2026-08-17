@@ -175,6 +175,17 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 	now := s.nowFn()
 	s.maybePruneLocked(now)
 
+	// drop_oldest evictions below take effect immediately, but several checks
+	// after them can still reject the enqueue. Roll the evictions back on any
+	// such path so a rejected Enqueue never destroys messages.
+	var evicted []evictedItem
+	committed := false
+	defer func() {
+		if !committed {
+			s.restoreEvictedLocked(evicted)
+		}
+	}()
+
 	if s.maxDepth > 0 {
 		activeCount := s.activeCountLocked()
 		activeDeliveredCount := s.activeDeliveredCountLocked()
@@ -182,9 +193,11 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 			if s.dropPolicy != "drop_oldest" {
 				return ErrQueueFull
 			}
-			if !s.dropOldestQueuedLocked() {
+			it, ok := s.dropOldestQueuedTrackedLocked()
+			if !ok {
 				return ErrQueueFull
 			}
+			evicted = append(evicted, it)
 			activeCount = s.activeCountLocked()
 			activeDeliveredCount = s.activeDeliveredCountLocked()
 		}
@@ -226,6 +239,7 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 	cpy := env
 	s.items[env.ID] = &cpy
 	s.order = append(s.order, env.ID)
+	committed = true
 
 	// Wake up any long-polling Dequeue calls.
 	close(s.notify)
@@ -302,11 +316,27 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 	}
 
 	// Handle depth overflow with drop_oldest.
+	//
+	// The evictions below take effect immediately, but both this loop and the
+	// memory-pressure check after it can still reject the batch. Roll them back
+	// on those paths -- otherwise a batch that enqueues nothing still destroys
+	// the messages it evicted to make room, which contradicts the
+	// all-or-nothing contract this method documents.
+	var evicted []evictedItem
+	committed := false
+	defer func() {
+		if !committed {
+			s.restoreEvictedLocked(evicted)
+		}
+	}()
+
 	if s.maxDepth > 0 {
 		for activeCount+len(prepared) > s.maxDepth || (s.deliveredRetentionMaxAge > 0 && activeDeliveredCount+len(prepared) > s.maxDepth) {
-			if !s.dropOldestQueuedLocked() {
+			it, ok := s.dropOldestQueuedTrackedLocked()
+			if !ok {
 				return 0, ErrQueueFull
 			}
+			evicted = append(evicted, it)
 			activeCount = s.activeCountLocked()
 			activeDeliveredCount = s.activeDeliveredCountLocked()
 		}
@@ -322,6 +352,7 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 		s.items[env.ID] = env
 		s.order = append(s.order, env.ID)
 	}
+	committed = true
 
 	close(s.notify)
 	s.notify = make(chan struct{})
@@ -365,6 +396,59 @@ func (s *MemoryStore) evictLocked(id string, reason string) bool {
 	}
 	s.incEvictionLocked(reason)
 	return true
+}
+
+// evictedItem captures what evictLocked removed so an admission that fails
+// afterwards can put it back.
+type evictedItem struct {
+	id     string
+	env    *Envelope
+	reason string
+}
+
+// dropOldestQueuedTrackedLocked evicts the oldest queued item and returns what
+// it removed, so the caller can undo it.
+//
+// Enqueue and EnqueueBatch are documented as all-or-nothing, yet drop_oldest
+// evictions happen before the remaining admission checks. Without an undo, an
+// enqueue that is then rejected destroys the messages it evicted to make room
+// and still reports that nothing was enqueued.
+func (s *MemoryStore) dropOldestQueuedTrackedLocked() (evictedItem, bool) {
+	for _, id := range s.order {
+		env := s.items[id]
+		if env == nil {
+			continue
+		}
+		if env.State != StateQueued {
+			continue
+		}
+		if !s.evictLocked(id, memoryEvictionReasonDropOldest) {
+			return evictedItem{}, false
+		}
+		return evictedItem{id: id, env: env, reason: memoryEvictionReasonDropOldest}, true
+	}
+	return evictedItem{}, false
+}
+
+// restoreEvictedLocked undoes evictions recorded by
+// dropOldestQueuedTrackedLocked, most recent first. evictLocked leaves s.order
+// untouched, so restoring the map entry is enough to put an item back in its
+// original position.
+func (s *MemoryStore) restoreEvictedLocked(evicted []evictedItem) {
+	for i := len(evicted) - 1; i >= 0; i-- {
+		it := evicted[i]
+		if it.env == nil {
+			continue
+		}
+		s.items[it.id] = it.env
+		if it.env.LeaseID != "" {
+			s.leases[it.env.LeaseID] = it.id
+		}
+		// The eviction never took effect, so it must not be counted.
+		if n := s.evictionsTotalByReason[it.reason]; n > 0 {
+			s.evictionsTotalByReason[it.reason] = n - 1
+		}
+	}
 }
 
 func (s *MemoryStore) incEvictionLocked(reason string) {
@@ -467,20 +551,6 @@ func envelopeRetainedBytes(env *Envelope) int64 {
 		size += int64(len(k) + len(v))
 	}
 	return size
-}
-
-func (s *MemoryStore) dropOldestQueuedLocked() bool {
-	for _, id := range s.order {
-		env := s.items[id]
-		if env == nil {
-			continue
-		}
-		if env.State != StateQueued {
-			continue
-		}
-		return s.evictLocked(id, memoryEvictionReasonDropOldest)
-	}
-	return false
 }
 
 func (s *MemoryStore) maybePruneLocked(now time.Time) {

@@ -863,18 +863,53 @@ func adminEndpointURL(api config.APIConfig, endpointPath string) (string, error)
 	return fmt.Sprintf("%s://%s%s", scheme, hostPort, joinURLPath(api.Prefix, endpointPath)), nil
 }
 
-func adminProxyClient(api config.APIConfig, timeout time.Duration) *http.Client {
-	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout: timeout,
-		}).DialContext,
+// adminEndpointIsLoopback reports whether the admin endpoint this proxy talks
+// to is on the local machine, applying the same host normalisation as
+// adminEndpointURL.
+func adminEndpointIsLoopback(api config.APIConfig) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(api.Listen))
+	if err != nil {
+		return false
 	}
-	if api.TLS.Enabled {
-		tr.TLSClientConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true, // Local operator channel, trust is managed by deployment.
-		}
+	switch strings.TrimSpace(host) {
+	case "", "0.0.0.0", "::", "[::]":
+		// adminEndpointURL rewrites these to 127.0.0.1.
+		return true
+	case "localhost":
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(strings.TrimSpace(host), "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// adminProxyTLSConfig decides whether the admin channel may skip certificate
+// verification.
+//
+// Every request on this channel carries the admin bearer token, which grants
+// unrestricted Admin API access including /secrets/*. Skipping verification
+// unconditionally — as this did — meant that anyone able to answer for a
+// non-loopback admin address received that token on the first call, and
+// admin_health is a read-role tool.
+//
+// Loopback keeps the exemption: a self-signed certificate on 127.0.0.1 is the
+// normal local setup and there is no meaningful man in the middle. Anything
+// else is verified.
+func adminProxyTLSConfig(api config.APIConfig) *tls.Config {
+	if !api.TLS.Enabled {
+		return nil
+	}
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: adminEndpointIsLoopback(api),
+	}
+}
+
+func adminProxyClient(api config.APIConfig, timeout time.Duration) *http.Client {
+	// No Proxy: this is the operator's own admin endpoint, and every request
+	// carries the admin bearer token. Routing it through an environment proxy
+	// would hand that token to a third party for no benefit.
+	tr := &http.Transport{
+		TLSClientConfig: adminProxyTLSConfig(api),
 	}
 	return &http.Client{
 		Transport: tr,
@@ -902,17 +937,11 @@ func waitForAdminHealth(compiled config.Compiled, timeout time.Duration) (string
 	}
 
 	perRequestTimeout := minDuration(timeout, time.Second)
+	// No Proxy: this is the operator's own admin endpoint, and every request
+	// carries the admin bearer token. Routing it through an environment proxy
+	// would hand that token to a third party for no benefit.
 	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout: perRequestTimeout,
-		}).DialContext,
-	}
-	if compiled.AdminAPI.TLS.Enabled {
-		tr.TLSClientConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true, // Local liveness check; cert trust can be self-managed.
-		}
+		TLSClientConfig: adminProxyTLSConfig(compiled.AdminAPI),
 	}
 
 	client := &http.Client{
@@ -970,17 +999,11 @@ func probeAdminHealthDetails(compiled config.Compiled, timeout time.Duration) (s
 	}
 
 	detailsURL := url + "?details=1"
+	// No Proxy: this is the operator's own admin endpoint, and every request
+	// carries the admin bearer token. Routing it through an environment proxy
+	// would hand that token to a third party for no benefit.
 	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout: timeout,
-		}).DialContext,
-	}
-	if compiled.AdminAPI.TLS.Enabled {
-		tr.TLSClientConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true, // Local diagnostics probe.
-		}
+		TLSClientConfig: adminProxyTLSConfig(compiled.AdminAPI),
 	}
 
 	client := &http.Client{

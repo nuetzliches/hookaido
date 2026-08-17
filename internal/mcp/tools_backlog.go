@@ -32,7 +32,11 @@ func (s *Server) toolBacklogTopQueued(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		query := url.Values{}
 		if route != "" {
 			query.Set("route", route)
@@ -74,7 +78,11 @@ func (s *Server) toolBacklogOldestQueued(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		query := url.Values{}
 		if route != "" {
 			query.Set("route", route)
@@ -146,7 +154,11 @@ func (s *Server) toolBacklogAgingSummary(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		query := url.Values{}
 		if route != "" {
 			query.Set("route", route)
@@ -261,7 +273,11 @@ func (s *Server) toolBacklogTrends(args map[string]any) (any, error) {
 		return nil, fmt.Errorf("window/step yields %d buckets; max %d", bucketCount, backlog.MaxListLimit)
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		query := url.Values{}
 		if route != "" {
 			query.Set("route", route)

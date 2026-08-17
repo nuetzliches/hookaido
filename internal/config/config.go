@@ -644,6 +644,7 @@ type Deliver struct {
 
 type ExecEnvVar struct {
 	Key         string
+	KeyQuoted   bool
 	Value       string
 	ValueQuoted bool
 }

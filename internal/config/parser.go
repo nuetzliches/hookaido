@@ -3551,7 +3551,7 @@ func (p *parser) parseDeliverBlock() (*Deliver, error) {
 				ValueQuoted: valueQuoted,
 			})
 		case "env":
-			key, _, err := p.parseValue()
+			key, keyQuoted, err := p.parseValue()
 			if err != nil {
 				return nil, err
 			}
@@ -3561,6 +3561,7 @@ func (p *parser) parseDeliverBlock() (*Deliver, error) {
 			}
 			out.ExecEnv = append(out.ExecEnv, ExecEnvVar{
 				Key:         key,
+				KeyQuoted:   keyQuoted,
 				Value:       val,
 				ValueQuoted: valQuoted,
 			})

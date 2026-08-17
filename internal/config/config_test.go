@@ -9168,3 +9168,217 @@ admin_api { listen "127.0.0.1:8080" prefix "/admin" }
 		t.Fatalf("expected co-listen auth error, got %#v", res.Errors)
 	}
 }
+
+func TestFormat_PreservesQuotedExecEnvKey(t *testing.T) {
+	// The parser used to discard the env key's quoted flag and the formatter
+	// wrote it bare, so `config fmt` emitted `env MY KEY "value"` with exit 0 --
+	// output that no longer parses. A user redirecting `config fmt` over their
+	// own file lost the config.
+	in := []byte(`
+"/x" {
+  deliver exec "/opt/hooks/run.sh" {
+    env "MY KEY" "value"
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	formatted, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	if !strings.Contains(string(formatted), `env "MY KEY" "value"`) {
+		t.Fatalf("expected the env key to stay quoted, got:\n%s", formatted)
+	}
+	if _, err := Parse(formatted); err != nil {
+		t.Fatalf("re-parse formatted config: %v\nformatted:\n%s", err, formatted)
+	}
+}
+
+func TestFormat_LeavesUnquotedExecEnvKeyUnquoted(t *testing.T) {
+	in := []byte(`
+"/x" {
+  deliver exec "/opt/hooks/run.sh" {
+    env PLAIN_KEY "value"
+  }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	formatted, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	if !strings.Contains(string(formatted), `env PLAIN_KEY "value"`) {
+		t.Fatalf("expected the env key to stay unquoted, got:\n%s", formatted)
+	}
+}
+
+func TestParseByteSize_RejectsOverflowAndOversize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int64
+		ok   bool
+	}{
+		{name: "plain bytes", in: "1024", want: 1024, ok: true},
+		{name: "kb", in: "64kb", want: 64 << 10, ok: true},
+		{name: "mb", in: "2mb", want: 2 << 20, ok: true},
+		{name: "gb", in: "1gb", want: 1 << 30, ok: true},
+		{name: "at the cap", in: "1024gb", want: 1 << 40, ok: true},
+		// v*mult used to wrap onto a small positive: this yielded 1024, so the
+		// config read as an enormous limit while every body over 1 KiB got a 413.
+		{name: "overflow onto small positive", in: "18014398509481985k"},
+		{name: "overflow onto negative", in: "9007199254740993k"},
+		{name: "above the cap", in: "2048gb"},
+		{name: "zero", in: "0"},
+		{name: "negative", in: "-1"},
+		{name: "empty", in: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseByteSize(tc.in)
+			if !tc.ok {
+				if err == nil {
+					t.Fatalf("parseByteSize(%q) = %d, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseByteSize(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseByteSize(%q) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompile_RejectsOverflowingMaxBody(t *testing.T) {
+	in := []byte(`
+defaults { max_body 18014398509481985k }
+
+"/x" {
+  deliver "https://a.example.com/x" { }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if res.OK {
+		t.Fatalf("expected error, got ok")
+	}
+	if !compileErrorsContain(res.Errors, "max_body") {
+		t.Fatalf("expected a max_body error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_CatchAllRouteCollidesWithCoListeningAPIPrefix(t *testing.T) {
+	// "/" matches every request path, so prefixMux would route /pull/anything to
+	// the pull API (401) while the catch-all route received nothing.
+	in := []byte(`
+ingress { listen ":8080" }
+pull_api { listen ":8080" prefix "/pull" auth token "raw:t" }
+
+"/" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !compileErrorsContain(res.Errors, `ingress route path "/" collides with pull_api.prefix "/pull"`) {
+		t.Fatalf("expected catch-all collision error, got %#v", res.Errors)
+	}
+}
+
+func TestCompile_CatchAllRouteIsFineOnADedicatedIngressPort(t *testing.T) {
+	// Nothing co-listens, so there is no prefix for "/" to collide with.
+	in := []byte(`
+ingress { listen ":8080" }
+pull_api { listen ":9443" prefix "/pull" auth token "raw:t" }
+
+"/" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+}
+
+func TestCompile_RejectsAliasedListenAddresses(t *testing.T) {
+	cases := []struct {
+		name      string
+		ingress   string
+		admin     string
+		wantError bool
+	}{
+		{name: "port only vs ipv4 wildcard", ingress: ":8080", admin: "0.0.0.0:8080", wantError: true},
+		{name: "port only vs ipv6 wildcard", ingress: ":8080", admin: "[::]:8080", wantError: true},
+		{name: "ipv4 wildcard vs ipv6 wildcard", ingress: "0.0.0.0:8080", admin: "[::]:8080", wantError: true},
+		// Identical strings are the documented way to opt into co-listening.
+		{name: "identical strings", ingress: ":8080", admin: ":8080", wantError: false},
+		{name: "different ports", ingress: ":8080", admin: ":2019", wantError: false},
+		// A wildcard and a specific address are not equated: they conflict at
+		// bind time on Linux but can both be bound on Windows.
+		{name: "wildcard vs loopback", ingress: ":8080", admin: "127.0.0.1:8080", wantError: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := fmt.Sprintf(`
+ingress { listen %q }
+admin_api { listen %q prefix "/admin" auth token "raw:a" }
+
+"/x" {
+  deliver "https://a.example.com/x" { }
+}
+`, tc.ingress, tc.admin)
+			cfg, err := Parse([]byte(src))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			_, res := Compile(cfg)
+			got := compileErrorsContain(res.Errors, "are the same bind address")
+			if got != tc.wantError {
+				t.Fatalf("aliased-listen error = %v, want %v (errors: %#v)", got, tc.wantError, res.Errors)
+			}
+		})
+	}
+}
+
+func TestCompile_DetectsAliasedDedicatedListeners(t *testing.T) {
+	// grpc_listen and metrics.listen always stay dedicated; the conflict checks
+	// used == on raw strings and missed the aliased spelling.
+	in := []byte(`
+ingress { listen "0.0.0.0:9943" }
+pull_api { grpc_listen ":9943" auth token "raw:t" }
+
+"/x" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !compileErrorsContain(res.Errors, "pull_api.grpc_listen must not share a listener") {
+		t.Fatalf("expected grpc_listen conflict error, got %#v", res.Errors)
+	}
+}

@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Security
+
+- **Every HTTP listener now sets `ReadHeaderTimeout` and `IdleTimeout`** ([#203](https://github.com/nuetzliches/hookaido/issues/203)). Both `http.Server` constructions — the shared/per-component ingress, pull_api and admin_api servers, and the metrics server — were built without any timeout, so a client dribbling one header byte at a time pinned a goroutine and a file descriptor indefinitely (Slowloris). Ingress is the component most likely to face the open internet, and nothing else bounded header read time. Servers are now built through a single `newHTTPServer` helper with a 15s header-read and 120s idle timeout, and a test guards that no listener is constructed around it. `ReadTimeout` and `WriteTimeout` remain deliberately unset — a write deadline would truncate the Pull API's SSE stream, and a read deadline would cap the time available to receive a legitimate `max_body`-sized payload over a slow link.
+
 ### Fixed
 
 - **Push delivery never fired on the Postgres queue backend** ([#200](https://github.com/nuetzliches/hookaido/issues/200)). `Dequeue` filtered unconditionally on `route = $1 AND target = $2`, while the memory and SQLite backends treat an empty field as "any". The push dispatcher relies on that wildcard — it dequeues per route without naming a target and resolves the target per item afterwards — so on Postgres the query resolved to `target = ''` and matched nothing. Ingress enqueued normally, nothing was ever delivered, and the backlog grew until `max_depth` began rejecting, with no error logged because the queue simply looked empty to the dispatcher. Pull routes were unaffected, since those pass an explicit target. The `WHERE` clause is now built conditionally, matching the other two backends and the existing `ListMessages` query in the same file. A new `queue.Store` contract case covers all three wildcard combinations — every pre-existing contract test named both fields explicitly, which is why the divergence went unnoticed.

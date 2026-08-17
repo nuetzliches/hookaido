@@ -46,6 +46,43 @@ const backlogTrendCaptureInterval = time.Minute
 // windows can file a follow-up if the constant is too slack or too eager.
 const secretGCInterval = 5 * time.Minute
 
+// HTTP server timeouts, applied to every listener this process creates via
+// newHTTPServer.
+//
+// httpReadHeaderTimeout is the one that matters for exposure: without it a
+// client dribbling one header byte at a time pins a goroutine and a file
+// descriptor indefinitely (Slowloris), and ingress is the component most likely
+// to face the open internet. Headers are small, so 15s is generous even over a
+// bad link.
+//
+// httpIdleTimeout bounds how long a keep-alive connection may sit between
+// requests. It does not affect an in-flight response, so the Pull API's SSE
+// stream is unaffected.
+//
+// ReadTimeout and WriteTimeout are deliberately left unset. WriteTimeout would
+// truncate that SSE stream, which is long-lived by design, and ReadTimeout
+// would cap the time available to read a legitimate max_body-sized payload over
+// a slow link. Neither is needed for the exhaustion case the two timeouts above
+// close. Intentionally not configurable — file a follow-up if a deployment
+// needs different values.
+const (
+	httpReadHeaderTimeout = 15 * time.Second
+	httpIdleTimeout       = 120 * time.Second
+)
+
+// newHTTPServer builds an http.Server with the timeouts every listener in this
+// process shares. Construct servers through this helper rather than with a
+// bare &http.Server{} literal, so a new listener cannot silently ship without
+// them.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
+}
+
 func run() int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -2394,7 +2431,7 @@ func startServers(
 		}
 		entries = append(entries, serverEntry{
 			name: groupName(members),
-			srv:  &http.Server{Addr: addr, Handler: handler},
+			srv:  newHTTPServer(addr, handler),
 			ln:   ln,
 		})
 	}
@@ -2458,10 +2495,7 @@ func startServers(
 		if accessLogger != nil {
 			metricsHandler = withAccessLog(accessLogger.With(slog.String("component", "metrics")), metricsHandler)
 		}
-		metricsSrv := &http.Server{
-			Addr:    compiled.Observability.Metrics.Listen,
-			Handler: metricsHandler,
-		}
+		metricsSrv := newHTTPServer(compiled.Observability.Metrics.Listen, metricsHandler)
 		servers = append(servers, metricsSrv)
 		serveOnListener(runtimeLogger, "metrics", metricsSrv, metricsLn, cancel)
 	}

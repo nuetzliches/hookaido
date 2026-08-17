@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nuetzliches/hookaido/v2/internal/config"
+	"github.com/nuetzliches/hookaido/v2/internal/httpheader"
 	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
@@ -124,16 +125,8 @@ func BearerTokenAuthorizer(tokens [][]byte) Authorizer {
 			return true
 		}
 
-		h := r.Header.Get("Authorization")
-		if h == "" {
-			return false
-		}
-		const prefix = "Bearer "
-		if !strings.HasPrefix(h, prefix) {
-			return false
-		}
-		got := strings.TrimSpace(strings.TrimPrefix(h, prefix))
-		if got == "" {
+		got, ok := httpheader.ParseBearerToken(r.Header.Get("Authorization"))
+		if !ok {
 			return false
 		}
 		gb := []byte(got)

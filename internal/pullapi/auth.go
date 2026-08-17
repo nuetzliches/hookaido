@@ -3,7 +3,8 @@ package pullapi
 import (
 	"crypto/subtle"
 	"net/http"
-	"strings"
+
+	"github.com/nuetzliches/hookaido/v2/internal/httpheader"
 )
 
 type Authorizer func(r *http.Request) bool
@@ -24,16 +25,8 @@ func BearerTokenAuthorizer(tokens [][]byte) Authorizer {
 			return true
 		}
 
-		h := r.Header.Get("Authorization")
-		if h == "" {
-			return false
-		}
-		const prefix = "Bearer "
-		if !strings.HasPrefix(h, prefix) {
-			return false
-		}
-		got := strings.TrimSpace(strings.TrimPrefix(h, prefix))
-		if got == "" {
+		got, ok := httpheader.ParseBearerToken(r.Header.Get("Authorization"))
+		if !ok {
 			return false
 		}
 		gb := []byte(got)

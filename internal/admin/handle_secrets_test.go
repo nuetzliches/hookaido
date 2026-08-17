@@ -347,6 +347,44 @@ func TestHandleSecretDelete_MissingID_Reports404(t *testing.T) {
 	}
 }
 
+// A failing persist must leave the live pool untouched, mirroring the add path,
+// which rolls the record back when the pool rejects the secret.
+//
+// The pool used to be mutated first, so a persist failure returned 500 -- which
+// the caller reads as "nothing happened" -- while the secret was already revoked
+// from the running process. Signature verification for senders still using it
+// broke immediately, and the secret came back on the next restart because the
+// record was never removed.
+func TestHandleSecretDelete_PersistFailureLeavesPoolIntact(t *testing.T) {
+	fx := newSecretTestFixture(t, true)
+	fx.server.DeleteSecretRecord = func(pool, id string) (bool, error) {
+		return false, errors.New("database is unavailable")
+	}
+
+	const id = "sec_1"
+	if err := fx.pool.Add(id, []byte("s3cret"), time.Time{}, time.Time{}); err != nil {
+		t.Fatalf("seed pool: %v", err)
+	}
+	if len(fx.pool.ListMetadata()) != 1 {
+		t.Fatalf("seed failed: pool has %d versions, want 1", len(fx.pool.ListMetadata()))
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "http://example/secrets/cituro/"+id, nil)
+	req.Header.Set("X-Hookaido-Audit-Reason", "revoke")
+	rr := httptest.NewRecorder()
+	fx.server.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s, want 500", rr.Code, rr.Body.String())
+	}
+	if got := len(fx.pool.ListMetadata()); got != 1 {
+		t.Fatalf("pool has %d versions after a failed delete, want 1 -- the secret was revoked from the running process while the caller was told the delete failed", got)
+	}
+	if len(fx.auditCalls) != 0 {
+		t.Fatalf("emitted %d audit events for a failed delete, want 0", len(fx.auditCalls))
+	}
+}
+
 func TestParseSecretResourcePath(t *testing.T) {
 	cases := []struct {
 		path   string

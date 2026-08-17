@@ -1689,6 +1689,40 @@ func TestServer_DLQAuth(t *testing.T) {
 	}
 }
 
+// The Bearer auth-scheme token is case-insensitive per RFC 7235, and the gRPC
+// worker API already accepted it that way. The Admin API required exactly
+// "Bearer ", so the same credential worked on one transport and not the other.
+func TestServer_BearerAuthSchemeIsCaseInsensitive(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "canonical", header: "Bearer secret", want: http.StatusOK},
+		{name: "lowercase", header: "bearer secret", want: http.StatusOK},
+		{name: "uppercase", header: "BEARER secret", want: http.StatusOK},
+		{name: "leading whitespace", header: "  Bearer secret", want: http.StatusOK},
+		{name: "wrong scheme", header: "Token secret", want: http.StatusUnauthorized},
+		{name: "wrong token", header: "Bearer nope", want: http.StatusUnauthorized},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer(queue.NewMemoryStore())
+			srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("secret")})
+
+			req := httptest.NewRequest(http.MethodGet, "http://example/dlq", nil)
+			req.Header.Set("Authorization", tc.header)
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			if rr.Code != tc.want {
+				t.Fatalf("Authorization %q: got %d, want %d", tc.header, rr.Code, tc.want)
+			}
+		})
+	}
+}
+
 func TestServer_HealthzBypassesAuth(t *testing.T) {
 	srv := NewServer(queue.NewMemoryStore())
 	srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("secret")})

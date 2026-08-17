@@ -3,9 +3,10 @@ package workerapi
 import (
 	"context"
 	"crypto/subtle"
-	"strings"
 
 	"google.golang.org/grpc/metadata"
+
+	"github.com/nuetzliches/hookaido/v2/internal/httpheader"
 )
 
 // Authorizer decides whether a worker API request is authorized.
@@ -34,7 +35,7 @@ func BearerTokenAuthorizer(tokens [][]byte) Authorizer {
 		}
 		values := md.Get("authorization")
 		for _, raw := range values {
-			token, ok := parseBearerToken(raw)
+			token, ok := httpheader.ParseBearerToken(raw)
 			if !ok {
 				continue
 			}
@@ -47,19 +48,4 @@ func BearerTokenAuthorizer(tokens [][]byte) Authorizer {
 		}
 		return false
 	}
-}
-
-func parseBearerToken(raw string) (string, bool) {
-	h := strings.TrimSpace(raw)
-	if len(h) < 7 {
-		return "", false
-	}
-	if !strings.EqualFold(h[:7], "Bearer ") {
-		return "", false
-	}
-	token := strings.TrimSpace(h[7:])
-	if token == "" {
-		return "", false
-	}
-	return token, true
 }

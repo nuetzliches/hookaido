@@ -64,8 +64,14 @@ Provider mode is mutually exclusive with `signature_header`, `timestamp_header`,
 ### Basic Auth
 
 ```hcl
-auth basic "webhook-user" "env:WEBHOOK_PASSWORD"
+auth basic "webhook-user" "{env.WEBHOOK_PASSWORD}"
 ```
+
+Basic-auth credentials are compared literally — the `env:` / `file:` / `vault:` /
+`raw:` reference syntax used by `auth token`, `auth hmac` and `secret` blocks is
+**not** resolved here. Use the `{env.NAME}` placeholder form, which is expanded
+at compile time. Reference syntax is rejected at compile time; see
+[Ingress → Basic Auth](ingress.md#basic-auth).
 
 ### Forward Auth
 

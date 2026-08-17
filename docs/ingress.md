@@ -153,10 +153,21 @@ When `provider` is set, `signature_header`, `timestamp_header`, `nonce_header`, 
 
 ```hcl
 /webhooks/simple {
-  auth basic "webhook-user" "env:WEBHOOK_PASSWORD"
+  auth basic "webhook-user" "{env.WEBHOOK_PASSWORD}"
   pull { path /pull/simple }
 }
 ```
+
+!!! warning "Basic auth does not take secret references"
+
+    Unlike `auth token`, `auth hmac` and `secret` blocks, basic-auth credentials
+    are compared **literally**. The `env:` / `file:` / `vault:` / `raw:` reference
+    syntax is not resolved here — use the `{env.NAME}` placeholder form shown
+    above, which is expanded at compile time.
+
+    Configs using reference syntax are rejected at compile time. Before that
+    check existed, `auth basic "u" "env:PASSWORD"` silently accepted the string
+    `env:PASSWORD` as the password.
 
 ### Forward Auth
 

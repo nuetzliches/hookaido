@@ -54,6 +54,7 @@ nav:
   - Home: index.md
   - Start Here:
       - Getting Started: getting-started.md
+      - Use Cases: usecases.md
       - Deployment Modes: deployment-modes.md
       - Docker: docker.md
       - Recipes: recipes.md
@@ -81,5 +82,6 @@ extra_css:
 
 extra_javascript:
   - assets/javascripts/command-palette.js
+  - assets/javascripts/usecases-embed.js
 
 docs_dir: docs

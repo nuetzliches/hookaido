@@ -190,10 +190,12 @@ admin_api {
 
 | Directive    | Default          | Description                         |
 | ------------ | ---------------- | ----------------------------------- |
-| `listen`     | `127.0.0.1:2019` | Bind address                        |
-| `prefix`     | —                | URL path prefix                     |
-| `auth token` | —                | Optional bearer token allowlist     |
-| `tls`        | —                | TLS and optional mTLS configuration |
+| `listen`     | `127.0.0.1:2019` | Bind address                                            |
+| `prefix`     | —                | URL path prefix                                         |
+| `auth token` | —                | Bearer token allowlist; required off loopback (see below) |
+| `tls`        | —                | TLS and optional mTLS configuration                     |
+
+> **`auth token` is mandatory unless the listener is loopback-only.** An empty token list authorizes every request, and the Admin API is a full control plane — DLQ delete, `messages/publish`, `cancel_by_filter`, and management-endpoint mutations that rewrite the Hookaidofile and trigger a reload. `config validate` therefore rejects an `admin_api` with no `auth token` when `listen` is anything other than a loopback address (`127.0.0.0/8`, `::1`, `localhost`) — including the wildcard forms `:2019`, `0.0.0.0:2019` and `[::]:2019` — or when it co-listens with `ingress`. A hostname that is not `localhost` cannot be resolved at compile time and is treated as non-loopback.
 
 > **Shared listener (single-port deployments):** `ingress`, `pull_api`, and `admin_api` can share one port by giving them the same `listen` address — Hookaido then serves them on a single listener and dispatches by path prefix. Ingress serves its bare route paths (e.g. `/webhooks/...`) as the default handler, while the co-listening API servers serve under their `prefix` values (e.g. `/pull`, `/admin`). This is strictly opt-in (inferred from equal `listen` addresses); separate ports remain the default and recommended posture.
 >
@@ -448,6 +450,7 @@ Each route block defines a webhook endpoint path and its processing pipeline:
 - `"/path"` matches `/path` and `/path/...` (segment boundary), but not `/path-foo`.
 - Route paths must be unique (path is the queue key).
 - Match criteria within a route are ANDed.
+- A route that an **earlier route provably shadows is rejected**. Because matching is prefix-based and first-match-wins, a route sitting underneath an earlier one — `/hooks/github` after `/hooks`, or anything after a `/` catch-all — can never be reached: every request that would select it is answered by the earlier route, with that route's auth and targets. Put the more specific path first. An earlier route that carries `match` criteria can legitimately act as a filter and let the rest fall through, so only an unconstrained earlier route shadows.
 
 ### Named Matchers
 

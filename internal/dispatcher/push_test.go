@@ -701,6 +701,89 @@ func (s *batchLeaseMutationStore) snapshot() (ackCalls int, ackBatchCalls int, a
 	return s.ackCalls, s.ackBatchCalls, ackBatchIDs
 }
 
+// stopAfterNDeliverer closes stop once it has delivered n messages, so a batch
+// can be interrupted at a known index.
+type stopAfterNDeliverer struct {
+	mu    sync.Mutex
+	n     int
+	count int
+	stop  chan struct{}
+	once  sync.Once
+}
+
+func (d *stopAfterNDeliverer) Deliver(_ context.Context, _ Delivery) Result {
+	d.mu.Lock()
+	d.count++
+	reached := d.count >= d.n
+	d.mu.Unlock()
+	if reached {
+		d.once.Do(func() { close(d.stop) })
+	}
+	return Result{StatusCode: 200}
+}
+
+// A stop signal landing mid-batch must not discard the lease actions already
+// accumulated for items that were delivered successfully. Dropping them leaves
+// those leases held until the TTL expires, after which the messages are
+// dequeued and delivered a second time.
+func TestRunRoute_StopMidBatchFlushesPendingLeaseActions(t *testing.T) {
+	items := make([]queue.Envelope, 0, 4)
+	for i := 1; i <= 4; i++ {
+		items = append(items, queue.Envelope{
+			ID:      "evt-" + strconv.Itoa(i),
+			Route:   "/test",
+			Target:  "https://known-target",
+			LeaseID: "lease-" + strconv.Itoa(i),
+			Attempt: 1,
+			Payload: []byte(`{}`),
+		})
+	}
+	store := &batchLeaseMutationStore{items: items}
+	d := PushDispatcher{
+		Store:  store,
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		stopCh: make(chan struct{}),
+	}
+	// Stop after the second delivery, so items 3 and 4 are requeued while the
+	// acks for items 1 and 2 are still pending in the batch buffer. The
+	// mutation batch size is 4, so nothing has been flushed yet.
+	d.Deliverer = &stopAfterNDeliverer{n: 2, stop: d.stopCh}
+	d.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		d.runRoute(
+			d.Logger,
+			"/test",
+			map[string]TargetConfig{
+				"https://known-target": {URL: "https://known-target", Timeout: 5 * time.Second},
+			},
+			20*time.Millisecond,
+			30*time.Second,
+			4,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRoute did not stop after stop signal")
+	}
+
+	_, _, ackBatchIDs := store.snapshot()
+	want := []string{"lease-1", "lease-2"}
+	if len(ackBatchIDs) != len(want) {
+		t.Fatalf("acked leases=%v, want %v -- deliveries that completed before the stop must still be acked, "+
+			"otherwise their leases expire and the messages are delivered twice", ackBatchIDs, want)
+	}
+	for i := range want {
+		if ackBatchIDs[i] != want[i] {
+			t.Fatalf("acked leases=%v, want %v", ackBatchIDs, want)
+		}
+	}
+}
+
 func TestRunRoute_UsesAckBatchWhenStoreSupportsLeaseBatch(t *testing.T) {
 	store := &batchLeaseMutationStore{
 		items: []queue.Envelope{

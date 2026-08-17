@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **Graceful shutdown mid-batch no longer causes duplicate delivery** ([#201](https://github.com/nuetzliches/hookaido/issues/201)). On single-target routes the dispatcher accumulates lease actions and flushed them only when the mutation batch filled or the batch loop finished. A stop signal arriving mid-batch requeued the unprocessed tail and returned immediately, discarding every pending ack, nack and mark-dead for items that had *already* been delivered. Those leases then sat untouched until the lease TTL expired (70s with defaults), after which the messages were dequeued and delivered a second time; items classified dead in the same window were redelivered instead of dead-lettered. Reachable with stock configuration — `deliver_concurrency 20` yields a dequeue and mutation batch of 4 — so it fired on any graceful restart or delivery-config reload that landed mid-batch. The batch loop now lives in its own function with the flush on a `defer`, so no early exit can drop pending actions.
+
 ### Security
 
 - The `hmac_stripe_failed` / `reason=parse_incomplete` rejection log no longer contains the raw signature header. Previously the `header_value` field carried the untouched `cfg.Header` value, so a request that omitted `t=` but supplied a full `v1=<64 hex chars>` signature wrote that signature verbatim into the WARN log — an attacker-triggerable path, since malformed input is exactly what reaches it. The field is replaced by `pairs_parsed` (number of `k=v` pairs found) and `header_value_len`, which together with the already-logged, config-derived `sig_tag` still identify the realistic cause: the sender emits a different tag name than the route expects. This restores the fingerprints-only contract the other five rejection paths already followed. Reported by CodeQL as `go/clear-text-logging`.

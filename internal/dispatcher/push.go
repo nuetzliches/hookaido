@@ -207,7 +207,6 @@ func (d *PushDispatcher) runRoute(
 		logger = slog.Default()
 	}
 
-	const missingTargetBackoff = time.Second
 	if dequeueBatch <= 0 {
 		dequeueBatch = 1
 	}
@@ -239,49 +238,74 @@ func (d *PushDispatcher) runRoute(
 			continue
 		}
 
-		mutationBatch := routeMutationBatch(dequeueBatch)
-		actions := make([]leaseAction, 0, mutationBatch)
-		for i, env := range resp.Items {
-			select {
-			case <-d.stopCh:
-				d.requeueLeases(logger, resp.Items[i:], 0, "dispatcher_stop_requeue_failed")
-				return
-			default:
-			}
-
-			target, ok := targetsByURL[env.Target]
-			if !ok {
-				logger.Warn("dispatcher_target_config_missing",
-					slog.String("route", env.Route),
-					slog.String("target", env.Target),
-					slog.String("lease_id", env.LeaseID),
-				)
-				d.applyLeaseAction(logger, leaseAction{
-					kind:             leaseActionNack,
-					route:            env.Route,
-					target:           env.Target,
-					leaseID:          env.LeaseID,
-					delay:            missingTargetBackoff,
-					tolerateNotFound: true,
-				})
-				continue
-			}
-			action := d.classifyDelivery(logger, env, target)
-			if !useBatchMutations {
-				d.applyLeaseAction(logger, action)
-				continue
-			}
-			actions = append(actions, action)
-			if len(actions) >= mutationBatch {
-				d.applyLeaseActions(logger, actions)
-				actions = actions[:0]
-			}
+		if d.deliverBatch(logger, resp.Items, targetsByURL, useBatchMutations, routeMutationBatch(dequeueBatch)) {
+			return
 		}
+	}
+}
 
+// deliverBatch delivers one dequeued batch and reports whether the dispatcher
+// was asked to stop part-way through.
+//
+// Pending lease actions are flushed from a defer rather than after the loop.
+// An early return must not drop the acks for items that were already
+// delivered: those leases would sit untouched until the lease TTL expires and
+// the messages would then be delivered a second time. The stop branch below is
+// the path that used to do exactly that, and a defer keeps any future early
+// exit from reintroducing it.
+func (d *PushDispatcher) deliverBatch(
+	logger *slog.Logger,
+	items []queue.Envelope,
+	targetsByURL map[string]TargetConfig,
+	useBatchMutations bool,
+	mutationBatch int,
+) (stopped bool) {
+	const missingTargetBackoff = time.Second
+
+	actions := make([]leaseAction, 0, mutationBatch)
+	defer func() {
 		if useBatchMutations && len(actions) > 0 {
 			d.applyLeaseActions(logger, actions)
 		}
+	}()
+
+	for i, env := range items {
+		select {
+		case <-d.stopCh:
+			d.requeueLeases(logger, items[i:], 0, "dispatcher_stop_requeue_failed")
+			return true
+		default:
+		}
+
+		target, ok := targetsByURL[env.Target]
+		if !ok {
+			logger.Warn("dispatcher_target_config_missing",
+				slog.String("route", env.Route),
+				slog.String("target", env.Target),
+				slog.String("lease_id", env.LeaseID),
+			)
+			d.applyLeaseAction(logger, leaseAction{
+				kind:             leaseActionNack,
+				route:            env.Route,
+				target:           env.Target,
+				leaseID:          env.LeaseID,
+				delay:            missingTargetBackoff,
+				tolerateNotFound: true,
+			})
+			continue
+		}
+		action := d.classifyDelivery(logger, env, target)
+		if !useBatchMutations {
+			d.applyLeaseAction(logger, action)
+			continue
+		}
+		actions = append(actions, action)
+		if len(actions) >= mutationBatch {
+			d.applyLeaseActions(logger, actions)
+			actions = actions[:0]
+		}
 	}
+	return false
 }
 
 func (d *PushDispatcher) requeueLeases(logger *slog.Logger, items []queue.Envelope, delay time.Duration, warnMsg string) {

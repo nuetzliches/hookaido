@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -305,6 +307,7 @@ func TestToolMutationAuditEventSuccess(t *testing.T) {
 	args := map[string]any{
 		"content": `"/r" { deliver "https://example.com" {} }`,
 		"mode":    "preview_only",
+		"reason":  "audit test",
 	}
 	resp := callTool(t, s, "config_apply", args)
 	if resp.IsError {
@@ -1874,6 +1877,7 @@ func TestToolConfigApplyPreviewOnly(t *testing.T) {
 		"path":    cfgPath,
 		"content": candidate,
 		"mode":    "preview_only",
+		"reason":  "apply test",
 	})
 	if resp.IsError {
 		t.Fatalf("unexpected config_apply error: %s", resp.Content[0].Text)
@@ -1917,6 +1921,7 @@ func TestToolConfigApplyWriteOnly(t *testing.T) {
 		"path":    cfgPath,
 		"content": candidate,
 		"mode":    "write_only",
+		"reason":  "apply test",
 	})
 	if resp.IsError {
 		t.Fatalf("unexpected config_apply error: %s", resp.Content[0].Text)
@@ -1956,6 +1961,7 @@ func TestToolConfigApplyInvalidCandidate(t *testing.T) {
 		"path":    cfgPath,
 		"content": `"/r" {`,
 		"mode":    "write_only",
+		"reason":  "apply test",
 	})
 	if resp.IsError {
 		t.Fatalf("unexpected config_apply tool error: %s", resp.Content[0].Text)
@@ -2040,6 +2046,7 @@ func TestToolConfigApplyWriteAndReloadSuccess(t *testing.T) {
 		"content":        candidate,
 		"mode":           "write_and_reload",
 		"reload_timeout": "2s",
+		"reason":         "apply test",
 	})
 	if resp.IsError {
 		t.Fatalf("unexpected config_apply error: %s", resp.Content[0].Text)
@@ -2131,6 +2138,7 @@ func TestToolConfigApplyWriteAndReloadRollback(t *testing.T) {
 		"content":        candidate,
 		"mode":           "write_and_reload",
 		"reload_timeout": "300ms",
+		"reason":         "apply test",
 	})
 	if resp.IsError {
 		t.Fatalf("unexpected config_apply error: %s", resp.Content[0].Text)
@@ -11968,4 +11976,190 @@ func callTool(t *testing.T, s *Server, name string, args map[string]any) toolsCa
 		t.Fatalf("unexpected result type %T", resp.Result)
 	}
 	return result
+}
+
+// A Hookaidofile that does not parse is a policy that cannot be read, not a
+// policy that is off. It used to be reported the same way as "fail_closed off",
+// which both callers took as permission to proceed -- so with fail_closed on and
+// a syntax error, a scoped-managed mutation ran unguarded.
+func TestToolIDMutationsFailClosedWhenConfigDoesNotParse(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(`
+defaults {
+  publish_policy {
+    fail_closed on
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	s := NewServer(nil, nil, cfgPath, "", WithMutationsEnabled(true), WithRole(RoleAdmin), WithPrincipal("test-admin"))
+	resp := callTool(t, s, "messages_cancel", map[string]any{
+		"ids":    []any{"evt_managed_1"},
+		"reason": "operator_cleanup",
+	})
+	if !resp.IsError {
+		t.Fatalf("expected fail-closed error when the config does not parse")
+	}
+	if len(resp.Content) == 0 || !strings.Contains(resp.Content[0].Text, "cannot evaluate scoped managed id mutation policy") {
+		t.Fatalf("expected fail-closed policy error text, got %#v", resp.Content)
+	}
+}
+
+func TestToolFilterMutationsFailClosedWhenConfigDoesNotParse(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(`"/managed" { pull { path "/p"`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	s := NewServer(nil, nil, cfgPath, "", WithMutationsEnabled(true), WithRole(RoleAdmin), WithPrincipal("test-admin"))
+	resp := callTool(t, s, "messages_cancel_by_filter", map[string]any{
+		"route":  "/managed",
+		"reason": "operator_cleanup",
+	})
+	if !resp.IsError {
+		t.Fatalf("expected fail-closed error when the config does not parse")
+	}
+}
+
+func TestScopedManagedMutationsMustFailClosed(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "no publish_policy block",
+			content: `"/x" { pull { path "/p" } }`,
+			want:    false,
+		},
+		{
+			name:    "fail_closed off",
+			content: "defaults {\n  publish_policy {\n    fail_closed off\n  }\n}\n",
+			want:    false,
+		},
+		{
+			name:    "fail_closed on",
+			content: "defaults {\n  publish_policy {\n    fail_closed on\n  }\n}\n",
+			want:    true,
+		},
+		{
+			// The operator's intent is unreadable, which is precisely what
+			// fail_closed exists to decide.
+			name:    "unparseable config",
+			content: "defaults {\n  publish_policy {\n    fail_closed on\n",
+			want:    true,
+		},
+		{
+			name:    "fail_closed value is not a boolean",
+			content: "defaults {\n  publish_policy {\n    fail_closed maybe\n  }\n}\n",
+			want:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
+			if err := os.WriteFile(cfgPath, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			s := NewServer(nil, nil, cfgPath, "")
+			if got := s.scopedManagedMutationsMustFailClosed(); got != tc.want {
+				t.Fatalf("scopedManagedMutationsMustFailClosed() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("unreadable config", func(t *testing.T) {
+		s := NewServer(nil, nil, filepath.Join(t.TempDir(), "does-not-exist"), "")
+		if !s.scopedManagedMutationsMustFailClosed() {
+			t.Fatalf("expected an unreadable config to fail closed")
+		}
+	})
+
+	t.Run("no config path is standalone mode", func(t *testing.T) {
+		s := NewServer(nil, nil, "", "")
+		if s.scopedManagedMutationsMustFailClosed() {
+			t.Fatalf("expected no config path to impose no policy")
+		}
+	})
+}
+
+func TestToolConfigApplyRequiresAuditReason(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(`"/r" { deliver "https://example.com" {} }`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	s := NewServer(nil, nil, cfgPath, "", WithMutationsEnabled(true), WithRole(RoleAdmin), WithPrincipal("test-admin"))
+	resp := callTool(t, s, "config_apply", map[string]any{
+		"path":    cfgPath,
+		"content": `"/r" { deliver "https://example.com" {} }`,
+		"mode":    "preview_only",
+	})
+	if !resp.IsError {
+		t.Fatalf("expected config_apply without a reason to be rejected")
+	}
+	if len(resp.Content) == 0 || !strings.Contains(resp.Content[0].Text, "reason is required") {
+		t.Fatalf("expected a missing-reason error, got %#v", resp.Content)
+	}
+}
+
+func TestToolConfigApplyAuditMetadataCarriesReasonAndContentDigest(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "Hookaidofile")
+	content := `"/r" { deliver "https://example.com" {} }`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var audit bytes.Buffer
+	s := NewServer(
+		nil,
+		nil,
+		cfgPath,
+		"",
+		WithMutationsEnabled(true),
+		WithRole(RoleAdmin),
+		WithPrincipal("ops@example.test"),
+		WithAuditWriter(&audit),
+	)
+	resp := callTool(t, s, "config_apply", map[string]any{
+		"path":    cfgPath,
+		"content": content,
+		"mode":    "preview_only",
+		"reason":  "rotate github secret ref",
+	})
+	if resp.IsError {
+		t.Fatalf("unexpected config_apply error: %s", resp.Content[0].Text)
+	}
+
+	line := strings.TrimSpace(audit.String())
+	if line == "" {
+		t.Fatalf("expected audit event line")
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		t.Fatalf("unmarshal audit event: %v", err)
+	}
+	metadata, ok := event["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata object, got %T", event["metadata"])
+	}
+	configMeta, ok := metadata["config_mutation"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata.config_mutation object, got %T", metadata["config_mutation"])
+	}
+	if got, _ := configMeta["reason"].(string); got != "rotate github secret ref" {
+		t.Fatalf("expected the reason in the audit metadata, got %#v", configMeta["reason"])
+	}
+	sum := sha256.Sum256([]byte(content))
+	if got, _ := configMeta["content_sha256"].(string); got != hex.EncodeToString(sum[:]) {
+		t.Fatalf("expected the content digest in the audit metadata, got %#v", configMeta["content_sha256"])
+	}
+	if got := intFromAny(configMeta["content_bytes"]); got != len(content) {
+		t.Fatalf("expected content_bytes=%d, got %#v", len(content), configMeta["content_bytes"])
+	}
 }

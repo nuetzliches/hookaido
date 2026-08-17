@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,6 +67,9 @@ var (
 		"content",
 		"mode",
 		"reload_timeout",
+		"reason",
+		"actor",
+		"request_id",
 	)
 	managementEndpointUpsertAllowedKeys = keySet(
 		"path",
@@ -958,6 +962,24 @@ func configMutationAuditMetadata(name string, out any, args map[string]any) map[
 			if raw, ok := stringFromAny(args["path"]); ok && raw != "" {
 				meta["path"] = raw
 			}
+			if raw, ok := stringFromAny(args["reason"]); ok && raw != "" {
+				meta["reason"] = raw
+			}
+			if raw, ok := stringFromAny(args["actor"]); ok && raw != "" {
+				meta["actor"] = raw
+			}
+			if raw, ok := stringFromAny(args["request_id"]); ok && raw != "" {
+				meta["request_id"] = raw
+			}
+			// The audit event's input_hash covers the whole argument object, so
+			// it changes with the reason or the mode too. A digest of the content
+			// alone lets a reviewer confirm which config text was applied, and
+			// match two applies that carried the same file.
+			if raw, ok := stringFromAny(args["content"]); ok && raw != "" {
+				sum := sha256.Sum256([]byte(raw))
+				meta["content_sha256"] = hex.EncodeToString(sum[:])
+				meta["content_bytes"] = len(raw)
+			}
 		}
 		meta["mode"] = mode
 		if outMap, ok := out.(map[string]any); ok {
@@ -1373,8 +1395,18 @@ func (s *Server) toolDescriptors() []toolDescriptor {
 							"type":        "string",
 							"description": "Duration for write_and_reload health check (default 5s)",
 						},
+						"reason": map[string]any{
+							"type":        "string",
+							"description": "Required audit reason (maps to X-Hookaido-Audit-Reason semantics)",
+						},
+						"actor": map[string]any{
+							"type": "string",
+						},
+						"request_id": map[string]any{
+							"type": "string",
+						},
 					},
-					"required":             []string{"content"},
+					"required":             []string{"content", "reason"},
 					"additionalProperties": false,
 				},
 			},
@@ -1953,7 +1985,7 @@ func (s *Server) resolveIDMutationPolicyContext() (idMutationPolicyContext, erro
 		return out, nil
 	}
 
-	if enabled, known := s.scopedManagedFailClosedFromRawConfig(); known && enabled {
+	if s.scopedManagedMutationsMustFailClosed() {
 		if err != nil {
 			return out, fmt.Errorf("cannot evaluate scoped managed id mutation policy: %w", err)
 		}
@@ -1997,7 +2029,7 @@ func (s *Server) validateRouteScopedManagedAuditPolicyForFilterMutation(audit mu
 		return validateScopedManagedAuditPolicyForFilterMutation(audit, route, "", "", compiled)
 	}
 
-	if enabled, known := s.scopedManagedFailClosedFromRawConfig(); known && enabled {
+	if s.scopedManagedMutationsMustFailClosed() {
 		if err != nil {
 			return fmt.Errorf("cannot evaluate scoped managed filter mutation policy: %w", err)
 		}
@@ -2006,28 +2038,52 @@ func (s *Server) validateRouteScopedManagedAuditPolicyForFilterMutation(audit mu
 	return nil
 }
 
-func (s *Server) scopedManagedFailClosedFromRawConfig() (bool, bool) {
+// scopedManagedMutationsMustFailClosed reports whether a scoped-managed
+// mutation has to refuse because the publish policy cannot be confirmed to
+// permit it.
+//
+// Callers reach this only after the config has already failed to compile, so
+// the question left is what `defaults { publish_policy { fail_closed } }` says.
+// This used to answer with an (enabled, known) pair, and reported "could not
+// determine" identically to "determined to be off" — which both callers read as
+// permission to proceed. A compile failure therefore failed closed as intended
+// while a *parse* failure did not: with `fail_closed on` and a syntax error in
+// the Hookaidofile, an operate-role session could run `messages_cancel` against
+// a managed route with an actor that is not on the allowlist.
+//
+// The two are now separated. A policy that is genuinely absent or explicitly off
+// permits the mutation; a config that cannot be read or parsed, or whose
+// fail_closed value is not a boolean, refuses it — those are exactly the cases
+// where the operator's intent is unreadable, and `fail_closed` exists to say
+// what should happen then.
+func (s *Server) scopedManagedMutationsMustFailClosed() bool {
 	p := strings.TrimSpace(s.ConfigPath)
 	if p == "" {
-		return false, false
+		// No config path at all is the documented standalone mode: there is no
+		// policy to uphold, rather than one we failed to read.
+		return false
 	}
 	data, err := os.ReadFile(p)
 	if err != nil {
-		return false, false
+		return true
 	}
 	cfg, err := config.Parse(data)
-	if err != nil || cfg == nil || cfg.Defaults == nil || cfg.Defaults.PublishPolicy == nil {
-		return false, false
+	if err != nil || cfg == nil {
+		return true
+	}
+	if cfg.Defaults == nil || cfg.Defaults.PublishPolicy == nil {
+		// No publish_policy block: fail_closed is off by default.
+		return false
 	}
 	policy := cfg.Defaults.PublishPolicy
 	if !policy.FailClosedSet {
-		return false, true
+		return false
 	}
 	val, ok := parseConfigBoolToken(policy.FailClosed)
 	if !ok {
-		return false, false
+		return true
 	}
-	return val, true
+	return val
 }
 
 func parseConfigBoolToken(raw string) (bool, bool) {

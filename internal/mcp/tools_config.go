@@ -300,6 +300,15 @@ func (s *Server) toolConfigApply(args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// config_apply is the highest-blast-radius tool in this surface — under
+	// --watch (the instance_start default) the write alone triggers a live
+	// reload — and was the only mutating one that required no reason. The audit
+	// line carried path, mode and an input hash, from which a reviewer could
+	// recover neither what was applied nor why.
+	audit, err := parseMutationAuditArgs(args, s.auditPrincipal())
+	if err != nil {
+		return nil, err
+	}
 	contentRaw, ok := args["content"]
 	if !ok {
 		return nil, errors.New("content is required")
@@ -402,6 +411,12 @@ func (s *Server) toolConfigApply(args map[string]any) (any, error) {
 		"applied":  applied,
 		"errors":   []string{},
 		"warnings": res.Warnings,
+		"audit": map[string]any{
+			"reason":     audit.Reason,
+			"actor":      audit.Actor,
+			"request_id": audit.RequestID,
+			"principal":  s.auditPrincipal(),
+		},
 	}
 	if mode == "write_and_reload" {
 		out["reload_timeout"] = reloadTimeout.String()
@@ -483,10 +498,20 @@ func (s *Server) toolManagementEndpointUpsert(args map[string]any) (any, error) 
 		return nil, err
 	}
 
+	// This tool already collected an audit reason, so the inner apply inherits
+	// it rather than demanding a second one; both audit lines then agree on why
+	// the Hookaidofile changed.
 	applyArgs := map[string]any{
 		"path":    configPath,
 		"content": string(formatted),
 		"mode":    mutationReq.Mode,
+		"reason":  mutationReq.Reason,
+	}
+	if strings.TrimSpace(mutationReq.Actor) != "" {
+		applyArgs["actor"] = mutationReq.Actor
+	}
+	if strings.TrimSpace(mutationReq.RequestID) != "" {
+		applyArgs["request_id"] = mutationReq.RequestID
 	}
 	if mutationReq.ReloadTimeout != "" {
 		applyArgs["reload_timeout"] = mutationReq.ReloadTimeout
@@ -571,10 +596,20 @@ func (s *Server) toolManagementEndpointDelete(args map[string]any) (any, error) 
 		return nil, err
 	}
 
+	// This tool already collected an audit reason, so the inner apply inherits
+	// it rather than demanding a second one; both audit lines then agree on why
+	// the Hookaidofile changed.
 	applyArgs := map[string]any{
 		"path":    configPath,
 		"content": string(formatted),
 		"mode":    mutationReq.Mode,
+		"reason":  mutationReq.Reason,
+	}
+	if strings.TrimSpace(mutationReq.Actor) != "" {
+		applyArgs["actor"] = mutationReq.Actor
+	}
+	if strings.TrimSpace(mutationReq.RequestID) != "" {
+		applyArgs["request_id"] = mutationReq.RequestID
 	}
 	if mutationReq.ReloadTimeout != "" {
 		applyArgs["reload_timeout"] = mutationReq.ReloadTimeout

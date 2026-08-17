@@ -256,7 +256,11 @@ func (s *Server) toolConfigDiff(args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, candidateRes := config.Compile(candidateCfg)
+	// The candidate is free-form content from the caller, and config_diff is a
+	// read-role tool. CompileUntrusted skips {file.*}, {env.*} and {$...}
+	// expansion so a crafted candidate cannot make the process read a file or
+	// an environment variable and hand the value back in a validation error.
+	_, candidateRes := config.CompileUntrusted(candidateCfg)
 	if !candidateRes.OK {
 		return map[string]any{
 			"ok":       false,

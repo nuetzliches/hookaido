@@ -1145,6 +1145,45 @@ func TestToolConfigValidate_PathGuardrail(t *testing.T) {
 	}
 }
 
+// config_diff is a read-role tool that takes free-form content. Placeholder
+// expansion reads the filesystem and the environment and puts the resolved
+// value into validation errors, which are handed straight back to the caller --
+// so a crafted candidate could read any file the process could.
+func TestToolConfigDiff_DoesNotExpandPlaceholdersFromCallerContent(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte("\"/r\" {\n  deliver \"https://example.com\" {}\n}\n"), 0o600); err != nil {
+		t.Fatalf("write current: %v", err)
+	}
+
+	secretFile := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("TOPSECRET-abc123"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	t.Setenv("HOOKAIDO_TEST_MCP_SECRET", "ENVSECRET-xyz789")
+
+	for _, candidate := range []string{
+		"ingress { listen \":8080\" }\n\"/x{file." + filepath.ToSlash(secretFile) + "}\" { }\n",
+		"ingress { listen \":8080\" }\n\"/x{env.HOOKAIDO_TEST_MCP_SECRET}\" { }\n",
+	} {
+		s := NewServer(nil, nil, cfgPath, "")
+		resp := callTool(t, s, "config_diff", map[string]any{
+			"path":    cfgPath,
+			"content": candidate,
+		})
+
+		rendered := resp.Content[0].Text
+		if b, err := json.Marshal(resp.StructuredContent); err == nil {
+			rendered += string(b)
+		}
+		for _, secret := range []string{"TOPSECRET-abc123", "ENVSECRET-xyz789"} {
+			if strings.Contains(rendered, secret) {
+				t.Fatalf("config_diff leaked %q to the caller for candidate %q:\n%s", secret, candidate, rendered)
+			}
+		}
+	}
+}
+
 func TestToolConfigDiffChanged(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
 	current := `"/r" {

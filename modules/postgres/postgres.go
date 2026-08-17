@@ -615,12 +615,15 @@ WHERE id = $1
 	})
 }
 
-// AckBatch, NackBatch and MarkDeadBatch acknowledge one lease per statement,
-// each in its own transaction. queue.LeaseBatchStore asks implementations to use
-// a single transaction "where possible" -- SQLite does, via withLeaseBatch, so
-// there a failed batch really did change nothing and returning a zero result is
-// accurate. Here it is not: by the time an unexpected error surfaces on lease N,
-// leases 1..N-1 are already committed.
+// AckBatch acknowledges the given leases, one per statement in its own
+// transaction. NackBatch and MarkDeadBatch below follow the same shape, and the
+// partial-result note here applies to all three.
+//
+// queue.LeaseBatchStore asks implementations to use a single transaction "where
+// possible" -- SQLite does, via withLeaseBatch, so there a failed batch really
+// did change nothing and returning a zero result is accurate. Here it is not: by
+// the time an unexpected error surfaces on lease N, leases 1..N-1 are already
+// committed.
 //
 // These used to return queue.LeaseBatchResult{} on that path, which told the
 // caller nothing had succeeded. The dispatcher treats an un-acked delivered item

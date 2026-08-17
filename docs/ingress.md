@@ -11,7 +11,7 @@ When a webhook arrives:
 3. **Rate limit check** — enforce global or per-route rate limits.
 4. **Authentication** — verify HMAC signature, basic credentials, or forward auth.
 5. **Enqueue** — durably persist the payload and headers into the queue.
-6. **ACK** — return `200 OK` to the webhook provider only after successful enqueue.
+6. **ACK** — return `202 Accepted` to the webhook provider only after successful enqueue.
 
 ## Route Matching
 
@@ -228,7 +228,7 @@ Ingress enforces size limits from `defaults` or per-route config:
 
 ## Enqueue Behavior
 
-- Ingress ACKs the webhook provider (`200 OK`) **only after** durable queue persistence.
+- Ingress ACKs the webhook provider (`202 Accepted`) **only after** durable queue persistence.
 - If the queue is full (`queue_limits.max_depth`), ingress returns `429` (with `drop_policy "reject"`) or silently drops the oldest item.
 - Queue key is the route path — all webhooks matching a route share the same queue.
 
@@ -236,7 +236,7 @@ Ingress enforces size limits from `defaults` or per-route config:
 
 | Status | Meaning                                |
 | ------ | -------------------------------------- |
-| `200`  | Webhook received and enqueued          |
+| `202`  | Webhook received and enqueued          |
 | `400`  | Invalid request                        |
 | `401`  | Authentication failed                  |
 | `403`  | Forbidden (forward auth denied)        |
@@ -244,6 +244,8 @@ Ingress enforces size limits from `defaults` or per-route config:
 | `413`  | Body or headers exceed size limits     |
 | `429`  | Rate limit exceeded or queue full      |
 | `503`  | Queue overload or forward auth failure |
+
+On success the response body is `{"status":"queued"}` with `Content-Type: application/json`.
 
 ---
 

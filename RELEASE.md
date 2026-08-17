@@ -149,8 +149,8 @@ Tag-based release workflow is defined in `.github/workflows/release.yml`.
 - Build: signed artifacts via `internal/tools/release`
 - Verify: `hookaido verify-release --require-signature --require-sbom` must pass before publish
 - Attestations:
-  - `actions/attest-build-provenance@v3` for release artifacts (`subject-checksums`)
-  - `actions/attest-sbom@v3` bound to `hookaido_<version>_sbom.spdx.json`
+  - `actions/attest-build-provenance@v4` for release artifacts (`subject-checksums`)
+  - `actions/attest@v4` with `sbom-path` bound to `hookaido_<version>_sbom.spdx.json` (predicate type `https://spdx.dev/Document/v2.3`)
 - Exported attestation bundles:
   - `hookaido_<version>_provenance.intoto.jsonl`
   - `hookaido_<version>_sbom.intoto.jsonl`

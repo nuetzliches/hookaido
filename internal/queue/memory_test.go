@@ -2,6 +2,7 @@ package queue
 
 import (
 	"errors"
+	"sort"
 	"testing"
 	"time"
 )
@@ -1331,6 +1332,99 @@ func TestMemoryStore_QueueLimitsDropOldest(t *testing.T) {
 	}
 	if len(resp.Items) != 1 || resp.Items[0].ID != "evt_2" {
 		t.Fatalf("expected evt_2, got %#v", resp.Items)
+	}
+}
+
+// EnqueueBatch documents itself as all-or-nothing. drop_oldest evictions
+// happen before the batch can still be rejected, so a rejected batch must not
+// leave those messages destroyed.
+func TestMemoryStore_EnqueueBatchRejectedRestoresEvictedItems(t *testing.T) {
+	s := NewMemoryStore(WithQueueLimits(4, "drop_oldest"))
+
+	for _, id := range []string{"evt_1", "evt_2", "evt_3", "evt_4"} {
+		if err := s.Enqueue(Envelope{ID: id, Route: "/r", Target: "pull"}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+
+	// Lease the two oldest. Leased items count towards depth but cannot be
+	// dropped, so only evt_3 and evt_4 are eviction candidates.
+	leased, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 2, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(leased.Items) != 2 {
+		t.Fatalf("leased %d items, want 2", len(leased.Items))
+	}
+
+	// Three more items cannot fit even after both queued items are evicted, so
+	// the batch is rejected -- after the eviction loop has already run.
+	n, err := s.EnqueueBatch([]Envelope{
+		{ID: "batch_1", Route: "/r", Target: "pull"},
+		{ID: "batch_2", Route: "/r", Target: "pull"},
+		{ID: "batch_3", Route: "/r", Target: "pull"},
+	})
+	if !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("EnqueueBatch err=%v, want ErrQueueFull", err)
+	}
+	if n != 0 {
+		t.Fatalf("EnqueueBatch enqueued=%d, want 0", n)
+	}
+
+	remaining, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 10, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("dequeue after rejected batch: %v", err)
+	}
+	got := make([]string, 0, len(remaining.Items))
+	for _, it := range remaining.Items {
+		got = append(got, it.ID)
+	}
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "evt_3" || got[1] != "evt_4" {
+		t.Fatalf("queued items after rejected batch=%v, want [evt_3 evt_4] -- a batch that "+
+			"enqueued nothing must not destroy the messages it evicted to make room", got)
+	}
+
+	rm := s.RuntimeMetrics()
+	if rm.Memory == nil {
+		t.Fatal("expected memory runtime metrics")
+	}
+	if got := rm.Memory.EvictionsTotalByReason[memoryEvictionReasonDropOldest]; got != 0 {
+		t.Fatalf("drop_oldest evictions=%d, want 0 -- rolled-back evictions must not be counted", got)
+	}
+}
+
+// The same applies to single Enqueue: the duplicate-ID and memory-pressure
+// checks run after the eviction loop.
+func TestMemoryStore_EnqueueDuplicateIDRestoresEvictedItem(t *testing.T) {
+	s := NewMemoryStore(WithQueueLimits(2, "drop_oldest"))
+
+	for _, id := range []string{"evt_1", "evt_2"} {
+		if err := s.Enqueue(Envelope{ID: id, Route: "/r", Target: "pull"}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+	leased, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(leased.Items) != 1 || leased.Items[0].ID != "evt_1" {
+		t.Fatalf("leased=%#v, want evt_1", leased.Items)
+	}
+
+	// Depth is full, so evt_2 is evicted to make room -- and only then does the
+	// duplicate ID reject the enqueue.
+	if err := s.Enqueue(Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); !errors.Is(err, ErrEnvelopeExists) {
+		t.Fatalf("Enqueue err=%v, want ErrEnvelopeExists", err)
+	}
+
+	remaining, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "pull", Batch: 10, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("dequeue after rejected enqueue: %v", err)
+	}
+	if len(remaining.Items) != 1 || remaining.Items[0].ID != "evt_2" {
+		t.Fatalf("queued items after rejected enqueue=%#v, want evt_2 -- a rejected Enqueue "+
+			"must not destroy the message it evicted", remaining.Items)
 	}
 }
 

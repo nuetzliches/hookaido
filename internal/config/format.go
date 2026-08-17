@@ -893,7 +893,7 @@ func writeDeliverBlock(b *bytes.Buffer, d Deliver) {
 		fmt.Fprintf(b, "    sign secret_selection %s\n", formatValue(d.SignHMACSecretSelection, d.SignHMACSecretSelectionQuoted))
 	}
 	for _, ev := range d.ExecEnv {
-		fmt.Fprintf(b, "    env %s %s\n", ev.Key, formatValue(ev.Value, ev.ValueQuoted))
+		fmt.Fprintf(b, "    env %s %s\n", formatValue(ev.Key, ev.KeyQuoted), formatValue(ev.Value, ev.ValueQuoted))
 	}
 	b.WriteString("  }\n")
 }

@@ -1376,21 +1376,24 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 		}
 	}
 
+	// These listeners always stay dedicated, so compare bind targets rather than
+	// strings: ":9943" and "0.0.0.0:9943" name one socket and used to slip past
+	// an == comparison.
 	if compiled.PullAPI.GRPCListen != "" {
-		if compiled.PullAPI.GRPCListen == compiled.Ingress.Listen ||
-			compiled.PullAPI.GRPCListen == compiled.PullAPI.Listen ||
-			compiled.PullAPI.GRPCListen == compiled.AdminAPI.Listen {
+		if sameListenTarget(compiled.PullAPI.GRPCListen, compiled.Ingress.Listen) ||
+			sameListenTarget(compiled.PullAPI.GRPCListen, compiled.PullAPI.Listen) ||
+			sameListenTarget(compiled.PullAPI.GRPCListen, compiled.AdminAPI.Listen) {
 			res.Errors = append(res.Errors, "pull_api.grpc_listen must not share a listener with ingress/pull_api/admin_api")
 		}
 	}
 
 	if compiled.Observability.Metrics.Enabled {
-		if compiled.Observability.Metrics.Listen == compiled.Ingress.Listen ||
-			compiled.Observability.Metrics.Listen == compiled.PullAPI.Listen ||
-			compiled.Observability.Metrics.Listen == compiled.AdminAPI.Listen {
+		if sameListenTarget(compiled.Observability.Metrics.Listen, compiled.Ingress.Listen) ||
+			sameListenTarget(compiled.Observability.Metrics.Listen, compiled.PullAPI.Listen) ||
+			sameListenTarget(compiled.Observability.Metrics.Listen, compiled.AdminAPI.Listen) {
 			res.Errors = append(res.Errors, "observability.metrics.listen must not share a listener with ingress/pull_api/admin_api")
 		}
-		if compiled.PullAPI.GRPCListen != "" && compiled.Observability.Metrics.Listen == compiled.PullAPI.GRPCListen {
+		if compiled.PullAPI.GRPCListen != "" && sameListenTarget(compiled.Observability.Metrics.Listen, compiled.PullAPI.GRPCListen) {
 			res.Errors = append(res.Errors, "pull_api.grpc_listen must not share a listener with observability.metrics.listen")
 		}
 	}
@@ -3436,6 +3439,11 @@ func parseRemoteIPPrefix(raw string) (netip.Prefix, error) {
 	return netip.Prefix{}, fmt.Errorf("%q must be an IP or CIDR", raw)
 }
 
+// maxByteSize caps every size-valued directive. Nothing Hookaido buffers
+// legitimately approaches this; the bound exists so that a typo or an
+// overflowing literal is reported rather than silently accepted.
+const maxByteSize = 1 << 40 // 1 TiB
+
 func parseByteSize(raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -3481,11 +3489,34 @@ func parseByteSize(raw string) (int64, error) {
 		return 0, fmt.Errorf("must be a positive size like 64kb or 2mb")
 	}
 
+	// Reject before multiplying. Checking the product for `<= 0` afterwards
+	// catches a wrap that lands negative or on zero but not one that lands on a
+	// small positive: `18014398509481985k` wrapped to exactly 1024, so the config
+	// read as an enormous limit while every request over 1 KiB was rejected with
+	// a 413.
+	if v > math.MaxInt64/mult {
+		return 0, fmt.Errorf("must not exceed %s", formatByteSize(maxByteSize))
+	}
 	size := v * mult
-	if size <= 0 {
-		return 0, fmt.Errorf("must be a positive size like 64kb or 2mb")
+	if size > maxByteSize {
+		return 0, fmt.Errorf("must not exceed %s", formatByteSize(maxByteSize))
 	}
 	return size, nil
+}
+
+// formatByteSize renders a byte count in the largest unit that divides it
+// evenly, for use in error messages.
+func formatByteSize(size int64) string {
+	switch {
+	case size >= 1<<30 && size%(1<<30) == 0:
+		return fmt.Sprintf("%dgb", size/(1<<30))
+	case size >= 1<<20 && size%(1<<20) == 0:
+		return fmt.Sprintf("%dmb", size/(1<<20))
+	case size >= 1<<10 && size%(1<<10) == 0:
+		return fmt.Sprintf("%dkb", size/(1<<10))
+	default:
+		return fmt.Sprintf("%db", size)
+	}
 }
 
 func compileRetry(field string, in *RetryBlock, base RetryConfig, res *ValidationResult) (RetryConfig, bool) {
@@ -3658,6 +3689,46 @@ func validateRouteShadowing(routes []CompiledRoute, res *ValidationResult) {
 	}
 }
 
+// canonicalListenAddr reduces a listen address to the bind target it names, so
+// that two spellings of one target compare equal. ":8080", "0.0.0.0:8080" and
+// "[::]:8080" all bind every interface, and an IP is normalized to its canonical
+// text form. An address that is not host:port is returned unchanged — there is
+// nothing to normalize, and comparing it literally is the safe default.
+//
+// It deliberately does not equate a wildcard with a specific address: on Linux
+// ":8080" and "127.0.0.1:8080" do conflict at bind time, but on Windows they can
+// both be bound, so treating them as one target would be wrong there. Nor does
+// it resolve hostnames, "localhost" included — that answer depends on the host's
+// resolver, and a false collision would reject a working config.
+func canonicalListenAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(host), "["), "]")
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "*"
+	default:
+		if ip, err := netip.ParseAddr(host); err == nil {
+			host = ip.Unmap().String()
+		}
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// sameListenTarget reports whether two listen addresses name one bind target.
+func sameListenTarget(a, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return false
+	}
+	return canonicalListenAddr(a) == canonicalListenAddr(b)
+}
+
 // isLoopbackListenAddr reports whether addr can only be reached over a loopback
 // interface. An empty or wildcard host (":2019", "0.0.0.0:2019", "[::]:2019")
 // binds every interface and is not loopback. A hostname other than "localhost"
@@ -3736,6 +3807,29 @@ func validateSharedListeners(compiled *Compiled, hasPullRoutes bool, res *Valida
 	}
 	comps = append(comps, sharedListenComponent{Name: "admin_api", Listen: compiled.AdminAPI.Listen, Prefix: compiled.AdminAPI.Prefix, TLS: compiled.AdminAPI.TLS})
 
+	// Co-listening is opt-in through *identical* listen strings, but two
+	// different strings can still name one socket: ":8080", "0.0.0.0:8080" and
+	// "[::]:8080" are the same bind target. Such a pair landed in separate groups
+	// and so skipped every check below — including TLS parity — then failed at
+	// startup with EADDRINUSE, after `config validate` and CI had both called the
+	// config good. Require one spelling so the intent is explicit either way.
+	canonical := make(map[string]sharedListenComponent, len(comps))
+	for _, c := range comps {
+		key := canonicalListenAddr(c.Listen)
+		if key == "" {
+			continue
+		}
+		prev, seen := canonical[key]
+		if !seen {
+			canonical[key] = c
+			continue
+		}
+		if prev.Listen == c.Listen {
+			continue
+		}
+		res.Errors = append(res.Errors, fmt.Sprintf("%s.listen %q and %s.listen %q are the same bind address (write it identically on both to co-listen on one port, or move one to a different port)", prev.Name, prev.Listen, c.Name, c.Listen))
+	}
+
 	order := make([]string, 0, len(comps))
 	groups := make(map[string][]sharedListenComponent, len(comps))
 	for _, c := range comps {
@@ -3805,7 +3899,13 @@ func validateSharedListeners(compiled *Compiled, hasPullRoutes bool, res *Valida
 					if rt.Path == "" {
 						continue
 					}
-					if hasPathPrefix(rt.Path, c.Prefix) || hasPathPrefix(c.Prefix, rt.Path) {
+					// A "/" route needs its own arm. hasPathPrefix answers false
+					// both ways for it — the reverse direction tests
+					// HasPrefix("/pull", "//") — while at runtime matchPath
+					// returns true for every request path. Undetected, prefixMux
+					// routed /pull/anything to the API, which answered 401, and
+					// the catch-all route silently received nothing.
+					if rt.Path == "/" || hasPathPrefix(rt.Path, c.Prefix) || hasPathPrefix(c.Prefix, rt.Path) {
 						res.Errors = append(res.Errors, fmt.Sprintf("shared listener: ingress route path %q collides with %s.prefix %q (choose a non-overlapping route path or %s.prefix)", rt.Path, c.Name, c.Prefix, c.Name))
 					}
 				}

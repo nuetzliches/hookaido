@@ -202,8 +202,10 @@ admin_api {
 > When an address is shared, `config validate` enforces:
 >
 > - each co-listening API server (`pull_api`/`admin_api`) has a **non-empty, distinct, non-overlapping** `prefix`;
-> - **no ingress route path collides** with (is shadowed by, or shadows) a co-listening API prefix — e.g. an `ingress` route `/pull/...` is rejected when `pull_api.prefix` is `/pull`;
+> - **no ingress route path collides** with (is shadowed by, or shadows) a co-listening API prefix — e.g. an `ingress` route `/pull/...` is rejected when `pull_api.prefix` is `/pull`. A catch-all `"/"` route collides with **every** co-listening prefix, since it matches every request path;
 > - **identical TLS** settings across everything on the shared address.
+>
+> Because sharing is inferred from equal `listen` addresses, the address must be written **identically** on each component. `:8080` and `0.0.0.0:8080` are the same socket but not the same string, so they would be treated as separate listeners and the second bind would fail at startup with `EADDRINUSE`; `config validate` rejects that pair instead. Wildcard forms are not equated with a specific address (`:8080` vs `127.0.0.1:8080`), because those can both be bound on Windows.
 >
 > `pull_api.grpc_listen` and `observability.metrics.listen` always stay on dedicated listeners and may not share an address.
 
@@ -368,6 +370,8 @@ defaults {
   }
 }
 ```
+
+**Size values** (`max_body`, `max_headers`, `body_limit`, …) accept a positive integer with an optional `b`/`kb`/`k`/`mb`/`m`/`gb`/`g` suffix (powers of 1024; bare numbers are bytes). The upper bound is `1024gb` — a larger value, or one whose multiplication would overflow, is a compile error rather than a silently wrapped small limit.
 
 `adaptive_backpressure` is an optional soft-pressure ingress guardrail that applies `503` before hard `queue_limits.max_depth` is reached.
 - `enabled`: turn adaptive backpressure on/off.

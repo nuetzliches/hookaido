@@ -21,6 +21,19 @@ secrets {
   pull { path "/pull/x" }
 }
 `))
+	// Values that only survive the round trip if the formatter re-quotes them.
+	// The target's assertions were always strong enough to catch a formatter
+	// dropping quotes -- what was missing was an input that carried any. A
+	// quoted `env` key with a space reformatted to `env MY KEY "v"`, which no
+	// longer parses, and nothing in the corpus reached that line.
+	f.Add([]byte(`
+"/x" {
+  deliver exec "/opt/hooks/run.sh" {
+    env "MY KEY" "value with spaces"
+    env PLAIN plain
+  }
+}
+`))
 
 	f.Fuzz(func(t *testing.T, input []byte) {
 		cfg, err := Parse(input)

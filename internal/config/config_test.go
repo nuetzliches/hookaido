@@ -7132,13 +7132,76 @@ pull_api { auth token "raw:t" }
 	}
 	found := false
 	for _, e := range res.Errors {
-		if strings.Contains(e, "auth hmac options require at least one secret or secret_ref") {
+		if strings.Contains(e, "auth hmac requires at least one secret or secret_ref") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected auth hmac options require secret error, got %#v", res.Errors)
+		t.Fatalf("expected auth hmac require secret error, got %#v", res.Errors)
+	}
+}
+
+// An `auth hmac { }` block with nothing in it is a declared authentication
+// surface with no secret. It used to compile clean, and at runtime
+// hmacByRoute[path] stayed nil, which ingress reads as "no auth configured" --
+// so the route was served with no verification at all. Commenting out a secret
+// line during debugging or rotation is enough to produce it.
+func TestCompile_EmptyAuthHMACBlockIsRejected(t *testing.T) {
+	for _, body := range []string{
+		"auth hmac { }",
+		"auth hmac {\n  }",
+	} {
+		in := []byte(`
+ingress { listen ":8080" }
+pull_api { auth token "raw:t" }
+
+"/hooks" {
+  ` + body + `
+  pull { path "/e" }
+}
+`)
+		cfg, err := Parse(in)
+		if err != nil {
+			t.Fatalf("parse %q: %v", body, err)
+		}
+		_, res := Compile(cfg)
+		if res.OK {
+			t.Fatalf("expected error for %q, got ok -- the route would be served unauthenticated", body)
+		}
+		if !compileErrorsContain(res.Errors, "auth hmac requires at least one secret or secret_ref") {
+			t.Fatalf("expected missing-secret error for %q, got %#v", body, res.Errors)
+		}
+	}
+}
+
+// The shorthand and block-with-secret forms must keep compiling: AuthHMACBlockSet
+// is also set for `auth hmac <secret> { ... }`, so the new condition must not
+// fire when a secret is present.
+func TestCompile_AuthHMACWithSecretStillCompiles(t *testing.T) {
+	for _, body := range []string{
+		`auth hmac "raw:s3cret"`,
+		`auth hmac { secret "raw:s3cret" }`,
+		`auth hmac "raw:s3cret" { tolerance "10m" }`,
+		`auth hmac { provider github` + "\n" + `    secret "raw:s3cret" }`,
+	} {
+		in := []byte(`
+ingress { listen ":8080" }
+pull_api { auth token "raw:t" }
+
+"/hooks" {
+  ` + body + `
+  pull { path "/e" }
+}
+`)
+		cfg, err := Parse(in)
+		if err != nil {
+			t.Fatalf("parse %q: %v", body, err)
+		}
+		_, res := Compile(cfg)
+		if !res.OK {
+			t.Fatalf("expected ok for %q, got %#v", body, res.Errors)
+		}
 	}
 }
 

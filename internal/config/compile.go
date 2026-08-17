@@ -745,9 +745,19 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 				hmacTolerance = d
 			}
 		}
-		hasHMACOptions := r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet || r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet || r.AuthHMACProviderSet
-		if hasHMACOptions && len(hmacSecrets) == 0 && len(hmacSecretRefs) == 0 {
-			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac options require at least one secret or secret_ref", rPath))
+		// Any declared auth hmac surface without a secret is an error --
+		// including a block with nothing in it. AuthHMACBlockSet is what
+		// distinguishes "block written, empty" from "no auth hmac at all", and
+		// omitting it here meant `auth hmac { }` compiled clean: run.go maps a
+		// route with no secrets to a nil authenticator and ingress/http.go
+		// reads nil as "no auth configured", so the route was served with no
+		// verification whatsoever. Commenting out a secret line during
+		// debugging or rotation is enough to reach it.
+		hasHMACSurface := r.AuthHMACBlockSet ||
+			r.AuthHMACSignatureHeaderSet || r.AuthHMACTimestampHeaderSet ||
+			r.AuthHMACNonceHeaderSet || r.AuthHMACToleranceSet || r.AuthHMACProviderSet
+		if hasHMACSurface && len(hmacSecrets) == 0 && len(hmacSecretRefs) == 0 {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth hmac requires at least one secret or secret_ref", rPath))
 		}
 		if (len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0) && hmacProvider == "" {
 			effectiveSignatureHeader := hmacSignatureHeader
@@ -788,14 +798,14 @@ func Compile(cfg *Config) (Compiled, ValidationResult) {
 			basicAuth[user] = pass
 		}
 
-		if len(basicAuth) > 0 && (len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0 || hasHMACOptions) {
+		if len(basicAuth) > 0 && (len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0 || hasHMACSurface) {
 			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth basic cannot be combined with auth hmac", rPath))
 		}
 		if len(basicAuth) == 0 {
 			basicAuth = nil
 		}
 		forwardAuth := compileForwardAuthConfig(fmt.Sprintf("route %q auth forward", rPath), r.AuthForward, &res)
-		if forwardAuth.Enabled && (len(basicAuth) > 0 || len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0 || hasHMACOptions) {
+		if forwardAuth.Enabled && (len(basicAuth) > 0 || len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0 || hasHMACSurface) {
 			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth forward cannot be combined with auth basic or auth hmac", rPath))
 		}
 

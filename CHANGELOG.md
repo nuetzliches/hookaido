@@ -7,6 +7,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Security
+
+- Bump Go toolchain `1.26.4` → `1.26.6` to remediate eight reachable standard-library vulnerabilities reported by `govulncheck`:
+  - **GO-2026-6218** (`net/url`, quadratic complexity in `resolvePath` — reachable via `dispatcher.HTTPDeliverer.Deliver` → `http.Client.Do` → `url.URL.Parse`)
+  - **GO-2026-6091** (`html/template`, JavaScript regexp context tracking — reachable via `app.serveOnListener` → `http.Server.Serve` → `template.Template.Execute`)
+  - **GO-2026-6090** (`crypto/tls`, unbounded post-handshake messages — reachable via `app.serveOnListener` → `http.Server.Serve` and `grpcworker.grpcWorkerModule.Serve` → `grpc.Server.Serve`)
+  - **GO-2026-6089** (`net/http`, `ReadHeaderTimeout` not applied during the unencrypted HTTP/2 check — reachable via `app.serveOnListener` → `http.Server.Serve`)
+  - **GO-2026-6088** (`encoding/xml`, missing recursion-depth guard during decode — reachable via `sqlite.Store.ListAttempts` → `sql.Rows.Next` → `xml.Unmarshal`)
+  - **GO-2026-5972** (`encoding/asn1`, unbounded recursion depth — reachable via `release.loadEd25519PrivateKey` → `x509.ParsePKCS8PrivateKey`)
+  - **GO-2026-5856** (`crypto/tls`, Encrypted Client Hello privacy leak — reachable via the same TLS entry points as GO-2026-6090)
+  - **GO-2026-5026** (`net/http`, `golang.org/x/net/idna` failing to reject ASCII-only Punycode-encoded labels — reachable via `dispatcher.HTTPDeliverer.Deliver` → `http.Client.Do`)
+
+  `govulncheck ./...` now reports no findings.
+
 ## [2.9.0] - 2026-07-01
 
 ### Added

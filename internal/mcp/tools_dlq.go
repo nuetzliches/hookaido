@@ -18,7 +18,11 @@ func (s *Server) toolDLQList(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		query := url.Values{}
 		if req.Route != "" {
 			query.Set("route", req.Route)

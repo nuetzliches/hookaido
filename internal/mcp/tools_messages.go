@@ -23,7 +23,11 @@ func (s *Server) toolMessagesList(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		query := url.Values{}
 		endpointPath := "/messages"
 		if application != "" {
@@ -108,7 +112,11 @@ func (s *Server) toolAttemptsList(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		query := url.Values{}
 		if application != "" {
 			query.Set("application", application)
@@ -329,7 +337,11 @@ func (s *Server) toolMessagesPublish(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		if err := validatePublishAuditPolicyForMutation(audit, items, compiled); err != nil {
 			return nil, err
 		}
@@ -649,7 +661,11 @@ func (s *Server) toolMessagesCancelByFilter(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		endpointPath := "/messages/cancel_by_filter"
 		payload := messageManageFilterPayload(req, application, endpointName)
 		if err := validateScopedManagedAuditPolicyForFilterMutation(audit, req.Route, application, endpointName, compiled); err != nil {
@@ -736,7 +752,11 @@ func (s *Server) toolMessagesRequeueByFilter(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		endpointPath := "/messages/requeue_by_filter"
 		payload := messageManageFilterPayload(req, application, endpointName)
 		if err := validateScopedManagedAuditPolicyForFilterMutation(audit, req.Route, application, endpointName, compiled); err != nil {
@@ -822,7 +842,11 @@ func (s *Server) toolMessagesResumeByFilter(args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if compiled, useAdmin := s.queueToolsUseAdminProxy(); useAdmin {
+	compiled, useAdmin, backendErr := s.queueToolsUseAdminProxy()
+	if backendErr != nil {
+		return nil, backendErr
+	}
+	if useAdmin {
 		endpointPath := "/messages/resume_by_filter"
 		payload := messageManageFilterPayload(req, application, endpointName)
 		if err := validateScopedManagedAuditPolicyForFilterMutation(audit, req.Route, application, endpointName, compiled); err != nil {

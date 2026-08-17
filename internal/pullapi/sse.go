@@ -82,6 +82,21 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 	defer keepaliveTicker.Stop()
 
 	for {
+		// Check for cancellation before doing more work.
+		//
+		// The busy path below ends in `continue`, so a stream with items always
+		// available never reaches the select at the bottom of the loop -- the
+		// only place ctx.Done() was handled. Two consequences: a client that
+		// disconnected mid-stream kept having messages dequeued and leased on
+		// its behalf, which nobody would ever ack, and SSEMaxConnection never
+		// fired on exactly the busy connections it exists to bound.
+		// observeSSEDisconnect never ran either, so
+		// hookaido_pull_sse_connection_active only ever counted up.
+		if ctx.Err() != nil {
+			s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
+			return
+		}
+
 		// Non-blocking dequeue.
 		outcome, opErr := s.Dequeue(route, DequeueParams{
 			Batch:       batch,
@@ -112,7 +127,14 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 					Trace:      it.Trace,
 				}
 				data, _ := json.Marshal(item)
-				fmt.Fprintf(w, "id: %s\nevent: message\ndata: %s\n\n", it.LeaseID, data)
+				// A failed write means the peer is gone. The keepalive paths
+				// below already checked this; the per-item write discarded the
+				// error, so on a busy stream a disconnect went unnoticed until
+				// the next idle moment -- which may never come.
+				if _, err := fmt.Fprintf(w, "id: %s\nevent: message\ndata: %s\n\n", it.LeaseID, data); err != nil {
+					s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
+					return
+				}
 				messagesSent++
 			}
 			flusher.Flush()

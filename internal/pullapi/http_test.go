@@ -1258,6 +1258,43 @@ func TestPullAPI_BearerAuth(t *testing.T) {
 	}
 }
 
+// The Bearer auth-scheme token is case-insensitive per RFC 7235, and the gRPC
+// worker API already accepted it that way. The HTTP APIs required exactly
+// "Bearer ", so the same credential worked on one transport and not the other.
+func TestPullAPI_BearerAuthSchemeIsCaseInsensitive(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "canonical", header: "Bearer t1", want: http.StatusOK},
+		{name: "lowercase", header: "bearer t1", want: http.StatusOK},
+		{name: "uppercase", header: "BEARER t1", want: http.StatusOK},
+		{name: "mixed case", header: "bEaReR t1", want: http.StatusOK},
+		{name: "leading whitespace", header: "  Bearer t1", want: http.StatusOK},
+		{name: "wrong scheme", header: "Token t1", want: http.StatusUnauthorized},
+		{name: "wrong token", header: "Bearer nope", want: http.StatusUnauthorized},
+		{name: "no token", header: "Bearer", want: http.StatusUnauthorized},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := queue.NewMemoryStore()
+			srv := NewServer(store)
+			srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+			srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("t1")})
+
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "http://example/x/dequeue", strings.NewReader(`{"batch":1}`))
+			req.Header.Set("Authorization", tc.header)
+			srv.ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("Authorization %q: got %d, want %d", tc.header, rr.Code, tc.want)
+			}
+		})
+	}
+}
+
 func TestPullAPI_MethodNotAllowedStructuredError(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)

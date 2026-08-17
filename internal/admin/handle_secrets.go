@@ -285,12 +285,23 @@ func (s *Server) handleSecretDelete(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	removed := pool.Remove(id)
+	// Persist the deletion before touching the live pool, mirroring the add
+	// path, which persists first and rolls the record back if the pool rejects
+	// the secret.
+	//
+	// The previous order removed the secret from the pool first, so a failing
+	// persist returned 500 -- "nothing was deleted" as far as the caller is
+	// concerned -- with the secret already revoked from the running process.
+	// Signature verification for senders still using it began failing
+	// immediately, and the secret reappeared on the next restart because the
+	// record was still there. pool.Remove cannot fail, so doing it second means
+	// the two can no longer diverge.
 	existed, err := s.DeleteSecretRecord(name, id)
 	if err != nil {
 		writeManagementError(w, http.StatusInternalServerError, secretCodePersistFailure, "failed to delete persisted secret")
 		return
 	}
+	removed := pool.Remove(id)
 	if !removed && !existed {
 		writeManagementError(w, http.StatusNotFound, secretCodeIDNotFound, fmt.Sprintf("secret id %q was not found", id))
 		return

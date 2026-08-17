@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -386,3 +387,148 @@ type flusherRecorder struct {
 }
 
 func (f *flusherRecorder) Flush() {}
+
+// busyStore always has an item ready, so the SSE loop never idles and therefore
+// never reaches the select that used to be the only place cancellation was
+// handled. The small delay keeps the test from spinning hot.
+type busyStore struct {
+	queue.Store
+	route string
+}
+
+func (b busyStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	time.Sleep(time.Millisecond)
+	return queue.DequeueResponse{Items: []queue.Envelope{{
+		ID:      "evt_busy",
+		LeaseID: "lease_busy",
+		Route:   b.route,
+	}}}, nil
+}
+
+func newBusySSEServer(t *testing.T) (*Server, *flusherRecorder, *http.Request) {
+	t.Helper()
+	srv := NewServer(busyStore{Store: queue.NewMemoryStore(), route: "/webhooks/github"})
+	srv.SSEKeepalive = time.Hour // must not be what ends the stream
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+	rr := &flusherRecorder{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequest(http.MethodGet, "http://example/pull/github/stream", nil)
+	return srv, rr, req
+}
+
+// sse_max_connection must bound a busy stream, not just an idle one.
+func TestSSE_MaxConnectionEndsABusyStream(t *testing.T) {
+	srv, rr, req := newBusySSEServer(t)
+	srv.SSEMaxConnection = 50 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.ServeHTTP(rr, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never returned: with items always available the loop never checked ctx.Done(), so sse_max_connection did not bound the connection")
+	}
+}
+
+// A client that goes away mid-stream must end the stream. Without this the
+// handler keeps dequeuing and leasing messages that nobody will ever ack.
+func TestSSE_ClientDisconnectEndsABusyStream(t *testing.T) {
+	srv, rr, req := newBusySSEServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.ServeHTTP(rr, req)
+	}()
+
+	// Let it stream a little, then drop the peer.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never returned after the request context was canceled")
+	}
+}
+
+// The disconnect must also be observed, so hookaido_pull_sse_connection_active
+// comes back down. It previously only ever counted up on a busy stream.
+func TestSSE_BusyStreamObservesDisconnect(t *testing.T) {
+	srv, rr, req := newBusySSEServer(t)
+	srv.SSEMaxConnection = 50 * time.Millisecond
+
+	var mu sync.Mutex
+	disconnects := 0
+	srv.ObserveSSEDisconnect = func(route string, statusCode int, messagesSent int, duration time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		disconnects++
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.ServeHTTP(rr, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never returned")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if disconnects != 1 {
+		t.Fatalf("ObserveSSEDisconnect called %d times, want 1", disconnects)
+	}
+}
+
+// failingWriter accepts the SSE preamble and then fails, as a dropped TCP peer
+// would. Errors from the per-item write used to be discarded.
+type failingWriter struct {
+	*httptest.ResponseRecorder
+	mu     sync.Mutex
+	writes int
+}
+
+func (f *failingWriter) Write(b []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes++
+	if f.writes > 2 {
+		return 0, errors.New("connection reset by peer")
+	}
+	return f.ResponseRecorder.Write(b)
+}
+
+func (f *failingWriter) Flush() {}
+
+func TestSSE_WriteFailureEndsTheStream(t *testing.T) {
+	srv, _, req := newBusySSEServer(t)
+	w := &failingWriter{ResponseRecorder: httptest.NewRecorder()}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.ServeHTTP(w, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never returned: the per-item write error was discarded, so a dropped peer went unnoticed")
+	}
+}

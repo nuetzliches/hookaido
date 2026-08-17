@@ -368,11 +368,13 @@ Returns the compiled application/endpoint projection for labeled routes.
 
 ```json
 {
+  "route_count": 5,
   "application_count": 2,
-  "path_count": 5,
+  "endpoint_count": 5,
   "applications": [
     {
       "name": "billing",
+      "endpoint_count": 1,
       "endpoints": [
         {
           "name": "invoice.created",

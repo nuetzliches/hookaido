@@ -76,7 +76,7 @@ Per-route:
 - `auth ...` (`basic`, `hmac`, `forward`)
   - HMAC shorthand: `auth hmac "env:HOOKAIDO_INGRESS_SECRET"` or `auth hmac secret_ref "S1"` (optional inline options block after shorthand, e.g. `auth hmac secret_ref "S1" { signature_header ... timestamp_header ... nonce_header ... tolerance ... }`)
   - HMAC block (richer): `auth hmac { secret ... | secret_ref ... ; signature_header ... ; timestamp_header ... ; nonce_header ... ; tolerance ... ; provider ... }` (`signature_header`/`timestamp_header`/`nonce_header` must be distinct after defaults are applied)
-  - HMAC provider mode: `auth hmac { provider github; secret env:SECRET }` — uses provider-specific signature format instead of canonical Hookaido format; supported providers: `github` (`X-Hub-Signature-256`, `sha256=hex(HMAC-SHA256(secret, body))`), `gitea` (`X-Gitea-Signature`, `hex(HMAC-SHA256(secret, body))`); `provider` is mutually exclusive with `signature_header`, `timestamp_header`, `nonce_header`, `tolerance`
+  - HMAC provider mode: `auth hmac { provider github; secret env:SECRET }` — uses provider-specific signature format instead of canonical Hookaido format; supported providers: `github` (`X-Hub-Signature-256`, `sha256=hex(HMAC-SHA256(secret, body))`, no replay protection), `gitea` (`X-Gitea-Signature`, `hex(HMAC-SHA256(secret, body))`, no replay protection), `stripe` (`Stripe-Signature`, `t=<ts>,v1=<hex>` over `<ts>.<body>`, fixed 5m tolerance), `cituro` (`X-CITURO-SIGNATURE`, `t=<ts>,s=<hex>` over `<ts>.<body>`, fixed 5m tolerance); `provider` is mutually exclusive with `signature_header`, `timestamp_header`, `nonce_header`, `tolerance`
   - Forward shorthand: `auth forward "https://auth.example/check"`
   - Forward block (optional): `auth forward "https://auth.example/check" { timeout ... ; copy_headers ... ; body_limit ... }`
 - `publish on|off` (optional; defaults `on`; when `off`, Admin/MCP publish mutations reject this route)
@@ -92,7 +92,7 @@ Per-route:
 - `deliver exec "<command>" { retry?, timeout?, env ... }` (exec mode; delivers by running a local subprocess)
   - payload is piped to stdin; metadata passed as env vars (`HOOKAIDO_ROUTE`, `HOOKAIDO_EVENT_ID`, `HOOKAIDO_CONTENT_TYPE`, `HOOKAIDO_ATTEMPT`, `HOOKAIDO_HEADER_*`)
   - `env <KEY> <VALUE>` passes additional environment variables (repeatable; key must match `[A-Za-z_][A-Za-z0-9_]*`)
-  - exit code 0 → success; exit 75 (EX_TEMPFAIL) → retriable; exit 1-125 → failure (retriable); signal kill → retriable; exit 126/127 or startup failure → not retriable (immediate DLQ)
+  - exit code 0 → success; exit 75 (EX_TEMPFAIL) → retriable; any other non-zero exit → failure (retriable, `126`/`127` included); signal kill → retriable; failure to *start* the command (not on `PATH`, missing, not executable) → not retriable (immediate DLQ)
   - `sign` directives are not supported with `deliver exec` (compile error)
   - cross-platform: uses `os/exec`, works on Linux, macOS, and Windows
 - `match @name` to attach a named matcher (see below)
@@ -303,7 +303,7 @@ Endpoints:
 - For global route-selector `POST /messages/publish` and route-selector/unscoped `POST /messages/*_by_filter`, when `defaults.publish_policy.fail_closed on` is enabled and managed-route context cannot be evaluated, requests fail closed with `503` and `code=managed_resolver_missing`.
 - For global route-selector `POST /messages/*_by_filter`, ownership-source drift between `ManagementModel` and route-policy ownership callbacks for the selected route fails closed with `503` and `code=managed_target_mismatch`.
 - `GET /attempts` (query params: `route` or `application` + `endpoint_name`, `target`, `event_id`, `outcome` (`acked|retry|dead`), `limit` (default 100, max 1000), `before` (RFC3339); when selector mode is `route`, it must be an absolute Hookaido route path starting with `/`; managed selectors return `404` with `code=managed_endpoint_not_found` when selector labels do not resolve, `503` with `code=managed_resolver_missing` when resolver wiring is unavailable, and `503` with `code=managed_target_mismatch` when selector-resolved route ownership is out of sync with route ownership policy mapping)
-- `GET /management/model` (returns runtime management projection with `application_count`, `path_count`, and `applications[].endpoints[]` entries (`name`, `route`, `mode`, `targets`, `publish_policy` with `enabled` / `direct_enabled` / `managed_enabled`))
+- `GET /management/model` (returns runtime management projection with `route_count`, `application_count`, `endpoint_count`, and `applications[]` entries carrying `name`, `endpoint_count` and nested `endpoints[]` (`name`, `route`, `mode`, `targets`, `publish_policy` with `enabled` / `direct_enabled` / `managed_enabled`))
 - `GET /applications` (returns management application list with per-application endpoint counts)
 - `GET /applications/{application}/endpoints` (returns endpoint entries for one application; entries include `publish_policy`; `application` is path-escaped and matched exactly)
 - `GET /applications/{application}/endpoints/{endpoint_name}` (returns one endpoint projection with `route`, `mode`, `targets`, and `publish_policy`; path segments are URL-decoded)

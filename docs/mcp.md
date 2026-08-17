@@ -42,7 +42,7 @@ Runtime control tools (`instance_start`, `instance_stop`, `instance_reload`) req
 | `--enable-mutations`         | `false`          | Enable mutation tools                          |
 | `--enable-runtime-control`   | `false`          | Enable runtime control tools                   |
 | `--principal`                | —                | Session principal (required for mutations)     |
-| `--pid-file`                 | —                | PID file path (required for runtime control)   |
+| `--pid-file`                 | `./hookaido.pid` | PID file path (required for runtime control)   |
 | `--admin-endpoint-allowlist` | —                | Restrict Admin-proxy targets (comma-separated) |
 
 ## Tool Reference

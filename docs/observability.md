@@ -112,6 +112,13 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 
 ### Available Metrics
 
+**Process metrics:**
+
+| Metric                          | Type    | Description                                   |
+| ------------------------------- | ------- | --------------------------------------------- |
+| `hookaido_up`                   | gauge   | Always `1` while the process is serving; absence or a scrape failure is the signal |
+| `hookaido_start_time_seconds`   | gauge   | Process start time as a Unix timestamp — subtract from `time()` for uptime, or alert on a change to catch restarts |
+
 **Queue metrics:**
 
 | Metric                          | Type    | Description                                   |
@@ -153,6 +160,22 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_pull_nack_conflict_total`   | counter | Pull nack lease conflicts (`409`) by `route`                                 |
 | `hookaido_pull_lease_active`          | gauge   | Active Pull leases currently tracked by `route`                              |
 | `hookaido_pull_lease_expired_total`   | counter | Lease expirations observed during Pull `ack`/`nack`/`extend` by `route`      |
+
+**Pull SSE metrics** (see [SSE streaming](pull-api.md#sse-streaming)):
+
+| Metric                                     | Type    | Description                                            |
+| ------------------------------------------ | ------- | ------------------------------------------------------ |
+| `hookaido_pull_sse_connections_total`      | counter | SSE connections established, by `route`                |
+| `hookaido_pull_sse_messages_sent_total`    | counter | Messages sent over SSE, by `route`                     |
+| `hookaido_pull_sse_connection_active`      | gauge   | Currently active SSE connections, by `route`           |
+
+**Secret and publish-policy metrics:**
+
+| Metric                                                        | Type    | Description                                                                 |
+| ------------------------------------------------------------- | ------- | --------------------------------------------------------------------------- |
+| `hookaido_runtime_secret_gc_pruned_total`                     | counter | Expired runtime-secret versions pruned by the background sweeper, by pool name |
+| `hookaido_publish_rejected_managed_target_mismatch_total`     | counter | Admin publish rejections with code `managed_target_mismatch`                 |
+| `hookaido_publish_rejected_managed_resolver_missing_total`    | counter | Admin publish rejections with code `managed_resolver_missing`                |
 
 **Store common metrics:**
 
@@ -352,10 +375,10 @@ observability {
 | `tls.key_file`             | —            | Client key file for mTLS          |
 | `tls.server_name`          | —            | Override TLS server name          |
 | `tls.insecure_skip_verify` | `off`        | Skip TLS certificate verification |
-| `retry.enabled`            | `off`        | Retry failed exports              |
-| `retry.initial_interval`   | —            | First retry delay                 |
-| `retry.max_interval`       | —            | Maximum retry delay               |
-| `retry.max_elapsed_time`   | —            | Total retry time budget           |
+| `retry.enabled`            | `on`         | Retry failed exports              |
+| `retry.initial_interval`   | `5s`         | First retry delay                 |
+| `retry.max_interval`       | `30s`        | Maximum retry delay               |
+| `retry.max_elapsed_time`   | `1m`         | Total retry time budget           |
 | `header`                   | —            | Custom HTTP headers (repeatable)  |
 
 > Header entries must be valid HTTP header name/value pairs. Invalid entries fail config validation.

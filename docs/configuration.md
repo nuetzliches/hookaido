@@ -488,7 +488,7 @@ auth hmac {
 }
 ```
 
-**HMAC** (provider mode — GitHub, Gitea/Forgejo):
+**HMAC** (provider mode — GitHub, Gitea/Forgejo, Stripe, Cituro):
 
 ```hcl
 auth hmac {
@@ -500,9 +500,28 @@ auth hmac {
   provider gitea
   secret env:GITEA_WEBHOOK_SECRET
 }
+
+auth hmac {
+  provider stripe
+  secret env:STRIPE_WEBHOOK_SECRET
+}
+
+auth hmac {
+  provider cituro
+  secret env:CITURO_WEBHOOK_SECRET
+}
 ```
 
-Provider mode uses the provider's native signature format (`X-Hub-Signature-256` for GitHub, `X-Gitea-Signature` for Gitea) without timestamp/nonce replay protection. `signature_header`, `timestamp_header`, `nonce_header`, and `tolerance` are forbidden in provider mode.
+Provider mode uses the provider's native signature format. `signature_header`, `timestamp_header`, `nonce_header`, and `tolerance` are forbidden in provider mode.
+
+| Provider | Signature header | Signed payload | Replay protection |
+|---|---|---|---|
+| `github` | `X-Hub-Signature-256: sha256=<hex>` | `body` | none (GitHub omits a timestamp) |
+| `gitea` | `X-Gitea-Signature: <hex>` | `body` | none |
+| `stripe` | `Stripe-Signature: t=<ts>,v1=<hex>` | `<ts>.<body>` | 5 min fixed tolerance |
+| `cituro` | `X-CITURO-SIGNATURE: t=<ts>,s=<hex>` | `<ts>.<body>` | 5 min fixed tolerance |
+
+`stripe` and `cituro` do carry replay protection — they verify a timestamped signature against a fixed 5-minute window. Only `github` and `gitea` have none, because those providers send no timestamp to bind. See [Security](security.md#providers) for the full comparison.
 
 **Basic auth:**
 
@@ -589,9 +608,9 @@ deliver exec "/opt/hooks/deploy.sh" {
 |---|---|
 | `0` | Success — message is acked |
 | `75` | Temporary failure (EX_TEMPFAIL) — retriable |
-| `1-125` | General failure — retriable with backoff |
-| `126`, `127` | Command not found / not executable — immediate DLQ |
+| Any other non-zero exit code | General failure — retriable with backoff. This includes `126` and `127`: once the process has run and exited, Hookaido sees only an exit code, so a shell that exits `127` because an inner tool was missing is retried like any other failure |
 | Signal | Process killed — retriable |
+| Command could not be started | Non-retriable, immediate DLQ. Applies when the binary is not on `PATH`, the file does not exist, or it is not executable — detected before the process runs, so no exit code exists |
 
 Custom `env` values support all placeholder syntaxes (`{env.VAR}`, `{$VAR}`, `{file.PATH}`, `{vars.NAME}`).
 
@@ -676,6 +695,8 @@ kill -HUP $(cat ./hookaido.pid)
 | Route-level `max_body` / `max_headers`                         | Per-route overrides only |
 | Route-level `publish` / `publish.direct` / `publish.managed`   |                          |
 | Trend signals config                                           |                          |
+| Deliver targets, URLs, retry, timeout, concurrency, signing     | Dispatcher is restarted in place after a drain of up to 15s; in-flight deliveries finish first |
+| Egress policy (`defaults.egress.*`)                            | Applied with the dispatcher restart above |
 
 ### Restart Required
 
@@ -690,8 +711,6 @@ If any of these change, Hookaido rejects the reload and requires a process resta
 | Pull API limits (`max_batch`, `*_lease_ttl`, `*_max_wait`)                   | Set on server struct at startup         |
 | `defaults.max_body` / `defaults.max_headers` (global defaults)               | Set on ingress/admin servers at startup |
 | `defaults.publish_policy.*` (all publish policy fields)                      | Set on admin server at startup          |
-| Deliver targets, URLs, retry, timeout, concurrency, signing                  | Dispatcher goroutine topology           |
-| Egress policy (`defaults.egress.*`) when deliver routes exist                | Baked into dispatcher                   |
 | Queue backend type (`sqlite`/`memory`/`postgres`)                            | No migration path                       |
 | Queue limits / retention / DLQ retention                                     | Set on queue store at startup           |
 | Observability (log sinks, tracing, metrics)                                  | Exporter/sink initialized once          |

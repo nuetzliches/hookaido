@@ -63,7 +63,7 @@ Project: Hookaido (Webhook ingress queue, Caddy-style).
 - Pin in `go.mod` and CI.
 - Prefer the same minimum Go version as Caddy unless there is a strong reason to diverge.
 - Track Caddy's minimum supported Go version for the `go` directive.
-- CI uses the latest patch of that minor (e.g., `1.25.x`).
+- CI uses the latest patch of that minor (e.g., `1.26.x`).
 - Bump the minimum only when Caddy does, or when a required feature/bugfix justifies it.
 
 ## Git & Release Workflow

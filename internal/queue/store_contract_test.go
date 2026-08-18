@@ -1,6 +1,7 @@
 package queue_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -863,6 +864,147 @@ func TestStoreContract_ReadinessTransitionsNotifyWaiters(t *testing.T) {
 						t.Fatalf("%s made the message ready without waking waiters", tc.name)
 					}
 				})
+			}
+		})
+	}
+}
+
+// contractAttemptsRetentionFactories configures attempt-history retention on
+// every backend so the shared behaviour can be exercised.
+func contractAttemptsRetentionFactories(maxAge time.Duration, maxRows int) []storeFactory {
+	out := []storeFactory{
+		{
+			name: "memory",
+			new: func(t *testing.T, now *time.Time) queue.Store {
+				t.Helper()
+				return queue.NewMemoryStore(
+					queue.WithNowFunc(func() time.Time { return now.UTC() }),
+					queue.WithQueueRetention(0, time.Nanosecond),
+					queue.WithAttemptsRetention(maxAge, maxRows),
+				)
+			},
+		},
+		{
+			name: "sqlite",
+			new: func(t *testing.T, now *time.Time) queue.Store {
+				t.Helper()
+				dbPath := filepath.Join(t.TempDir(), "hookaido.db")
+				s, err := sqlite.NewStore(
+					dbPath,
+					sqlite.WithNowFunc(func() time.Time { return now.UTC() }),
+					sqlite.WithPollInterval(5*time.Millisecond),
+					sqlite.WithCheckpointInterval(0),
+					sqlite.WithRetention(0, time.Nanosecond),
+					sqlite.WithAttemptsRetention(maxAge, maxRows),
+				)
+				if err != nil {
+					t.Fatalf("new sqlite store: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		},
+	}
+
+	dsn := strings.TrimSpace(os.Getenv("HOOKAIDO_TEST_POSTGRES_DSN"))
+	if dsn != "" {
+		out = append(out, storeFactory{
+			name: "postgres",
+			new: func(t *testing.T, now *time.Time) queue.Store {
+				t.Helper()
+				s, err := postgres.NewStore(
+					dsn,
+					postgres.WithNowFunc(func() time.Time { return now.UTC() }),
+					postgres.WithPollInterval(5*time.Millisecond),
+					postgres.WithRetention(0, time.Nanosecond),
+					postgres.WithAttemptsRetention(maxAge, maxRows),
+				)
+				if err != nil {
+					t.Fatalf("new postgres store: %v", err)
+				}
+				postgres.TruncateForTest(t, s)
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		})
+	}
+
+	return out
+}
+
+func recordAttempts(t *testing.T, store queue.Store, n int, at time.Time) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if err := store.RecordAttempt(queue.DeliveryAttempt{
+			ID:        fmt.Sprintf("att_%d_%d", at.UnixNano(), i),
+			EventID:   fmt.Sprintf("evt_%d", i),
+			Route:     "/r",
+			Target:    "https://example.org/hook",
+			Attempt:   1,
+			Outcome:   queue.AttemptOutcomeAcked,
+			CreatedAt: at,
+		}); err != nil {
+			t.Fatalf("record attempt %d: %v", i, err)
+		}
+	}
+}
+
+func attemptCount(t *testing.T, store queue.Store) int {
+	t.Helper()
+	resp, err := store.ListAttempts(queue.AttemptListRequest{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	return len(resp.Items)
+}
+
+// Delivery-attempt history was append-only in every backend: nothing anywhere
+// deleted or capped it. The memory store grew until it OOMed the process --
+// invisible to the memory-pressure guard, which counts only envelope bytes --
+// and the SQLite/Postgres tables grew until the disk filled and enqueue started
+// failing.
+func TestStoreContract_AttemptsRetentionPrunesByAge(t *testing.T) {
+	for _, factory := range contractAttemptsRetentionFactories(time.Hour, 0) {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 2, 14, 21, 15, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			recordAttempts(t, store, 3, now)
+			if got := attemptCount(t, store); got != 3 {
+				t.Fatalf("attempts before prune = %d, want 3", got)
+			}
+
+			now = now.Add(2 * time.Hour)
+			recordAttempts(t, store, 1, now)
+
+			// Retention runs with the other prunes, on enqueue or dequeue.
+			if _, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1}); err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+
+			if got := attemptCount(t, store); got != 1 {
+				t.Fatalf("attempts after prune = %d, want 1 (only the recent one survives)", got)
+			}
+		})
+	}
+}
+
+func TestStoreContract_AttemptsRetentionCapsRowCount(t *testing.T) {
+	for _, factory := range contractAttemptsRetentionFactories(0, 5) {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 2, 14, 21, 15, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			for i := 0; i < 12; i++ {
+				now = now.Add(time.Second)
+				recordAttempts(t, store, 1, now)
+			}
+			if _, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1}); err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+
+			if got := attemptCount(t, store); got > 5 {
+				t.Fatalf("attempts = %d, want at most the configured 5", got)
 			}
 		})
 	}

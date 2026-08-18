@@ -192,7 +192,7 @@ Filesystem snapshots (LVM, ZFS, EBS) also work — SQLite WAL is crash-safe.
 - [ ] Enable TLS on Pull API and Admin API
 - [ ] Use a durable backend: `sqlite` with persistent `--db`, or `postgres` with `--postgres-dsn`/`HOOKAIDO_POSTGRES_DSN`
 - [ ] Admin API defaults to localhost — expose only over a secure channel if needed
-- [ ] Configure `queue_limits`, `queue_retention`, and `dlq_retention` for your throughput
+- [ ] Configure `queue_limits`, `queue_retention`, `dlq_retention`, and `attempts_retention` for your throughput
 - [ ] Enable [observability](observability.md) (metrics + access logs at minimum)
 
 ---

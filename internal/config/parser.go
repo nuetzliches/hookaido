@@ -187,6 +187,16 @@ func (p *parser) parseTopLevelBlock(cfg *Config) error {
 		}
 		cfg.DLQRetention = b
 		return nil
+	case "attempts_retention":
+		if cfg.AttemptsRetention != nil {
+			return p.errAt(nameTok.pos, "duplicate attempts_retention block")
+		}
+		b, err := p.parseAttemptsRetentionBlock()
+		if err != nil {
+			return err
+		}
+		cfg.AttemptsRetention = b
+		return nil
 	case "queue_limits":
 		if cfg.QueueLimits != nil {
 			return p.errAt(nameTok.pos, "duplicate queue_limits block")
@@ -2352,6 +2362,64 @@ func (p *parser) parseDLQRetentionBlock() (*DLQRetentionBlock, error) {
 			out.MaxDepthSet = true
 		default:
 			return nil, p.errAt(dirTok.pos, "unknown dlq_retention directive %q", dirTok.text)
+		}
+	}
+
+	return out, nil
+}
+
+func (p *parser) parseAttemptsRetentionBlock() (*AttemptsRetentionBlock, error) {
+	if _, err := p.expect(tokLBrace, "expected '{' after attempts_retention"); err != nil {
+		return nil, err
+	}
+	out := &AttemptsRetentionBlock{}
+
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if tok.kind == tokEOF {
+			return nil, p.errAt(tok.pos, "unexpected EOF (missing '}')")
+		}
+		if tok.kind == tokRBrace {
+			_, _ = p.next()
+			break
+		}
+		if tok.kind == tokComment {
+			_, _ = p.next()
+			continue
+		}
+
+		dirTok, _ := p.next()
+		if dirTok.kind != tokIdent {
+			return nil, p.errAt(dirTok.pos, "expected directive name")
+		}
+		switch dirTok.text {
+		case "max_age":
+			if out.MaxAgeSet {
+				return nil, p.errAt(dirTok.pos, "duplicate attempts_retention max_age")
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.MaxAge = v
+			out.MaxAgeQuoted = quoted
+			out.MaxAgeSet = true
+		case "max_rows":
+			if out.MaxRowsSet {
+				return nil, p.errAt(dirTok.pos, "duplicate attempts_retention max_rows")
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.MaxRows = v
+			out.MaxRowsQuoted = quoted
+			out.MaxRowsSet = true
+		default:
+			return nil, p.errAt(dirTok.pos, "unknown attempts_retention directive %q", dirTok.text)
 		}
 	}
 

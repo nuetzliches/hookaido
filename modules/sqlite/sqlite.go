@@ -235,6 +235,23 @@ func WithDLQRetention(maxAge time.Duration, maxDepth int) Option {
 	}
 }
 
+// WithAttemptsRetention bounds delivery-attempt history by age and by row
+// count. Both dimensions are optional; zero disables that half.
+func WithAttemptsRetention(maxAge time.Duration, maxRows int) Option {
+	return func(s *Store) {
+		if maxAge > 0 {
+			s.attemptsRetentionMaxAge = maxAge
+		} else {
+			s.attemptsRetentionMaxAge = 0
+		}
+		if maxRows > 0 {
+			s.attemptsMaxRows = maxRows
+		} else {
+			s.attemptsMaxRows = 0
+		}
+	}
+}
+
 type Store struct {
 	db *sql.DB
 
@@ -251,6 +268,8 @@ type Store struct {
 	deliveredRetentionMaxAge time.Duration
 	dlqRetentionMaxAge       time.Duration
 	dlqMaxDepth              int
+	attemptsRetentionMaxAge  time.Duration
+	attemptsMaxRows          int
 	checkpointInterval       time.Duration
 	checkpointStop           chan struct{}
 	checkpointDone           chan struct{}
@@ -904,7 +923,8 @@ func (s *Store) maybePrune(now time.Time) error {
 	if s.pruneInterval <= 0 {
 		return nil
 	}
-	if s.retentionMaxAge <= 0 && s.deliveredRetentionMaxAge <= 0 && s.dlqRetentionMaxAge <= 0 && s.dlqMaxDepth <= 0 {
+	if s.retentionMaxAge <= 0 && s.deliveredRetentionMaxAge <= 0 && s.dlqRetentionMaxAge <= 0 && s.dlqMaxDepth <= 0 &&
+		s.attemptsRetentionMaxAge <= 0 && s.attemptsMaxRows <= 0 {
 		return nil
 	}
 
@@ -971,6 +991,33 @@ WHERE id IN (
 			return err
 		}
 	}
+	// Delivery-attempt history was append-only: nothing in any backend ever
+	// deleted from delivery_attempts, so a push deployment doing 10 attempts/s
+	// added ~860k rows a day forever, until the file (and its created_at index)
+	// exhausted the disk and enqueue started failing.
+	if s.attemptsRetentionMaxAge > 0 {
+		cutoff := now.Add(-s.attemptsRetentionMaxAge)
+		if _, err := s.db.ExecContext(context.Background(), `
+DELETE FROM delivery_attempts
+WHERE created_at <= ?;
+`, cutoff.UnixNano()); err != nil {
+			return err
+		}
+	}
+
+	if s.attemptsMaxRows > 0 {
+		if _, err := s.db.ExecContext(context.Background(), `
+DELETE FROM delivery_attempts
+WHERE id IN (
+  SELECT id FROM delivery_attempts
+  ORDER BY created_at DESC, id DESC
+  LIMIT -1 OFFSET ?
+);
+`, s.attemptsMaxRows); err != nil {
+			return err
+		}
+	}
+
 	s.lastPrune = now
 	return nil
 }
@@ -3334,6 +3381,7 @@ func (backend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() error, er
 		WithRetention(cfg.RetentionMaxAge, cfg.RetentionPruneInterval),
 		WithDeliveredRetention(cfg.DeliveredRetentionMaxAge),
 		WithDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
+		WithAttemptsRetention(cfg.AttemptsRetentionMaxAge, cfg.AttemptsRetentionMaxRows),
 	)
 	if err != nil {
 		return nil, nil, err

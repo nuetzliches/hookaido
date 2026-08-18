@@ -231,6 +231,10 @@ A requeued message starts its retry budget over: it is delivered as if newly enq
 
 ## Delivery Attempts
 
+Attempt history is bounded by [`attempts_retention`](configuration.md#attempts_retention)
+(`max_age 7d`, `max_rows 200000` by default). Earlier versions kept every attempt
+forever on every backend.
+
 Each delivery attempt is recorded with:
 
 - `event_id` — source message ID

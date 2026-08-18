@@ -18,55 +18,62 @@ func format(cfg *Config) ([]byte, error) {
 		b.WriteByte('\n')
 	}
 
-	hasBody := cfg.Ingress != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || cfg.PullAPI != nil || cfg.AdminAPI != nil || cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.QueueLimits != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0
+	hasBody := cfg.Ingress != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || cfg.PullAPI != nil || cfg.AdminAPI != nil || cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0
 	if len(cfg.Preamble) > 0 && hasBody {
 		b.WriteByte('\n')
 	}
 
 	if cfg.Ingress != nil {
 		writeIngressBlock(&b, cfg.Ingress)
-		if cfg.PullAPI != nil || cfg.AdminAPI != nil || cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
+		if cfg.PullAPI != nil || cfg.AdminAPI != nil || cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
 			b.WriteByte('\n')
 		}
 	}
 
 	if cfg.PullAPI != nil {
 		writeAPIBlock(&b, "pull_api", cfg.PullAPI)
-		if cfg.AdminAPI != nil || cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
+		if cfg.AdminAPI != nil || cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
 			b.WriteByte('\n')
 		}
 	}
 
 	if cfg.AdminAPI != nil {
 		writeAPIBlock(&b, "admin_api", cfg.AdminAPI)
-		if cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
+		if cfg.Observability != nil || cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
 			b.WriteByte('\n')
 		}
 	}
 
 	if cfg.Observability != nil {
 		writeObservabilityBlock(&b, cfg.Observability)
-		if cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
+		if cfg.QueueRetention != nil || cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
 			b.WriteByte('\n')
 		}
 	}
 
 	if cfg.QueueRetention != nil {
 		writeQueueRetentionBlock(&b, cfg.QueueRetention)
-		if cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
+		if cfg.DeliveredRetention != nil || cfg.DLQRetention != nil || cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
 			b.WriteByte('\n')
 		}
 	}
 
 	if cfg.DeliveredRetention != nil {
 		writeDeliveredRetentionBlock(&b, cfg.DeliveredRetention)
-		if cfg.DLQRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
+		if cfg.DLQRetention != nil || cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
 			b.WriteByte('\n')
 		}
 	}
 
 	if cfg.DLQRetention != nil {
 		writeDLQRetentionBlock(&b, cfg.DLQRetention)
+		if cfg.AttemptsRetention != nil || cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
+			b.WriteByte('\n')
+		}
+	}
+
+	if cfg.AttemptsRetention != nil {
+		writeAttemptsRetentionBlock(&b, cfg.AttemptsRetention)
 		if cfg.QueueLimits != nil || cfg.Defaults != nil || cfg.Vars != nil || cfg.Secrets != nil || len(cfg.NamedMatchers) > 0 || len(cfg.Routes) > 0 {
 			b.WriteByte('\n')
 		}
@@ -642,6 +649,17 @@ func writeDLQRetentionBlock(b *bytes.Buffer, q *DLQRetentionBlock) {
 	}
 	if q.MaxDepthSet {
 		fmt.Fprintf(b, "  max_depth %s\n", formatValue(q.MaxDepth, q.MaxDepthQuoted))
+	}
+	b.WriteString("}\n")
+}
+
+func writeAttemptsRetentionBlock(b *bytes.Buffer, a *AttemptsRetentionBlock) {
+	b.WriteString("attempts_retention {\n")
+	if a.MaxAgeSet {
+		fmt.Fprintf(b, "  max_age %s\n", formatValue(a.MaxAge, a.MaxAgeQuoted))
+	}
+	if a.MaxRowsSet {
+		fmt.Fprintf(b, "  max_rows %s\n", formatValue(a.MaxRows, a.MaxRowsQuoted))
 	}
 	b.WriteString("}\n")
 }

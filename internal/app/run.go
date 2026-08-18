@@ -2903,6 +2903,8 @@ func newQueueStore(compiled config.Compiled, dbPath, postgresDSN string) (queue.
 		DeliveredRetentionMaxAge: compiled.DeliveredRetention.MaxAge,
 		DLQRetentionMaxAge:       compiled.DLQRetention.MaxAge,
 		DLQRetentionMaxDepth:     compiled.DLQRetention.MaxDepth,
+		AttemptsRetentionMaxAge:  compiled.AttemptsRetention.MaxAge,
+		AttemptsRetentionMaxRows: compiled.AttemptsRetention.MaxRows,
 	}
 
 	store, closer, err := b.OpenStore(cfg)
@@ -3251,6 +3253,13 @@ func dlqRetentionEqual(a, b config.DLQRetentionConfig) bool {
 	return a.MaxAge == b.MaxAge && a.MaxDepth == b.MaxDepth
 }
 
+func attemptsRetentionEqual(a, b config.AttemptsRetentionConfig) bool {
+	if a.Enabled != b.Enabled {
+		return false
+	}
+	return a.MaxAge == b.MaxAge && a.MaxRows == b.MaxRows
+}
+
 func requiresRestartForReload(compiled, running config.Compiled) bool {
 	if compiled.SharedListener != running.SharedListener ||
 		compiled.IngressShared != running.IngressShared ||
@@ -3279,7 +3288,8 @@ func requiresRestartForReload(compiled, running config.Compiled) bool {
 		!queueLimitsEqual(compiled.QueueLimits, running.QueueLimits) ||
 		!queueRetentionEqual(compiled.QueueRetention, running.QueueRetention) ||
 		!deliveredRetentionEqual(compiled.DeliveredRetention, running.DeliveredRetention) ||
-		!dlqRetentionEqual(compiled.DLQRetention, running.DLQRetention) {
+		!dlqRetentionEqual(compiled.DLQRetention, running.DLQRetention) ||
+		!attemptsRetentionEqual(compiled.AttemptsRetention, running.AttemptsRetention) {
 		return true
 	}
 

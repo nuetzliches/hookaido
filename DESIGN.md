@@ -60,6 +60,7 @@ Global:
 - `queue_retention { max_age, prune_interval }`
 - `delivered_retention { max_age }`
 - `dlq_retention { max_age, max_depth }`
+- `attempts_retention { max_age, max_rows }`
 - `secrets { secret "ID" { value, valid_from, valid_until? } }`
 - `defaults { max_body, max_headers, egress?, publish_policy?, deliver?, trend_signals?, adaptive_backpressure? }`
 - `observability { access_log, runtime_log?, metrics?, tracing? }`:
@@ -190,6 +191,12 @@ Persisted, replayable envelope:
 - For `queue { backend memory }`, when delivered retention is enabled, `queue_limits.max_depth`
   also guards `queued + leased + delivered` items to bound in-memory retention growth.
 - Set `max_age off` (or `0`) to disable delivered retention.
+
+### Delivery-Attempt Retention & Pruning
+- Controlled by `attempts_retention { max_age, max_rows }`.
+- Pruning removes attempt records older than `max_age` and caps the history at `max_rows` (oldest first).
+- Pruning cadence uses `queue_retention.prune_interval`; the memory backend also enforces `max_rows` on write.
+- Set `max_age off` and `max_rows off` to disable attempt retention. Attempt history is otherwise append-only, so the defaults are finite by design.
 
 ### DLQ Retention & Pruning
 - Controlled by `dlq_retention { max_age, max_depth }`.
@@ -351,6 +358,7 @@ Endpoints:
 - memory-backend pressure guard (runtime): retained non-active item limit `max(max_depth, 1000)` and retained non-active byte limit `256MiB` (whichever triggers first emits `ErrMemoryPressure` / ingress `503`)
 - `queue_retention`: `max_age "7d"`, `prune_interval "5m"`
 - `dlq_retention`: `max_age "30d"`, `max_depth 10000`
+- `attempts_retention`: `max_age "7d"`, `max_rows 200000`
 - `deliver`: retry exponential (`max 8`, `base 2s`, `cap 2m`, `jitter 0.2`), `timeout 10s`, `concurrency 20`
 - deliver signing headers (when `sign hmac` is set): `signature_header "X-Hookaido-Signature"`, `timestamp_header "X-Hookaido-Timestamp"`
 - deliver signing secret selection (when multiple `sign hmac secret_ref` are set): `secret_selection "newest_valid"`

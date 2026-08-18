@@ -209,6 +209,7 @@ deliver exec "python /app/handler.py" {
 
 - `sign` directives are **not supported** with exec (compile error).
 - Timeout is enforced via context cancellation; the process receives `SIGKILL` on expiry.
+- A child process that outlives the command and inherited its stderr keeps that pipe open. Hookaido waits at most 2s past the process exit (or past the timeout) for it, then moves on rather than holding the route worker. If the command itself exited `0`, the delivery counts as delivered and `exec_lingering_output` is logged — redirect background children away from stderr (`mydaemon >/dev/null 2>&1 &`) to avoid the wait.
 - `deliver_concurrency` applies to exec delivery the same as HTTP delivery.
 - Dead-lettering follows the same rules as HTTP push (max retries exhausted, non-retryable errors).
 - Stderr output is captured and logged (truncated to 4 KB) at debug level.
@@ -225,6 +226,8 @@ Dead items persist a `dead_reason` for inspection. Manage the DLQ via the [Admin
 - `GET /dlq` — list dead items
 - `POST /dlq/requeue` — requeue for reprocessing
 - `POST /dlq/delete` — permanently remove
+
+A requeued message starts its retry budget over: it is delivered as if newly enqueued, with the full `retry.max` schedule available again. The same applies to the message-management requeue endpoints, which also accept canceled messages. Resuming a canceled message (`/messages/resume`) keeps its attempt count, since that continues a message rather than re-injecting it.
 
 ## Delivery Attempts
 

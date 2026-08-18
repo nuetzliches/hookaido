@@ -687,3 +687,82 @@ func TestStoreContract_LeaseBatchRequeuesExpiredLeases(t *testing.T) {
 func leaseBatchID(i int) string {
 	return "evt_lb_" + string(rune('a'+i))
 }
+
+// A requeued message must come back with a fresh retry budget. Requeue reset
+// state, lease and reason but kept Attempt, so a message that dead-lettered at
+// attempt 9 (retry.max 8) returned at 9: the next dequeue made it 10, the
+// dispatcher's `env.Attempt <= target.Retry.Max` gate was false for every
+// retryable outcome, and a single 503 or connection-refused sent it straight
+// back to the DLQ with reason max_retries. The configured exponential schedule
+// never applied to requeued messages at all, so an operator requeueing a cohort
+// during a brief target blip re-dead-lettered all of it.
+func TestStoreContract_RequeueResetsAttempt(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			requeues := map[string]func(store queue.Store) error{
+				"RequeueDead": func(store queue.Store) error {
+					_, err := store.RequeueDead(queue.DeadRequeueRequest{IDs: []string{"evt_dead"}})
+					return err
+				},
+				"RequeueMessages": func(store queue.Store) error {
+					_, err := store.RequeueMessages(queue.MessageRequeueRequest{IDs: []string{"evt_dead"}})
+					return err
+				},
+				"RequeueMessagesByFilter": func(store queue.Store) error {
+					_, err := store.RequeueMessagesByFilter(queue.MessageManageFilterRequest{Route: "/r"})
+					return err
+				},
+			}
+
+			for name, requeue := range requeues {
+				t.Run(name, func(t *testing.T) {
+					now := time.Date(2026, 2, 14, 21, 15, 0, 0, time.UTC)
+					store := factory.new(t, &now)
+
+					if err := store.Enqueue(queue.Envelope{ID: "evt_dead", Route: "/r", Target: "pull"}); err != nil {
+						t.Fatalf("enqueue: %v", err)
+					}
+
+					// Burn a few attempts the way repeated delivery failures do.
+					const failures = 3
+					for i := 0; i < failures; i++ {
+						resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+						if err != nil {
+							t.Fatalf("dequeue %d: %v", i, err)
+						}
+						if len(resp.Items) != 1 {
+							t.Fatalf("dequeue %d items=%d, want 1", i, len(resp.Items))
+						}
+						if got, want := resp.Items[0].Attempt, i+1; got != want {
+							t.Fatalf("attempt after dequeue %d = %d, want %d", i, got, want)
+						}
+						if i == failures-1 {
+							if err := store.MarkDead(resp.Items[0].LeaseID, "max_retries"); err != nil {
+								t.Fatalf("mark dead: %v", err)
+							}
+							break
+						}
+						if err := store.Nack(resp.Items[0].LeaseID, 0); err != nil {
+							t.Fatalf("nack %d: %v", i, err)
+						}
+					}
+
+					if err := requeue(store); err != nil {
+						t.Fatalf("requeue: %v", err)
+					}
+
+					resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: 10 * time.Second})
+					if err != nil {
+						t.Fatalf("dequeue after requeue: %v", err)
+					}
+					if len(resp.Items) != 1 {
+						t.Fatalf("dequeue after requeue items=%d, want 1", len(resp.Items))
+					}
+					if got := resp.Items[0].Attempt; got != 1 {
+						t.Fatalf("attempt after requeue = %d, want 1: the message keeps its old retry count and dead-letters again after one delivery", got)
+					}
+				})
+			}
+		})
+	}
+}

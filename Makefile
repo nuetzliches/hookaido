@@ -31,6 +31,9 @@ PUSH_SKEWED_CURRENT := $(BENCH_DIR)/push-skewed.txt
 PUSH_SKEWED_BASELINE := $(BENCH_DIR)/push-skewed-baseline.txt
 PUSH_SKEWED_COMPARE := $(BENCH_DIR)/push-skewed-compare.txt
 BENCHSTAT_CMD := golang.org/x/perf/cmd/benchstat@v0.0.0-20260211190930-8161c38c6cdc
+COVERAGE_REPORT_SCRIPT := scripts/coverage-report.sh
+COVER_PROFILE := coverage.out
+COVER_TARGET := 80.0
 ADAPTIVE_AB_SCRIPT := scripts/adaptive-ab.sh
 ADAPTIVE_GUARDRAIL_SCRIPT := scripts/adaptive-guardrail.sh
 ADAPTIVE_LAG_GUARDRAIL_SCRIPT := scripts/adaptive-lag-guardrail.sh
@@ -56,7 +59,7 @@ ADAPTIVE_MAX_READY_LAG_DELTA_SECONDS ?= 10
 ADAPTIVE_MAX_OLDEST_QUEUED_AGE_DELTA_SECONDS ?= 10
 ADAPTIVE_LAG_MIN_ACCEPTED ?= 100
 
-.PHONY: build build-minimal test test-pg fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation adaptive-ab-guardrail-check adaptive-ab-mixed-guardrail adaptive-ab-lag-guardrail-check adaptive-ab-mixed-lag-guardrail release-check dist dist-signed dist-verify
+.PHONY: build build-minimal test test-pg cover fmt lint check proto-worker bench-pull bench-pull-baseline bench-pull-compare bench-pull-extend bench-pull-extend-compare bench-pull-drain bench-pull-drain-baseline bench-pull-drain-compare bench-pull-contention bench-pull-contention-baseline bench-pull-contention-compare bench-pull-mixed bench-pull-mixed-baseline bench-pull-mixed-compare bench-push-mixed bench-push-mixed-baseline bench-push-mixed-compare bench-push-skewed bench-push-skewed-baseline bench-push-skewed-compare adaptive-ab adaptive-ab-all adaptive-ab-pull adaptive-ab-mixed adaptive-ab-mixed-saturation adaptive-ab-guardrail-check adaptive-ab-mixed-guardrail adaptive-ab-lag-guardrail-check adaptive-ab-mixed-lag-guardrail release-check dist dist-signed dist-verify
 
 build:
 	@mkdir -p "$(BINDIR)"
@@ -75,6 +78,14 @@ test:
 test-pg:
 	@test -n "$$HOOKAIDO_TEST_POSTGRES_DSN" || (echo "HOOKAIDO_TEST_POSTGRES_DSN must be set" && exit 1)
 	go test -p 1 ./...
+
+# cover measures coverage against the BACKLOG.md target. It requires the same
+# Postgres DSN as test-pg: without it the Postgres integration tests skip and
+# the resulting number understates coverage rather than failing loudly.
+cover:
+	@test -n "$$HOOKAIDO_TEST_POSTGRES_DSN" || (echo "HOOKAIDO_TEST_POSTGRES_DSN must be set" && exit 1)
+	go test -p 1 -coverprofile="$(COVER_PROFILE)" ./...
+	@"$(COVERAGE_REPORT_SCRIPT)" "$(COVER_PROFILE)" "$(COVER_TARGET)"
 
 fmt:
 	go fmt ./...

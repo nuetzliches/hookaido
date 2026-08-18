@@ -18,6 +18,19 @@ Thanks for contributing to Hookaido.
 go test ./...
 ```
 
+The Postgres-backed integration tests need a database. Start one and run the
+full suite serialized (a shared DSN across packages cannot take `go test -p`
+defaults):
+
+```bash
+docker compose -f docker-compose.test.yml up -d --wait
+export HOOKAIDO_TEST_POSTGRES_DSN="postgres://hookaido_test:hookaido_test@localhost:5433/hookaido_test?sslmode=disable"
+make test-pg
+```
+
+`make cover` runs the same suite with a coverage profile and prints a
+per-package breakdown against the 80% target tracked in [BACKLOG.md](BACKLOG.md).
+
 ## Change Expectations
 
 - Keep changes focused and small where possible.

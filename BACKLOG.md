@@ -4,14 +4,33 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-- [ ] **Test coverage ≥80%** — Current total: 75.9% as of v2.10.0 (with `HOOKAIDO_TEST_POSTGRES_DSN` set, see `make test-pg`). Focus areas:
-  - `internal/secrets` (70.8%) — Secret resolver edge cases
-  - `internal/pullapi` (73.6%) — Pull API handler coverage
-  - `internal/config` (77.3%) — Config parser edge cases
-  - `internal/mcp` (77.3%) — MCP server handler coverage
-- [ ] **Trigger Go Report Card + pkg.go.dev refresh** — The module path is `github.com/nuetzliches/hookaido/v2`, so `proxy.golang.org` resolves v2.x.x tags (it previously fell back to v1.5.1 under the Go modules v2+ rule). v2.9.0 and v2.10.0 are tagged; hit `POST /checks repo=github.com/nuetzliches/hookaido/v2` on goreportcard.com to refresh. Needed for pkg.go.dev visibility and the awesome-go submission.
+- [ ] **Test coverage ≥80%** — 76.9% as of v2.10.1, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — including it reads 75.9%, but 292 never-hand-tested statements say nothing about the code we write.
+
+  Ranked by uncovered statements, which is what actually moves the total — a package at 62% with 1,200 uncovered statements matters far more than one at 62% with 40:
+
+  | Package | Uncovered | Total | % |
+  | --- | ---: | ---: | ---: |
+  | `internal/config` | 1226 | 5480 | 77.6% |
+  | `internal/app` | 1204 | 3234 | 62.8% |
+  | `internal/mcp` | 897 | 4023 | 77.7% |
+  | `internal/admin` | 543 | 2606 | 79.2% |
+  | `modules/sqlite` | 391 | 1622 | 75.9% |
+  | `modules/postgres` | 239 | 1197 | 80.0% |
+  | `internal/queue` | 202 | 1282 | 84.2% |
+  | `internal/pullapi` | 163 | 597 | 72.7% |
+
+  Reaching 80% needs roughly **700 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is the largest percentage gap but the hardest: its zero-coverage functions are 39 `run.go` startup paths that need a real server bring-up, which is where the last coverage pass deliberately stopped.
+
+  Note on the previous numbers in this item: `internal/secrets` was listed at 70.8% and is now **82.4%**, already past target — the #227–#245 hardening PRs moved it. The stale figures are why `make cover` now exists instead of ad-hoc measurement.
+- [ ] **Publish a reachable coverage report** — awesome-go requires a Codecov or Coveralls link that resolves. CI computes a profile (`ci.yml`: `go test -race -coverprofile=coverage.out ./...`) but uploads it nowhere, so there is nothing to link. Needs a coverage service wired into CI plus a README badge. This is the one remaining awesome-go blocker fully in our control besides the 80% number itself.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
-- [ ] **awesome-go PR** — Submit to [avelino/awesome-go](https://github.com/avelino/awesome-go) under "Messaging" category. Requires: ≥5 months history (eligible ~July 2026), coverage ≥80%, Go Report Card A-, pkg.go.dev docs.
+- [ ] **awesome-go PR** — Submit to [avelino/awesome-go](https://github.com/avelino/awesome-go) under "Messaging" category. Status against its current `CONTRIBUTING.md`:
+  - ✅ ≥5 months of history — first commit 2026-02-10, eligible since July 2026
+  - ✅ OSS license, `go.mod`, SemVer release
+  - ✅ pkg.go.dev resolves the module — verified: `proxy.golang.org` returns v2.10.1 for `github.com/nuetzliches/hookaido/v2`, and `pkg.go.dev/github.com/nuetzliches/hookaido/v2` serves 200. The `/v2` migration fixed this.
+  - ❌ Coverage ≥80% — see the coverage item above
+  - ❌ Reachable coverage report link — see the item above
+  - ⚠️ Go Report Card grade A- — **not obtainable: goreportcard.com has been sunset.** Our report URL now serves a project farewell page instead of a grade, and `POST /checks` returns 404; it points users to `golangci-lint` and to self-hosting from `github.com/gojp/goreportcard`. awesome-go still lists the grade as a requirement and its PR template still asks for the link, so this needs a decision before submitting: ask the maintainers how they now handle it, or submit with a self-hosted report or a `golangci-lint` result in place of the link. We already run `golangci-lint` in CI.
 
 ## P2 - Nice to Have
 

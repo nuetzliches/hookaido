@@ -1,7 +1,10 @@
 package postgres
 
 import (
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1089,4 +1092,208 @@ func poolNames(records []secrets.Record) []string {
 		out = append(out, r.PoolName)
 	}
 	return out
+}
+
+// max_depth used to be three autocommit statements over a pool of 8
+// connections, so concurrent enqueues at the limit each observed room and all
+// inserted. This drives that interleaving directly: it fills the queue to one
+// below the limit and then races more enqueues than there is room for.
+func TestStore_EnqueueRespectsMaxDepthUnderConcurrency(t *testing.T) {
+	const maxDepth = 40
+	store := freshIntegrationStore(t, WithQueueLimits(maxDepth, "reject"))
+
+	// Fill to one slot short of the limit.
+	for i := 0; i < maxDepth-1; i++ {
+		if err := store.Enqueue(queue.Envelope{
+			ID:     fmt.Sprintf("evt_fill_%02d", i),
+			Route:  "/r",
+			Target: "pull",
+		}); err != nil {
+			t.Fatalf("fill %d: %v", i, err)
+		}
+	}
+
+	// Race far more enqueues than the single remaining slot.
+	const racers = 16
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = store.Enqueue(queue.Envelope{
+				ID:     fmt.Sprintf("evt_race_%02d", i),
+				Route:  "/r",
+				Target: "pull",
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	accepted := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, queue.ErrQueueFull):
+		default:
+			t.Fatalf("racer %d: unexpected error: %v", i, err)
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("expected exactly 1 of %d racers to be admitted into the last slot, got %d", racers, accepted)
+	}
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.Total != maxDepth {
+		t.Fatalf("depth = %d, want exactly %d", stats.Total, maxDepth)
+	}
+}
+
+// The drop_oldest mirror image: evictions must not outlive an enqueue that is
+// then rejected, and the depth must not undershoot either.
+func TestStore_EnqueueDropOldestHoldsDepthUnderConcurrency(t *testing.T) {
+	const maxDepth = 40
+	store := freshIntegrationStore(t, WithQueueLimits(maxDepth, "drop_oldest"))
+
+	for i := 0; i < maxDepth; i++ {
+		if err := store.Enqueue(queue.Envelope{
+			ID:     fmt.Sprintf("evt_fill_%02d", i),
+			Route:  "/r",
+			Target: "pull",
+		}); err != nil {
+			t.Fatalf("fill %d: %v", i, err)
+		}
+	}
+
+	const racers = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			if err := store.Enqueue(queue.Envelope{
+				ID:     fmt.Sprintf("evt_race_%02d", i),
+				Route:  "/r",
+				Target: "pull",
+			}); err != nil {
+				t.Errorf("racer %d: %v", i, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	// Every racer is admitted by evicting one older item, so the depth stays
+	// pinned at the limit rather than over- or undershooting.
+	if stats.Total != maxDepth {
+		t.Fatalf("depth = %d, want exactly %d", stats.Total, maxDepth)
+	}
+}
+
+func TestStore_EnqueueBatchIsAllOrNothing(t *testing.T) {
+	store := freshIntegrationStore(t)
+
+	if err := store.Enqueue(queue.Envelope{ID: "evt_dup", Route: "/r", Target: "pull"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Item 2 duplicates an existing id. Before EnqueueBatch existed, the admin
+	// API fell back to a per-item loop here, so items 0 and 1 stayed committed
+	// and visible while the call returned an error -- and the client's retry of
+	// the whole batch delivered them twice.
+	items := []queue.Envelope{
+		{ID: "evt_batch_0", Route: "/r", Target: "pull"},
+		{ID: "evt_batch_1", Route: "/r", Target: "pull"},
+		{ID: "evt_dup", Route: "/r", Target: "pull"},
+		{ID: "evt_batch_3", Route: "/r", Target: "pull"},
+	}
+	n, err := store.EnqueueBatch(items)
+	if !errors.Is(err, queue.ErrEnvelopeExists) {
+		t.Fatalf("expected ErrEnvelopeExists, got n=%d err=%v", n, err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 enqueued, got %d", n)
+	}
+
+	for _, id := range []string{"evt_batch_0", "evt_batch_1", "evt_batch_3"} {
+		resp, err := store.LookupMessages(queue.MessageLookupRequest{IDs: []string{id}})
+		if err != nil {
+			t.Fatalf("lookup %s: %v", id, err)
+		}
+		if len(resp.Items) != 0 {
+			t.Fatalf("item %s was committed despite the batch failing", id)
+		}
+	}
+}
+
+func TestStore_EnqueueBatchCommitsEveryItem(t *testing.T) {
+	store := freshIntegrationStore(t)
+
+	items := []queue.Envelope{
+		{ID: "evt_ok_0", Route: "/r", Target: "pull"},
+		{ID: "evt_ok_1", Route: "/r", Target: "pull"},
+		{ID: "evt_ok_2", Route: "/r", Target: "pull"},
+	}
+	n, err := store.EnqueueBatch(items)
+	if err != nil {
+		t.Fatalf("enqueue batch: %v", err)
+	}
+	if n != len(items) {
+		t.Fatalf("enqueued %d, want %d", n, len(items))
+	}
+	resp, err := store.LookupMessages(queue.MessageLookupRequest{IDs: []string{"evt_ok_0", "evt_ok_1", "evt_ok_2"}})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if len(resp.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(resp.Items))
+	}
+}
+
+func TestStore_EnqueueBatchRejectsWhenItDoesNotFit(t *testing.T) {
+	// The batch is checked as a whole: a partial admission would break the
+	// all-or-nothing contract just as much as a partial failure would.
+	const maxDepth = 10
+	store := freshIntegrationStore(t, WithQueueLimits(maxDepth, "reject"))
+
+	for i := 0; i < maxDepth-2; i++ {
+		if err := store.Enqueue(queue.Envelope{
+			ID:     fmt.Sprintf("evt_fill_%02d", i),
+			Route:  "/r",
+			Target: "pull",
+		}); err != nil {
+			t.Fatalf("fill %d: %v", i, err)
+		}
+	}
+
+	items := []queue.Envelope{
+		{ID: "evt_b0", Route: "/r", Target: "pull"},
+		{ID: "evt_b1", Route: "/r", Target: "pull"},
+		{ID: "evt_b2", Route: "/r", Target: "pull"},
+	}
+	n, err := store.EnqueueBatch(items)
+	if !errors.Is(err, queue.ErrQueueFull) {
+		t.Fatalf("expected ErrQueueFull, got n=%d err=%v", n, err)
+	}
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.Total != maxDepth-2 {
+		t.Fatalf("depth = %d, want the untouched %d", stats.Total, maxDepth-2)
+	}
 }

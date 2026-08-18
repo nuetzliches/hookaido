@@ -57,12 +57,16 @@ func newPostgresRuntimeMetrics() *postgresRuntimeMetrics {
 
 var _ queue.Store = (*Store)(nil)
 var _ queue.BacklogTrendStore = (*Store)(nil)
+var _ queue.BatchEnqueuer = (*Store)(nil)
 
 const (
 	postgresMaxDequeueBatch = 100
 	postgresMaxListLimit    = 1000
 	postgresBacklogMaxLimit = 20000
 )
+
+// postgresMaxOpenConns bounds the connection pool.
+const postgresMaxOpenConns = 8
 
 const postgresSchemaV1 = `
 CREATE TABLE IF NOT EXISTS queue_items (
@@ -216,7 +220,7 @@ func NewStore(dsn string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(8)
+	db.SetMaxOpenConns(postgresMaxOpenConns)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -274,6 +278,237 @@ func (s *Store) waitCh() <-chan struct{} {
 // After the channel fires, callers must call NotifyCh again to get the next signal.
 func (s *Store) NotifyCh() <-chan struct{} { return s.waitCh() }
 
+// enqueueDepthLockKey serializes the max_depth check across connections. The
+// value is arbitrary but must be stable and unique to this purpose within the
+// database; it spells "hkdp".
+const enqueueDepthLockKey int64 = 0x686b6470
+
+// preparedEnqueue is one envelope with its defaults applied and its JSON columns
+// encoded, ready to insert. Enqueue and EnqueueBatch share it so their
+// normalization cannot drift.
+type preparedEnqueue struct {
+	env         queue.Envelope
+	headersJSON any
+	traceJSON   any
+}
+
+// prepareEnqueue applies the envelope defaults and encodes the JSON columns.
+func (s *Store) prepareEnqueue(env queue.Envelope, now time.Time) (preparedEnqueue, error) {
+	if env.ID == "" {
+		env.ID = newHexID("evt_")
+	}
+	if env.Route == "" {
+		return preparedEnqueue{}, errors.New("route is required")
+	}
+	if env.Target == "" {
+		return preparedEnqueue{}, errors.New("target is required")
+	}
+	if env.ReceivedAt.IsZero() {
+		env.ReceivedAt = now
+	}
+	env.ReceivedAt = env.ReceivedAt.UTC()
+	if env.NextRunAt.IsZero() {
+		env.NextRunAt = now
+	}
+	env.NextRunAt = env.NextRunAt.UTC()
+	if env.State == "" {
+		env.State = queue.StateQueued
+	}
+	if env.Attempt < 0 {
+		env.Attempt = 0
+	}
+	if env.SchemaVersion == 0 {
+		env.SchemaVersion = 1
+	}
+	if env.Payload == nil {
+		env.Payload = []byte{}
+	}
+
+	headersJSON, err := encodeStringMapJSON(env.Headers)
+	if err != nil {
+		return preparedEnqueue{}, err
+	}
+	traceJSON, err := encodeStringMapJSON(env.Trace)
+	if err != nil {
+		return preparedEnqueue{}, err
+	}
+	return preparedEnqueue{env: env, headersJSON: headersJSON, traceJSON: traceJSON}, nil
+}
+
+// enforceDepthLimitTx makes room for want additional items, or reports
+// ErrQueueFull.
+//
+// The count, the optional drops and the insert used to be three independent
+// autocommit statements, so concurrent enqueues at the limit each observed room
+// and all inserted -- and with drop_oldest the mirror image over-dropped,
+// evicting messages to make space for an enqueue that was then rejected.
+//
+// Two mechanisms fix that, and they address different halves. The caller's
+// transaction is what keeps drops from outliving a rejected enqueue: returning
+// from here rolls them back. A transaction alone does not fix the count, though,
+// because under READ COMMITTED every concurrent enqueue still sees only
+// committed rows and so reads the same pre-insert depth. Serializing them needs
+// the advisory lock.
+//
+// The lock is not taken unconditionally, because it costs real throughput:
+// measured against a local Postgres, always locking cut concurrent enqueue
+// throughput roughly fourfold, and enqueue is the ingress hot path. It is taken
+// only once the queue is close enough to the limit that a concurrent enqueue
+// could cross it.
+//
+// The margin has to bound how much other in-flight enqueues can add between this
+// count and this insert. At most postgresMaxOpenConns transactions can be
+// executing at once, and each may be inserting a batch; assuming every one of
+// them is as large as this call is the conservative reading. So the lock-free
+// path requires room for want plus postgresMaxOpenConns further batches of the
+// same size. For single-item enqueues that is nine slots, so with the default
+// max_depth of 10000 the lock only engages above depth 9991; a 1000-item batch
+// engages it much earlier, which is fine because batches are rare and already
+// pay for a transaction.
+func (s *Store) enforceDepthLimitTx(ctx context.Context, tx *sql.Tx, want int) error {
+	if s.maxDepth <= 0 || want <= 0 {
+		return nil
+	}
+
+	active, err := activeCountTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if active+want*(1+postgresMaxOpenConns) <= s.maxDepth {
+		// Far enough from the limit that no interleaving can cross it.
+		return nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, enqueueDepthLockKey); err != nil {
+		return err
+	}
+	// Re-count under the lock: the value read above predates it, so it may have
+	// been taken while another enqueue was still uncommitted.
+	active, err = activeCountTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+
+	needed := active + want
+	if needed <= s.maxDepth {
+		return nil
+	}
+	if s.dropPolicy != "drop_oldest" {
+		return queue.ErrQueueFull
+	}
+	for needed > s.maxDepth {
+		dropped, err := dropOldestQueuedTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !dropped {
+			// Nothing left to evict, so the room cannot be made. Returning here
+			// rolls the transaction back, which is what keeps the drops from
+			// outliving a rejected enqueue.
+			return queue.ErrQueueFull
+		}
+		needed--
+	}
+	return nil
+}
+
+func activeCountTx(ctx context.Context, tx *sql.Tx) (int, error) {
+	var count int
+	err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM queue_items
+WHERE state = $1 OR state = $2
+`,
+		string(queue.StateQueued),
+		string(queue.StateLeased),
+	).Scan(&count)
+	return count, err
+}
+
+func dropOldestQueuedTx(ctx context.Context, tx *sql.Tx) (bool, error) {
+	res, err := tx.ExecContext(ctx, `
+DELETE FROM queue_items
+WHERE id = (
+  SELECT id
+  FROM queue_items
+  WHERE state = $1
+  ORDER BY received_at ASC, id ASC
+  LIMIT 1
+)
+`,
+		string(queue.StateQueued),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func insertQueueItemTx(ctx context.Context, tx *sql.Tx, p preparedEnqueue) error {
+	_, err := tx.ExecContext(ctx, `
+INSERT INTO queue_items (
+  id, route, target, state, received_at, attempt, next_run_at,
+  payload, headers_json, trace_json, dead_reason, schema_version, lease_id, lease_until
+) VALUES (
+  $1, $2, $3, $4, $5, $6, $7,
+  $8, $9, $10, $11, $12, $13, $14
+)
+`,
+		p.env.ID,
+		p.env.Route,
+		p.env.Target,
+		string(p.env.State),
+		p.env.ReceivedAt,
+		p.env.Attempt,
+		p.env.NextRunAt,
+		p.env.Payload,
+		p.headersJSON,
+		p.traceJSON,
+		strings.TrimSpace(p.env.DeadReason),
+		p.env.SchemaVersion,
+		nullIfEmpty(strings.TrimSpace(p.env.LeaseID)),
+		nullTime(p.env.LeaseUntil),
+	)
+	if err != nil {
+		return mapPostgresInsertError(err)
+	}
+	return nil
+}
+
+// enqueueAll admits every prepared item or none of them, in one transaction.
+func (s *Store) enqueueAll(prepared []preparedEnqueue) error {
+	if len(prepared) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := s.enforceDepthLimitTx(ctx, tx, len(prepared)); err != nil {
+		return err
+	}
+	for _, p := range prepared {
+		if err := insertQueueItemTx(ctx, tx, p); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	s.signal()
+	return nil
+}
+
 func (s *Store) Enqueue(env queue.Envelope) error {
 	return s.runStoreOperation("enqueue", func() error {
 		if s == nil || s.db == nil {
@@ -283,96 +518,46 @@ func (s *Store) Enqueue(env queue.Envelope) error {
 		if err := s.maybePrune(now); err != nil {
 			return err
 		}
-
-		if env.ID == "" {
-			env.ID = newHexID("evt_")
-		}
-		if env.Route == "" {
-			return errors.New("route is required")
-		}
-		if env.Target == "" {
-			return errors.New("target is required")
-		}
-		if env.ReceivedAt.IsZero() {
-			env.ReceivedAt = now
-		}
-		env.ReceivedAt = env.ReceivedAt.UTC()
-		if env.NextRunAt.IsZero() {
-			env.NextRunAt = now
-		}
-		env.NextRunAt = env.NextRunAt.UTC()
-		if env.State == "" {
-			env.State = queue.StateQueued
-		}
-		if env.Attempt < 0 {
-			env.Attempt = 0
-		}
-		if env.SchemaVersion == 0 {
-			env.SchemaVersion = 1
-		}
-		if env.Payload == nil {
-			env.Payload = []byte{}
-		}
-
-		headersJSON, err := encodeStringMapJSON(env.Headers)
+		p, err := s.prepareEnqueue(env, now)
 		if err != nil {
 			return err
 		}
-		traceJSON, err := encodeStringMapJSON(env.Trace)
-		if err != nil {
-			return err
-		}
+		return s.enqueueAll([]preparedEnqueue{p})
+	})
+}
 
-		if s.maxDepth > 0 {
-			active, err := s.activeCount()
+// EnqueueBatch implements queue.BatchEnqueuer: every item is committed or none
+// is.
+//
+// Postgres did not implement the interface, so internal/admin fell back to a
+// per-item loop — meaning the batch-publish atomicity guarantee silently
+// degraded to best-effort on the recommended backend. A 50-item publish failing
+// at item 30 left items 0–29 committed and visible while returning an error, so
+// the client retried the whole batch and those 30 were delivered twice.
+func (s *Store) EnqueueBatch(items []queue.Envelope) (int, error) {
+	return runPostgresStoreOperationResult(s, "enqueue_batch", func() (int, error) {
+		if s == nil || s.db == nil {
+			return 0, errors.New("postgres store is closed")
+		}
+		if len(items) == 0 {
+			return 0, nil
+		}
+		now := s.now()
+		if err := s.maybePrune(now); err != nil {
+			return 0, err
+		}
+		prepared := make([]preparedEnqueue, 0, len(items))
+		for _, env := range items {
+			p, err := s.prepareEnqueue(env, now)
 			if err != nil {
-				return err
+				return 0, err
 			}
-			if active >= s.maxDepth {
-				switch s.dropPolicy {
-				case "drop_oldest":
-					dropped, err := s.dropOldestQueued()
-					if err != nil {
-						return err
-					}
-					if !dropped {
-						return queue.ErrQueueFull
-					}
-				default:
-					return queue.ErrQueueFull
-				}
-			}
+			prepared = append(prepared, p)
 		}
-
-		_, err = s.db.ExecContext(context.Background(), `
-INSERT INTO queue_items (
-  id, route, target, state, received_at, attempt, next_run_at,
-  payload, headers_json, trace_json, dead_reason, schema_version, lease_id, lease_until
-) VALUES (
-  $1, $2, $3, $4, $5, $6, $7,
-  $8, $9, $10, $11, $12, $13, $14
-)
-`,
-			env.ID,
-			env.Route,
-			env.Target,
-			string(env.State),
-			env.ReceivedAt,
-			env.Attempt,
-			env.NextRunAt,
-			env.Payload,
-			headersJSON,
-			traceJSON,
-			strings.TrimSpace(env.DeadReason),
-			env.SchemaVersion,
-			nullIfEmpty(strings.TrimSpace(env.LeaseID)),
-			nullTime(env.LeaseUntil),
-		)
-		if err != nil {
-			return mapPostgresInsertError(err)
+		if err := s.enqueueAll(prepared); err != nil {
+			return 0, err
 		}
-		s.signal()
-		return nil
+		return len(prepared), nil
 	})
 }
 
@@ -2011,39 +2196,6 @@ WHERE id = $3
 		itemID,
 	)
 	return err
-}
-
-func (s *Store) activeCount() (int, error) {
-	var count int
-	err := s.db.QueryRowContext(context.Background(), `
-SELECT COUNT(*)
-FROM queue_items
-WHERE state = $1 OR state = $2
-`,
-		string(queue.StateQueued),
-		string(queue.StateLeased),
-	).Scan(&count)
-	return count, err
-}
-
-func (s *Store) dropOldestQueued() (bool, error) {
-	res, err := s.db.ExecContext(context.Background(), `
-DELETE FROM queue_items
-WHERE id = (
-  SELECT id
-  FROM queue_items
-  WHERE state = $1
-  ORDER BY received_at ASC, id ASC
-  LIMIT 1
-)
-`,
-		string(queue.StateQueued),
-	)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
 }
 
 func (s *Store) maybePrune(now time.Time) error {

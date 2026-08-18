@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,7 @@ func newPostgresRuntimeMetrics() *postgresRuntimeMetrics {
 var _ queue.Store = (*Store)(nil)
 var _ queue.BacklogTrendStore = (*Store)(nil)
 var _ queue.BatchEnqueuer = (*Store)(nil)
+var _ queue.LeaseBatchStore = (*Store)(nil)
 
 const (
 	postgresMaxDequeueBatch = 100
@@ -800,58 +802,260 @@ WHERE id = $1
 	})
 }
 
-// AckBatch acknowledges the given leases, one per statement in its own
-// transaction. NackBatch and MarkDeadBatch below follow the same shape, and the
-// partial-result note here applies to all three.
-//
-// queue.LeaseBatchStore asks implementations to use a single transaction "where
-// possible" -- SQLite does, via withLeaseBatch, so there a failed batch really
-// did change nothing and returning a zero result is accurate. Here it is not: by
-// the time an unexpected error surfaces on lease N, leases 1..N-1 are already
-// committed.
-//
-// These used to return queue.LeaseBatchResult{} on that path, which told the
-// caller nothing had succeeded. The dispatcher treats an un-acked delivered item
-// as still leased, so those already-acked messages were redelivered once the
-// lease TTL expired -- duplicate delivery on the at-least-once contract, and for
-// MarkDeadBatch a redelivery of items already classified dead. The accumulated
-// result is now returned alongside the error so the caller can see which leases
-// were actually settled.
-//
-// Making the whole batch atomic would be the stronger fix and would match
-// SQLite, but it is a larger change to withLease; it is tracked separately in
-// issue #207. Reporting the truth is the prerequisite either way.
-func (s *Store) AckBatch(leaseIDs []string) (queue.LeaseBatchResult, error) {
-	res := queue.LeaseBatchResult{Conflicts: make([]queue.LeaseBatchConflict, 0)}
+// leaseBatchItem is one lease row resolved inside withLeaseBatch.
+type leaseBatchItem struct {
+	id      string
+	expired bool
+}
 
+// lookupLeaseBatchTx resolves lease IDs to their rows and locks them for the
+// duration of the transaction.
+//
+// leaseIDs must be sorted. Locking in a deterministic order is what keeps two
+// concurrent batches whose lease sets overlap from deadlocking on each other;
+// Postgres cannot guarantee lock order from an ORDER BY alone, but a consistent
+// input order makes the index scan take them consistently in practice. Should a
+// deadlock still occur, Postgres aborts one transaction and the whole batch fails
+// atomically — which is the point of the transaction, and strictly better than
+// the per-lease behaviour it replaces.
+func lookupLeaseBatchTx(ctx context.Context, tx *sql.Tx, leaseIDs []string, now time.Time) (map[string]leaseBatchItem, error) {
+	out := make(map[string]leaseBatchItem, len(leaseIDs))
+	if len(leaseIDs) == 0 {
+		return out, nil
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT lease_id, id, state, lease_until
+FROM queue_items
+WHERE lease_id = ANY($1)
+ORDER BY id
+FOR UPDATE
+`, leaseIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			leaseID    string
+			item       leaseBatchItem
+			state      string
+			leaseUntil sql.NullTime
+		)
+		if err := rows.Scan(&leaseID, &item.id, &state, &leaseUntil); err != nil {
+			return nil, err
+		}
+		if state != string(queue.StateLeased) {
+			continue
+		}
+		if leaseUntil.Valid && !now.Before(leaseUntil.Time.UTC()) {
+			item.expired = true
+		}
+		out[leaseID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// requeueLeaseIDsTx returns expired leases to the queue in one statement.
+func requeueLeaseIDsTx(ctx context.Context, tx *sql.Tx, itemIDs []string, now time.Time) error {
+	if len(itemIDs) == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `
+UPDATE queue_items
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+WHERE id = ANY($3)
+`,
+		string(queue.StateQueued),
+		now,
+		itemIDs,
+	)
+	return err
+}
+
+// withLeaseBatch settles a whole batch of leases in one transaction, mirroring
+// the SQLite store's function of the same name.
+//
+// The three batch methods used to loop over their single-lease counterparts, so
+// every lease got its own BeginTx/Commit — which contradicted the
+// queue.LeaseBatchStore contract asking implementations to use one transaction
+// where possible, and left the batch partially applied when a lease failed
+// mid-way. #227 made that partial result honest by returning what had been
+// settled alongside the error; this makes it unnecessary, because there is no
+// longer a partial result to report: either the batch commits or none of it does.
+//
+// Conflict semantics match SQLite exactly, since parity is the point: a blank
+// lease ID, an unknown one, and every repeat of an ID already seen in the same
+// batch are conflicts; an expired lease is requeued in this transaction and
+// reported as an expired conflict. Only leases still valid at now are passed to
+// fn, which applies one bulk statement over their item IDs.
+func (s *Store) withLeaseBatch(
+	leaseIDs []string,
+	fn func(ctx context.Context, tx *sql.Tx, now time.Time, itemIDs []string) error,
+) (queue.LeaseBatchResult, error) {
+	now := s.now().UTC()
+	res := queue.LeaseBatchResult{Conflicts: make([]queue.LeaseBatchConflict, 0)}
+	if s == nil || s.db == nil {
+		return res, errors.New("postgres store is closed")
+	}
+	if len(leaseIDs) == 0 {
+		return res, nil
+	}
+
+	normalized := make([]string, 0, len(leaseIDs))
+	unique := make([]string, 0, len(leaseIDs))
+	seenUnique := make(map[string]struct{}, len(leaseIDs))
 	for _, rawLeaseID := range leaseIDs {
 		leaseID := strings.TrimSpace(rawLeaseID)
 		if leaseID == "" {
 			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: rawLeaseID})
 			continue
 		}
-
-		err := s.Ack(leaseID)
-		if err == nil {
-			res.Succeeded++
+		normalized = append(normalized, leaseID)
+		if _, ok := seenUnique[leaseID]; ok {
 			continue
 		}
-		switch {
-		case errors.Is(err, queue.ErrLeaseExpired):
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{
-				LeaseID: leaseID,
-				Expired: true,
-			})
-		case errors.Is(err, queue.ErrLeaseNotFound):
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
-		default:
-			// Return what has already been committed alongside the error.
-			// See the note on partial results above AckBatch.
-			return res, err
+		seenUnique[leaseID] = struct{}{}
+		unique = append(unique, leaseID)
+	}
+	if len(normalized) == 0 {
+		return res, nil
+	}
+	// Deterministic order for the row locks; see lookupLeaseBatchTx.
+	sort.Strings(unique)
+
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return queue.LeaseBatchResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
 		}
+	}()
+
+	leasedByLeaseID, err := lookupLeaseBatchTx(ctx, tx, unique, now)
+	if err != nil {
+		return queue.LeaseBatchResult{}, err
 	}
 
+	processed := make(map[string]struct{}, len(normalized))
+	expiredIDs := make([]string, 0)
+	validIDs := make([]string, 0, len(normalized))
+	for _, leaseID := range normalized {
+		if _, ok := processed[leaseID]; ok {
+			// A lease repeated within one batch may only succeed once.
+			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+		processed[leaseID] = struct{}{}
+
+		item, found := leasedByLeaseID[leaseID]
+		if !found {
+			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
+			continue
+		}
+		if item.expired {
+			expiredIDs = append(expiredIDs, item.id)
+			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID, Expired: true})
+			continue
+		}
+		validIDs = append(validIDs, item.id)
+	}
+
+	if err := requeueLeaseIDsTx(ctx, tx, expiredIDs, now); err != nil {
+		return queue.LeaseBatchResult{}, err
+	}
+	if len(validIDs) > 0 {
+		if err := fn(ctx, tx, now, validIDs); err != nil {
+			return queue.LeaseBatchResult{}, err
+		}
+		res.Succeeded = len(validIDs)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return queue.LeaseBatchResult{}, err
+	}
+	committed = true
 	return res, nil
+}
+
+func (s *Store) AckBatch(leaseIDs []string) (queue.LeaseBatchResult, error) {
+	return runPostgresStoreOperationResult(s, "ack_batch", func() (queue.LeaseBatchResult, error) {
+		return s.withLeaseBatch(leaseIDs, func(ctx context.Context, tx *sql.Tx, now time.Time, itemIDs []string) error {
+			if s.deliveredRetentionMaxAge > 0 {
+				_, err := tx.ExecContext(ctx, `
+UPDATE queue_items
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+WHERE id = ANY($3)
+  AND state = $4
+`,
+					string(queue.StateDelivered),
+					now,
+					itemIDs,
+					string(queue.StateLeased),
+				)
+				return err
+			}
+			_, err := tx.ExecContext(ctx, `
+DELETE FROM queue_items
+WHERE id = ANY($1)
+  AND state = $2
+`,
+				itemIDs,
+				string(queue.StateLeased),
+			)
+			return err
+		})
+	})
+}
+
+func (s *Store) NackBatch(leaseIDs []string, delay time.Duration) (queue.LeaseBatchResult, error) {
+	if delay < 0 {
+		delay = 0
+	}
+	return runPostgresStoreOperationResult(s, "nack_batch", func() (queue.LeaseBatchResult, error) {
+		return s.withLeaseBatch(leaseIDs, func(ctx context.Context, tx *sql.Tx, now time.Time, itemIDs []string) error {
+			_, err := tx.ExecContext(ctx, `
+UPDATE queue_items
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+WHERE id = ANY($3)
+  AND state = $4
+`,
+				string(queue.StateQueued),
+				now.Add(delay),
+				itemIDs,
+				string(queue.StateLeased),
+			)
+			return err
+		})
+	})
+}
+
+func (s *Store) MarkDeadBatch(leaseIDs []string, reason string) (queue.LeaseBatchResult, error) {
+	return runPostgresStoreOperationResult(s, "mark_dead_batch", func() (queue.LeaseBatchResult, error) {
+		return s.withLeaseBatch(leaseIDs, func(ctx context.Context, tx *sql.Tx, now time.Time, itemIDs []string) error {
+			_, err := tx.ExecContext(ctx, `
+UPDATE queue_items
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = $3
+WHERE id = ANY($4)
+  AND state = $5
+`,
+				string(queue.StateDead),
+				now,
+				strings.TrimSpace(reason),
+				itemIDs,
+				string(queue.StateLeased),
+			)
+			return err
+		})
+	})
 }
 
 func (s *Store) Nack(leaseID string, delay time.Duration) error {
@@ -875,39 +1079,6 @@ WHERE id = $3
 			return err
 		})
 	})
-}
-
-func (s *Store) NackBatch(leaseIDs []string, delay time.Duration) (queue.LeaseBatchResult, error) {
-	res := queue.LeaseBatchResult{Conflicts: make([]queue.LeaseBatchConflict, 0)}
-
-	for _, rawLeaseID := range leaseIDs {
-		leaseID := strings.TrimSpace(rawLeaseID)
-		if leaseID == "" {
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: rawLeaseID})
-			continue
-		}
-
-		err := s.Nack(leaseID, delay)
-		if err == nil {
-			res.Succeeded++
-			continue
-		}
-		switch {
-		case errors.Is(err, queue.ErrLeaseExpired):
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{
-				LeaseID: leaseID,
-				Expired: true,
-			})
-		case errors.Is(err, queue.ErrLeaseNotFound):
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
-		default:
-			// Return what has already been committed alongside the error.
-			// See the note on partial results above AckBatch.
-			return res, err
-		}
-	}
-
-	return res, nil
 }
 
 func (s *Store) Extend(leaseID string, extendBy time.Duration) error {
@@ -952,39 +1123,6 @@ WHERE id = $4
 			return err
 		})
 	})
-}
-
-func (s *Store) MarkDeadBatch(leaseIDs []string, reason string) (queue.LeaseBatchResult, error) {
-	res := queue.LeaseBatchResult{Conflicts: make([]queue.LeaseBatchConflict, 0)}
-
-	for _, rawLeaseID := range leaseIDs {
-		leaseID := strings.TrimSpace(rawLeaseID)
-		if leaseID == "" {
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: rawLeaseID})
-			continue
-		}
-
-		err := s.MarkDead(leaseID, reason)
-		if err == nil {
-			res.Succeeded++
-			continue
-		}
-		switch {
-		case errors.Is(err, queue.ErrLeaseExpired):
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{
-				LeaseID: leaseID,
-				Expired: true,
-			})
-		case errors.Is(err, queue.ErrLeaseNotFound):
-			res.Conflicts = append(res.Conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
-		default:
-			// Return what has already been committed alongside the error.
-			// See the note on partial results above AckBatch.
-			return res, err
-		}
-	}
-
-	return res, nil
 }
 
 func (s *Store) ListDead(req queue.DeadListRequest) (queue.DeadListResponse, error) {

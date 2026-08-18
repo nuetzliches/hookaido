@@ -564,3 +564,126 @@ func TestStoreContract_MarkDeadAndRequeue(t *testing.T) {
 		})
 	}
 }
+
+// queue.LeaseBatchStore asks implementations to settle a whole batch in one
+// store transaction and to report per-lease conflicts. There was no contract
+// coverage for it at all, which is how Postgres came to loop over its
+// single-lease methods — settling each lease in its own transaction — while
+// memory and SQLite settled the batch as a unit. These cases pin the shared
+// semantics across every backend.
+func TestStoreContract_LeaseBatchSettlesValidLeasesAndReportsConflicts(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			batchStore, ok := store.(queue.LeaseBatchStore)
+			if !ok {
+				t.Fatalf("%T does not implement queue.LeaseBatchStore", store)
+			}
+
+			for i := 0; i < 3; i++ {
+				if err := store.Enqueue(queue.Envelope{ID: leaseBatchID(i), Route: "/r", Target: "pull"}); err != nil {
+					t.Fatalf("enqueue %d: %v", i, err)
+				}
+			}
+			resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 3, LeaseTTL: 30 * time.Second})
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			if len(resp.Items) != 3 {
+				t.Fatalf("dequeued %d, want 3", len(resp.Items))
+			}
+
+			leaseIDs := []string{
+				resp.Items[0].LeaseID,
+				"",                     // blank
+				resp.Items[1].LeaseID,  // valid
+				"lease_does_not_exist", // unknown
+				resp.Items[1].LeaseID,  // repeat of one already in this batch
+				resp.Items[2].LeaseID,  // valid
+			}
+
+			res, err := batchStore.MarkDeadBatch(leaseIDs, "contract-test")
+			if err != nil {
+				t.Fatalf("MarkDeadBatch: %v", err)
+			}
+			if res.Succeeded != 3 {
+				t.Fatalf("Succeeded=%d, want 3", res.Succeeded)
+			}
+			// Blank, unknown, and the repeat — a lease named twice in one batch
+			// may only succeed once.
+			if len(res.Conflicts) != 3 {
+				t.Fatalf("Conflicts=%d (%#v), want 3", len(res.Conflicts), res.Conflicts)
+			}
+			for _, c := range res.Conflicts {
+				if c.Expired {
+					t.Fatalf("unexpected expired conflict: %#v", c)
+				}
+			}
+
+			dead, err := store.ListDead(queue.DeadListRequest{Limit: 10})
+			if err != nil {
+				t.Fatalf("list dead: %v", err)
+			}
+			if len(dead.Items) != 3 {
+				t.Fatalf("dead items=%d, want 3", len(dead.Items))
+			}
+		})
+	}
+}
+
+// An expired lease is requeued rather than settled, and reported as an expired
+// conflict — in the same batch, without taking the valid leases down with it.
+func TestStoreContract_LeaseBatchRequeuesExpiredLeases(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			batchStore, ok := store.(queue.LeaseBatchStore)
+			if !ok {
+				t.Fatalf("%T does not implement queue.LeaseBatchStore", store)
+			}
+
+			for _, id := range []string{"evt_short", "evt_long"} {
+				if err := store.Enqueue(queue.Envelope{ID: id, Route: "/r", Target: "pull"}); err != nil {
+					t.Fatalf("enqueue %s: %v", id, err)
+				}
+			}
+			// Both leases are taken before the clock moves, with different TTLs,
+			// so advancing time expires exactly one of them. Taking the second
+			// lease after the advance instead would let the dequeue reclaim the
+			// first expired item, and the batch would then see an unknown lease
+			// rather than an expired one.
+			short, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: time.Second})
+			if err != nil || len(short.Items) != 1 {
+				t.Fatalf("dequeue short: err=%v items=%d", err, len(short.Items))
+			}
+			expiringLease := short.Items[0].LeaseID
+
+			long, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: time.Hour})
+			if err != nil || len(long.Items) != 1 {
+				t.Fatalf("dequeue long: err=%v items=%d", err, len(long.Items))
+			}
+			validLease := long.Items[0].LeaseID
+
+			now = now.Add(5 * time.Second)
+
+			res, err := batchStore.AckBatch([]string{expiringLease, validLease})
+			if err != nil {
+				t.Fatalf("AckBatch: %v", err)
+			}
+			if res.Succeeded != 1 {
+				t.Fatalf("Succeeded=%d, want 1 -- only the unexpired lease settles", res.Succeeded)
+			}
+			if len(res.Conflicts) != 1 || !res.Conflicts[0].Expired {
+				t.Fatalf("Conflicts=%#v, want one expired conflict", res.Conflicts)
+			}
+		})
+	}
+}
+
+func leaseBatchID(i int) string {
+	return "evt_lb_" + string(rune('a'+i))
+}

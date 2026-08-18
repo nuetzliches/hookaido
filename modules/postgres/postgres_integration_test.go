@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -159,78 +160,140 @@ func TestIntegration_AckBatch_ExpiredLease(t *testing.T) {
 	}
 }
 
-// A batch that fails partway must still report the leases it already settled.
+// An unexpected error mid-batch settles nothing at all.
 //
-// This backend settles one lease per transaction, so when an unexpected error
-// surfaces on lease N, leases 1..N-1 are already committed. Returning a zero
-// result there told the caller nothing had succeeded; the dispatcher treats an
-// un-acked delivered item as still leased, so those already-settled messages
-// were redelivered once the lease TTL expired.
-//
-// leaseIDPoison contains a NUL byte, which Postgres rejects for a text
-// parameter (SQLSTATE 22021). That is neither ErrLeaseNotFound nor
-// ErrLeaseExpired, so it reaches exactly the unexpected-error branch under test
-// without needing to break the connection.
-func TestIntegration_LeaseBatchReportsPartialProgressOnError(t *testing.T) {
+// This replaces a test that asserted the opposite: the batch methods used to
+// loop over their single-lease counterparts, so leases before the failure were
+// already committed and #227 made the result report them honestly rather than
+// claiming nothing had happened. Now the batch is one transaction, so there is no
+// partial result left to report — which is the stronger guarantee the
+// queue.LeaseBatchStore contract asks for, and what SQLite has always done.
+func TestIntegration_LeaseBatchIsAtomicOnError(t *testing.T) {
+	// A NUL byte cannot be sent as Postgres text, so this fails the lookup that
+	// opens the transaction.
 	const leaseIDPoison = "poison\x00lease"
 
 	cases := []struct {
 		name string
 		call func(s *Store, leaseIDs []string) (queue.LeaseBatchResult, error)
-		// wantState is the state the settled item must be left in.
-		// Empty means the row is expected to be gone.
-		wantState queue.State
 	}{
 		{
-			name:      "AckBatch",
-			call:      func(s *Store, ids []string) (queue.LeaseBatchResult, error) { return s.AckBatch(ids) },
-			wantState: "",
+			name: "AckBatch",
+			call: func(s *Store, ids []string) (queue.LeaseBatchResult, error) { return s.AckBatch(ids) },
 		},
 		{
-			name:      "NackBatch",
-			call:      func(s *Store, ids []string) (queue.LeaseBatchResult, error) { return s.NackBatch(ids, 0) },
-			wantState: queue.StateQueued,
+			name: "NackBatch",
+			call: func(s *Store, ids []string) (queue.LeaseBatchResult, error) { return s.NackBatch(ids, 0) },
 		},
 		{
 			name: "MarkDeadBatch",
 			call: func(s *Store, ids []string) (queue.LeaseBatchResult, error) {
-				return s.MarkDeadBatch(ids, "partial-progress-test")
+				return s.MarkDeadBatch(ids, "atomicity-test")
 			},
-			wantState: queue.StateDead,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := freshIntegrationStore(t)
-			enqueueTest(t, store, "pp_1", "/r", "pull")
+			enqueueTest(t, store, "atomic_1", "/r", "pull")
 			item := dequeueOne(t, store, "/r", "pull", 30*time.Second)
 
 			res, err := tc.call(store, []string{item.LeaseID, leaseIDPoison})
 			if err == nil {
 				t.Fatal("expected an error from the poisoned lease ID")
 			}
-			if res.Succeeded != 1 {
-				t.Fatalf("Succeeded=%d alongside the error, want 1 -- the first lease was committed and must be reported, or the caller redelivers it", res.Succeeded)
+			if res.Succeeded != 0 {
+				t.Fatalf("Succeeded=%d alongside the error, want 0 -- the transaction rolled back, so nothing was settled", res.Succeeded)
 			}
 
-			// Confirm the reported success matches what is actually in the
-			// database: the point of the fix is that the two agree.
+			// The valid lease must be untouched: still leased, still holding its
+			// lease id, so the worker can retry the whole batch.
 			var state string
-			queryErr := store.db.QueryRow(`SELECT state FROM queue_items WHERE id = $1`, "pp_1").Scan(&state)
-			if tc.wantState == "" {
-				if queryErr == nil {
-					t.Fatalf("row still present in state %q, want deleted", state)
-				}
-			} else {
-				if queryErr != nil {
-					t.Fatalf("select state: %v", queryErr)
-				}
-				if queue.State(state) != tc.wantState {
-					t.Fatalf("state=%q, want %q", state, tc.wantState)
-				}
+			var leaseID sql.NullString
+			if err := store.db.QueryRow(
+				`SELECT state, lease_id FROM queue_items WHERE id = $1`, "atomic_1",
+			).Scan(&state, &leaseID); err != nil {
+				t.Fatalf("select state: %v", err)
+			}
+			if queue.State(state) != queue.StateLeased {
+				t.Fatalf("state=%q, want %q -- the rollback must leave the lease in place", state, queue.StateLeased)
+			}
+			if !leaseID.Valid || leaseID.String != item.LeaseID {
+				t.Fatalf("lease_id=%#v, want the original %q", leaseID, item.LeaseID)
 			}
 		})
+	}
+}
+
+// A lease repeated inside one batch may only succeed once. SQLite has always
+// behaved this way; the Postgres loop got it by accident, because the second
+// attempt found the row no longer leased. The transactional version has to do it
+// deliberately, so it is pinned here.
+func TestIntegration_LeaseBatchCountsARepeatedLeaseOnce(t *testing.T) {
+	store := freshIntegrationStore(t)
+	enqueueTest(t, store, "dup_1", "/r", "pull")
+	item := dequeueOne(t, store, "/r", "pull", 30*time.Second)
+
+	res, err := store.AckBatch([]string{item.LeaseID, item.LeaseID, "  ", item.LeaseID})
+	if err != nil {
+		t.Fatalf("AckBatch: %v", err)
+	}
+	if res.Succeeded != 1 {
+		t.Fatalf("Succeeded=%d, want 1", res.Succeeded)
+	}
+	// Two repeats plus the blank id.
+	if len(res.Conflicts) != 3 {
+		t.Fatalf("Conflicts=%d (%#v), want 3", len(res.Conflicts), res.Conflicts)
+	}
+	for _, c := range res.Conflicts {
+		if c.Expired {
+			t.Fatalf("unexpected expired conflict: %#v", c)
+		}
+	}
+}
+
+// Every valid lease in the batch is settled by the one bulk statement, not just
+// the first.
+func TestIntegration_LeaseBatchSettlesEveryValidLease(t *testing.T) {
+	store := freshIntegrationStore(t)
+	for i := 0; i < 5; i++ {
+		enqueueTest(t, store, fmt.Sprintf("bulk_%d", i), "/r", "pull")
+	}
+	resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 5, LeaseTTL: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(resp.Items) != 5 {
+		t.Fatalf("dequeued %d, want 5", len(resp.Items))
+	}
+	leaseIDs := make([]string, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		leaseIDs = append(leaseIDs, it.LeaseID)
+	}
+	// One unknown id mixed in, to confirm it does not take the rest down.
+	leaseIDs = append(leaseIDs, "lease_does_not_exist")
+
+	res, err := store.MarkDeadBatch(leaseIDs, "bulk-test")
+	if err != nil {
+		t.Fatalf("MarkDeadBatch: %v", err)
+	}
+	if res.Succeeded != 5 {
+		t.Fatalf("Succeeded=%d, want 5", res.Succeeded)
+	}
+	if len(res.Conflicts) != 1 || res.Conflicts[0].LeaseID != "lease_does_not_exist" {
+		t.Fatalf("Conflicts=%#v, want exactly the unknown lease", res.Conflicts)
+	}
+
+	var dead int
+	if err := store.db.QueryRow(
+		`SELECT COUNT(*) FROM queue_items WHERE state = $1 AND dead_reason = $2`,
+		string(queue.StateDead), "bulk-test",
+	).Scan(&dead); err != nil {
+		t.Fatalf("count dead: %v", err)
+	}
+	if dead != 5 {
+		t.Fatalf("dead rows=%d, want 5", dead)
 	}
 }
 

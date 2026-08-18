@@ -1,7 +1,7 @@
 # Development Status
 
 Last updated: 2026-08-18
-Current release: v2.10.1
+Current release: v2.11.0
 
 Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change history: `CHANGELOG.md`. Prioritized work items: `BACKLOG.md`.
 

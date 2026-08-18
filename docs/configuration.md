@@ -707,8 +707,18 @@ kill -HUP $(cat ./hookaido.pid)
 | Route-level `max_body` / `max_headers`                         | Per-route overrides only |
 | Route-level `publish` / `publish.direct` / `publish.managed`   |                          |
 | Trend signals config                                           |                          |
-| Deliver targets, URLs, retry, timeout, concurrency, signing     | Dispatcher is restarted in place after a drain of up to 15s; in-flight deliveries finish first |
+| Deliver targets, URLs, retry, timeout, concurrency, signing     | Dispatcher is restarted in place after a drain; in-flight deliveries finish first (see below) |
 | Egress policy (`defaults.egress.*`)                            | Applied with the dispatcher restart above |
+
+### Reload Atomicity
+
+A reload either applies in full or changes nothing. Every secret reference in the candidate config is resolved and validated before any of it goes live, so a config that both rotates a secret and contains an unrelated error — an `auth hmac` key file that is not deployed yet, say — leaves the old secret in force rather than rotating it and then reporting failure.
+
+### Dispatcher Drain on Reload
+
+When delivery config changes, the running dispatcher is drained before its replacement starts. The drain budget is derived from the dispatcher's own configuration — the longer of its dequeue long-poll wait and the longest target `timeout`, plus headroom for the lease writes, clamped to between 15s and 60s — because that is how long a worker can legitimately need to notice the stop signal: one waiting for work returns from its dequeue, and one mid-delivery finishes the attempt in flight. Neither dequeues again once the stop signal is set.
+
+If the budget is exceeded, Hookaido logs `dispatcher_drain_incomplete` and starts the replacement anyway. The old workers are already terminal at that point and refusing would leave no dispatcher at all; each finishes at most the delivery already in flight, so the effect is that per-route concurrency is briefly above the configured value. Delivery is at-least-once regardless. A successful drain logs `dispatcher_stopped_for_reload` instead — that line means the old workers really have exited.
 
 ### Restart Required
 

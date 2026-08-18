@@ -1476,3 +1476,77 @@ func TestHandleDelivery_NoRetryAfterKeepsTheSchedule(t *testing.T) {
 		t.Fatalf("nack delay=%s, want the scheduled 2s", store.nackDelay)
 	}
 }
+
+func TestDrainBudget(t *testing.T) {
+	target := func(timeout time.Duration) TargetConfig {
+		return TargetConfig{URL: "https://x", Timeout: timeout}
+	}
+	route := func(targets ...TargetConfig) RouteConfig {
+		return RouteConfig{Route: "/r", Targets: targets}
+	}
+
+	cases := []struct {
+		name string
+		d    *PushDispatcher
+		want time.Duration
+	}{
+		{
+			// Nothing to derive from, so the floor applies.
+			name: "no routes",
+			d:    &PushDispatcher{},
+			want: drainBudgetFloor,
+		},
+		{
+			// max(2s default MaxWait, 10s default timeout) + 5s = 15s = the floor.
+			name: "default timeouts",
+			d:    &PushDispatcher{Routes: []RouteConfig{route(target(0))}},
+			want: drainBudgetFloor,
+		},
+		{
+			// Short timeouts cannot go below the floor; waiting longer is free
+			// because Drain returns as soon as the workers finish.
+			name: "short timeouts stay at the floor",
+			d:    &PushDispatcher{MaxWait: time.Second, Routes: []RouteConfig{route(target(time.Second))}},
+			want: drainBudgetFloor,
+		},
+		{
+			// This is the case a fixed 15s got wrong: a legitimate in-flight
+			// delivery looked like a stuck worker.
+			name: "long target timeout",
+			d:    &PushDispatcher{Routes: []RouteConfig{route(target(40 * time.Second))}},
+			want: 45 * time.Second,
+		},
+		{
+			name: "longest target across routes wins",
+			d: &PushDispatcher{Routes: []RouteConfig{
+				route(target(5 * time.Second)),
+				route(target(30*time.Second), target(2*time.Second)),
+			}},
+			want: 35 * time.Second,
+		},
+		{
+			name: "long MaxWait counts too",
+			d:    &PushDispatcher{MaxWait: 30 * time.Second, Routes: []RouteConfig{route(target(time.Second))}},
+			want: 35 * time.Second,
+		},
+		{
+			// The ceiling bounds how long a reload holds reloadMu.
+			name: "pathological timeout is capped",
+			d:    &PushDispatcher{Routes: []RouteConfig{route(target(30 * time.Minute))}},
+			want: drainBudgetCeiling,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.d.DrainBudget(); got != tc.want {
+				t.Fatalf("DrainBudget() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+
+	var nilDispatcher *PushDispatcher
+	if got := nilDispatcher.DrainBudget(); got != drainBudgetFloor {
+		t.Fatalf("nil DrainBudget() = %s, want %s", got, drainBudgetFloor)
+	}
+}

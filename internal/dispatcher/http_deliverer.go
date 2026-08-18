@@ -30,6 +30,19 @@ import (
 // trade for a target behaving that way.
 const maxDrainBytes = 64 << 10
 
+// signingSecretTTL bounds how long a cached file:- or vault:-backed outbound
+// signing secret is reused before being re-read. It is the window in which a
+// revoked key still signs; short enough that rotation takes effect without an
+// operator action, long enough that Vault is not consulted per delivery.
+const signingSecretTTL = 60 * time.Second
+
+// cachedSigningSecret is one memoized signing secret plus when it was read, so
+// the entry can expire.
+type cachedSigningSecret struct {
+	value    []byte
+	loadedAt time.Time
+}
+
 type HTTPDeliverer struct {
 	Client *http.Client
 	Policy EgressPolicy
@@ -98,9 +111,13 @@ func (d *HTTPDeliverer) Deliver(ctx context.Context, delivery Delivery) Result {
 		return Result{Err: err}
 	}
 	defer resp.Body.Close()
+	// Read the hint before the body is discarded: Result used to carry only a
+	// status and an error, so the response headers were dropped here and
+	// Retry-After never reached the retry scheduler.
+	retryAfter := parseRetryAfter(resp.Header, d.now())
 	// io.EOF is the ordinary outcome for a body shorter than the cap.
 	_, _ = io.CopyN(io.Discard, resp.Body, maxDrainBytes)
-	return Result{StatusCode: resp.StatusCode}
+	return Result{StatusCode: resp.StatusCode, RetryAfter: retryAfter}
 }
 
 func (d *HTTPDeliverer) checkRedirect(req *http.Request, via []*http.Request) error {
@@ -125,11 +142,7 @@ func (d *HTTPDeliverer) applyDeliverySigning(req *http.Request, delivery Deliver
 		return fmt.Errorf("delivery signing headers are not configured")
 	}
 
-	nowFn := d.Now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	signedAt := nowFn().UTC()
+	signedAt := d.now().UTC()
 	timestamp := strconv.FormatInt(signedAt.Unix(), 10)
 
 	secretRef, err := selectSigningSecretRef(cfg, signedAt)
@@ -226,10 +239,28 @@ func isSigningSecretVersionValidAt(v HMACSigningSecretVersion, at time.Time) boo
 	return at.Before(v.ValidUntil)
 }
 
+// loadSigningSecret resolves an outbound signing secret, caching the result.
+//
+// The cache used to have no TTL and no invalidation, and secrets.LoadRef does
+// not cache, so the dispatcher was the sole source of staleness. It was
+// discarded only when the whole HTTPDeliverer was rebuilt, which happens only on
+// a compiled-config change — so rotating a vault: or file: backed signing secret
+// without editing the Hookaidofile had no effect, SIGHUP included, and revoking
+// a leaked signing key required a full process restart.
+//
+// env: and raw: refs are still cached for the life of the deliverer: their value
+// is fixed for the process, so re-reading could not observe a rotation. file:
+// and vault: refs are re-read once their entry passes signingSecretTTL, which
+// bounds how long a revoked key stays usable without putting a filesystem or
+// Vault round trip on every delivery.
 func (d *HTTPDeliverer) loadSigningSecret(ref string) ([]byte, error) {
+	rereadable := signingSecretRefIsRereadable(ref)
+	now := d.now()
 	if v, ok := d.secretCache.Load(ref); ok {
-		if b, ok := v.([]byte); ok {
-			return b, nil
+		if entry, ok := v.(cachedSigningSecret); ok {
+			if !rereadable || now.Sub(entry.loadedAt) < signingSecretTTL {
+				return entry.value, nil
+			}
 		}
 	}
 	b, err := secrets.LoadRef(ref)
@@ -237,6 +268,50 @@ func (d *HTTPDeliverer) loadSigningSecret(ref string) ([]byte, error) {
 		return nil, err
 	}
 	secret := append([]byte(nil), b...)
-	d.secretCache.Store(ref, secret)
+	d.secretCache.Store(ref, cachedSigningSecret{value: secret, loadedAt: now})
 	return secret, nil
+}
+
+// signingSecretRefIsRereadable reports whether a ref can change while the
+// process runs. env: is fixed at exec time and raw: is literal config; file: and
+// vault: are both mutable behind Hookaido's back.
+func signingSecretRefIsRereadable(ref string) bool {
+	ref = strings.TrimSpace(ref)
+	return strings.HasPrefix(ref, "file:") || strings.HasPrefix(ref, "vault:")
+}
+
+// now resolves the deliverer's clock, defaulting to time.Now.
+func (d *HTTPDeliverer) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
+}
+
+// parseRetryAfter resolves a Retry-After header to a wait duration. RFC 7231
+// allows either delta-seconds or an HTTP-date, and both appear in the wild.
+//
+// Zero means "no usable hint": absent, unparseable, non-positive, or a date
+// already in the past. Callers treat zero as "use the retry schedule", so an
+// unreadable header degrades to today's behaviour rather than to an immediate
+// redelivery.
+func parseRetryAfter(h http.Header, now time.Time) time.Duration {
+	raw := strings.TrimSpace(h.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	at, err := http.ParseTime(raw)
+	if err != nil {
+		return 0
+	}
+	if d := at.Sub(now); d > 0 {
+		return d
+	}
+	return 0
 }

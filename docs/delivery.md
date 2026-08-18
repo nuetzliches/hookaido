@@ -52,6 +52,17 @@ Hookaido retries on:
 
 **No retry** on other `4xx` responses (client errors are considered permanent).
 
+### `Retry-After`
+
+When a retryable response carries a `Retry-After` header, Hookaido waits at least that long before the next attempt. Both RFC 7231 forms are accepted — delta-seconds (`Retry-After: 120`) and an HTTP-date (`Retry-After: Tue, 18 Aug 2026 12:05:00 GMT`).
+
+- The hint can only **extend** the wait, never shorten it: the effective delay is `max(scheduled backoff, Retry-After)`, so a target asking to be retried sooner than the schedule allows cannot defeat the backoff.
+- The hint is capped at **1 hour**, so one target cannot park a message indefinitely.
+- A header that is absent, unparseable, non-positive, or a date already in the past is ignored and the normal schedule applies.
+- The honoured value appears as `retry_after` on the `delivery_retry` log line.
+
+Note that `retry max` counts attempts, not elapsed time: a target answering `429 Retry-After: 3600` will consume its attempts an hour apart rather than within minutes, and can therefore stay in the queue for hours before dead-lettering.
+
 ### Default Retry Settings
 
 ```hcl
@@ -290,6 +301,15 @@ secrets {
 - At signing time, Hookaido selects the newest secret whose `valid_from ≤ now < valid_until`.
 - Use `sign secret_selection oldest_valid` to prefer the oldest valid key instead.
 - `sign secret_selection` requires `sign hmac secret_ref` entries (not inline secrets).
+
+### Signing Secret Refresh
+
+Resolved signing secrets are cached per delivery target:
+
+- `env:` and `raw:` refs are cached for the life of the process — their value cannot change while it runs.
+- `file:` and `vault:` refs are re-read once the cached value is **60 seconds** old, so rotating or revoking the underlying secret takes effect without editing the Hookaidofile and without a restart.
+
+That 60-second window is the maximum time a revoked key can still be used to sign. If you need a revocation to be immediate, restart the process.
 
 ### Canonical Signature Format
 

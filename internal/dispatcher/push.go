@@ -419,6 +419,15 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 	// current attempt number is <= retry.max.
 	if shouldRetry && env.Attempt <= target.Retry.Max {
 		delay := retryDelay(env.Attempt, target.Retry)
+		// A target that asks for more time gets it. shouldRetry already covers
+		// 429 and every 5xx, but the schedule ignored the hint: a target
+		// answering 429 with Retry-After: 3600 received all eight attempts
+		// inside ~6 minutes on the default schedule and was then dead-lettered,
+		// when waiting would have succeeded.
+		retryAfter := clampRetryAfter(res.RetryAfter)
+		if retryAfter > delay {
+			delay = retryAfter
+		}
 		attempt.Outcome = queue.AttemptOutcomeRetry
 		d.recordAttempt(logger, attempt)
 		attrs := []any{
@@ -427,6 +436,9 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 			slog.Int("attempt", env.Attempt),
 			slog.Duration("delay", delay),
 			slog.String("event_id", env.ID),
+		}
+		if retryAfter > 0 {
+			attrs = append(attrs, slog.Duration("retry_after", retryAfter))
 		}
 		if res.Err != nil {
 			attrs = append(attrs, slog.String("error", res.Err.Error()))
@@ -666,6 +678,24 @@ func isSuccess(res Result) bool {
 		return false
 	}
 	return res.StatusCode >= 200 && res.StatusCode < 300
+}
+
+// maxRetryAfterDelay bounds how far a target's Retry-After can push a
+// redelivery out. Honouring the header is the point of reading it, but an
+// unbounded value would let one target park a message for arbitrarily long — and
+// a header is attacker-influenced whenever the target is not fully trusted.
+const maxRetryAfterDelay = time.Hour
+
+// clampRetryAfter normalizes a Retry-After hint into a usable delay. Zero means
+// no usable hint, so the retry schedule applies unchanged.
+func clampRetryAfter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	if d > maxRetryAfterDelay {
+		return maxRetryAfterDelay
+	}
+	return d
 }
 
 func retryDelay(attempt int, retry RetryConfig) time.Duration {

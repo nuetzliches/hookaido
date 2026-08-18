@@ -4,12 +4,12 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-- [ ] **Test coverage ≥80%** — Current total: 75.2% (with `HOOKAIDO_TEST_POSTGRES_DSN` set, see `make test-pg`). Focus areas:
+- [ ] **Test coverage ≥80%** — Current total: 75.9% as of v2.10.0 (with `HOOKAIDO_TEST_POSTGRES_DSN` set, see `make test-pg`). Focus areas:
   - `internal/secrets` (70.8%) — Secret resolver edge cases
   - `internal/pullapi` (73.6%) — Pull API handler coverage
   - `internal/config` (77.3%) — Config parser edge cases
   - `internal/mcp` (77.3%) — MCP server handler coverage
-- [ ] **Tag v2.8.0 and trigger Go Report Card refresh** — The module path has been updated to `github.com/nuetzliches/hookaido/v2` so `proxy.golang.org` will start resolving v2.x.x tags (it previously fell back to v1.5.1 because of the Go modules v2+ rule). Once v2.8.0 is tagged on GitHub, hit `POST /checks repo=github.com/nuetzliches/hookaido/v2` on goreportcard.com to refresh. This also unblocks pkg.go.dev visibility and the awesome-go submission.
+- [ ] **Trigger Go Report Card + pkg.go.dev refresh** — The module path is `github.com/nuetzliches/hookaido/v2`, so `proxy.golang.org` resolves v2.x.x tags (it previously fell back to v1.5.1 under the Go modules v2+ rule). v2.9.0 and v2.10.0 are tagged; hit `POST /checks repo=github.com/nuetzliches/hookaido/v2` on goreportcard.com to refresh. Needed for pkg.go.dev visibility and the awesome-go submission.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
 - [ ] **awesome-go PR** — Submit to [avelino/awesome-go](https://github.com/avelino/awesome-go) under "Messaging" category. Requires: ≥5 months history (eligible ~July 2026), coverage ≥80%, Go Report Card A-, pkg.go.dev docs.
 

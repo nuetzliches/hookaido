@@ -202,14 +202,14 @@ func parseManagementAudit(r *http.Request, requireReason bool) (managementAudit,
 	}, true
 }
 
-func parseManagementEndpointUpsert(r *http.Request) (string, string, bool) {
+func parseManagementEndpointUpsert(r *http.Request, maxBytes int64) (string, string, bool) {
 	if r == nil {
 		return "", "request body is missing", false
 	}
 	var payload managementEndpointUpsertPayload
-	if err := decodeJSONBodyStrict(r, &payload); err != nil {
+	if err := decodeJSONBodyStrict(r, &payload, maxBytes); err != nil {
 		if errors.Is(err, errRequestBodyTooLarge) {
-			return "", fmt.Sprintf("request body exceeds %d bytes", defaultMaxBodyBytes), false
+			return "", fmt.Sprintf("request body exceeds %d bytes", effectiveMaxBodyBytes(maxBytes)), false
 		}
 		return "", "request body must be valid JSON with route", false
 	}
@@ -223,11 +223,44 @@ func parseManagementEndpointUpsert(r *http.Request) (string, string, bool) {
 	return route, "", true
 }
 
-func decodeJSONBodyStrict(r *http.Request, out any) error {
+// effectiveMaxBodyBytes resolves the limit actually applied, so an error can
+// name the number the caller was measured against rather than a constant that
+// may not be in force.
+func effectiveMaxBodyBytes(maxBytes int64) int64 {
+	if maxBytes <= 0 {
+		return int64(defaultMaxBodyBytes)
+	}
+	return maxBytes
+}
+
+// adminMaxBodyBytes is the configured request-body cap for admin JSON bodies.
+// It is distinct from publishMaxBodyBytes, which bounds a single publish item's
+// payload and can be overridden per route.
+func (s *Server) adminMaxBodyBytes() int64 {
+	if s == nil {
+		return int64(defaultMaxBodyBytes)
+	}
+	return effectiveMaxBodyBytes(s.MaxBodyBytes)
+}
+
+// decodeJSONBodyStrict reads at most maxBytes and decodes exactly one JSON
+// document, rejecting unknown fields. A maxBytes of zero or less falls back to
+// the package default, which is what a Server built without an explicit limit
+// carries anyway.
+//
+// The limit used to be hardcoded, so `defaults.max_body` did not reach any admin
+// JSON body even though parseSecretUpsertBody and publishMaxBodyBytes honoured
+// it — the same knob applied inconsistently within one package. With
+// `max_body 64kb` the admin API still buffered 2 MiB before rejecting, and with
+// `max_body 10mb` a legitimate 3 MiB publish was refused citing a limit that
+// appeared nowhere in the config.
+func decodeJSONBodyStrict(r *http.Request, out any, maxBytes int64) error {
 	if r == nil || r.Body == nil {
 		return errors.New("request body is missing")
 	}
-	maxBytes := int64(defaultMaxBodyBytes)
+	if maxBytes <= 0 {
+		maxBytes = int64(defaultMaxBodyBytes)
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
 	if err != nil {
 		return err
@@ -715,9 +748,9 @@ func parseBacklogSummaryStates(raw string) ([]queue.State, bool) {
 	return out, true
 }
 
-func parseManageIDs(r *http.Request) ([]string, bool) {
+func parseManageIDs(r *http.Request, maxBytes int64) ([]string, bool) {
 	var req dlqManageRequest
-	if err := decodeJSONBodyStrict(r, &req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req, maxBytes); err != nil {
 		return nil, false
 	}
 	if len(req.IDs) == 0 || len(req.IDs) > backlog.MaxListLimit {
@@ -749,20 +782,20 @@ type publishParseError struct {
 	ItemIndex int
 }
 
-func parsePublishItems(r *http.Request) ([]messagesPublishItem, *publishParseError) {
-	return parsePublishItemsWithSelectorRequirement(r, true)
+func parsePublishItems(r *http.Request, maxBytes int64) ([]messagesPublishItem, *publishParseError) {
+	return parsePublishItemsWithSelectorRequirement(r, maxBytes, true)
 }
 
-func parseScopedPublishItems(r *http.Request) ([]messagesPublishItem, *publishParseError) {
-	return parsePublishItemsWithSelectorRequirement(r, false)
+func parseScopedPublishItems(r *http.Request, maxBytes int64) ([]messagesPublishItem, *publishParseError) {
+	return parsePublishItemsWithSelectorRequirement(r, maxBytes, false)
 }
 
-func parsePublishItemsWithSelectorRequirement(r *http.Request, requireSelector bool) ([]messagesPublishItem, *publishParseError) {
+func parsePublishItemsWithSelectorRequirement(r *http.Request, maxBytes int64, requireSelector bool) ([]messagesPublishItem, *publishParseError) {
 	var req messagesPublishRequest
-	if err := decodeJSONBodyStrict(r, &req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req, maxBytes); err != nil {
 		detail := "request body must be valid JSON with items"
 		if errors.Is(err, errRequestBodyTooLarge) {
-			detail = fmt.Sprintf("request body exceeds %d bytes", defaultMaxBodyBytes)
+			detail = fmt.Sprintf("request body exceeds %d bytes", effectiveMaxBodyBytes(maxBytes))
 		}
 		return nil, &publishParseError{
 			Code:      publishCodeInvalidBody,
@@ -1031,9 +1064,9 @@ func formatAllowedTargetsForError(allowedTargets []string) string {
 	return strings.Join(parts, ", ")
 }
 
-func parseMessageManageFilter(r *http.Request, allowedStates map[queue.State]struct{}) (queue.MessageManageFilterRequest, string, string, bool) {
+func parseMessageManageFilter(r *http.Request, maxBytes int64, allowedStates map[queue.State]struct{}) (queue.MessageManageFilterRequest, string, string, bool) {
 	var req messagesManageFilterRequest
-	if err := decodeJSONBodyStrict(r, &req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req, maxBytes); err != nil {
 		return queue.MessageManageFilterRequest{}, "", "", false
 	}
 

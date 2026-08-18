@@ -3888,7 +3888,9 @@ func TestServer_PublishMessagesRejectsInvalidRoutePath(t *testing.T) {
 func TestServer_PublishMessagesPayloadTooLarge(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
-	srv.MaxBodyBytes = 32
+	// Large enough to admit the request body; the point of this test is the
+	// per-route payload limit of 4 bytes overriding it.
+	srv.MaxBodyBytes = 4096
 	srv.TargetsForRoute = func(route string) []string {
 		if route == "/r" {
 			return []string{"pull"}
@@ -5164,7 +5166,9 @@ func TestServer_ApplicationEndpointPublishPayloadTooLarge(t *testing.T) {
 	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return now }))
 
 	srv := NewServer(store)
-	srv.MaxBodyBytes = 32
+	// Large enough to admit the request body; the point of this test is the
+	// per-route payload limit of 4 bytes overriding it.
+	srv.MaxBodyBytes = 4096
 	srv.LimitsForRoute = func(route string) (int64, int) {
 		if route == "/r" {
 			return 4, 0
@@ -8536,11 +8540,18 @@ func TestServer_PublishMessagesRequiresAuditRequestIDByPolicy(t *testing.T) {
 	}
 }
 
-func TestServer_PublishMessagesPayloadTooLargeGlobalFallback(t *testing.T) {
+// With no per-route override, the global max_body bounds the request body
+// itself, and that check is reached first: a payload larger than max_body cannot
+// arrive in a request smaller than max_body, since base64 only inflates it. So
+// the global value is enforced here rather than on the per-item payload, and the
+// error names the configured limit rather than the package default. The
+// per-route payload override remains meaningful — it can be smaller than the
+// body cap — and is covered by TestServer_PublishMessagesPayloadTooLarge.
+func TestServer_PublishMessagesGlobalMaxBodyBoundsRequestBody(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
 	srv.MaxBodyBytes = 4
-	// No LimitsForRoute set — global fallback applies
+	// No LimitsForRoute set — the global value applies.
 	srv.TargetsForRoute = func(route string) []string { return []string{"pull"} }
 
 	req := httptest.NewRequest(http.MethodPost, "http://example/messages/publish",
@@ -8549,15 +8560,18 @@ func TestServer_PublishMessagesPayloadTooLargeGlobalFallback(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413, got %d", rr.Code)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
 	}
 	var errResp publishErrorResponse
 	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if errResp.Code != publishCodePayloadTooLarge {
-		t.Fatalf("expected code %q, got %q", publishCodePayloadTooLarge, errResp.Code)
+	if errResp.Code != publishCodeInvalidBody {
+		t.Fatalf("expected code %q, got %q", publishCodeInvalidBody, errResp.Code)
+	}
+	if !strings.Contains(errResp.Detail, "exceeds 4 bytes") {
+		t.Fatalf("expected the configured limit in the detail, got %q", errResp.Detail)
 	}
 }
 
@@ -8734,7 +8748,7 @@ func TestDecodeJSONBodyStrict_RejectsOversizedBody(t *testing.T) {
 	)
 
 	var payload managementEndpointUpsertPayload
-	err := decodeJSONBodyStrict(req, &payload)
+	err := decodeJSONBodyStrict(req, &payload, defaultMaxBodyBytes)
 	if !errors.Is(err, errRequestBodyTooLarge) {
 		t.Fatalf("expected errRequestBodyTooLarge, got %v", err)
 	}
@@ -8810,4 +8824,45 @@ func (s *adminStatsOverrideStore) Stats() (queue.Stats, error) {
 		return queue.Stats{}, nil
 	}
 	return s.statsFn()
+}
+
+func TestServer_AdminBodyCapHonoursConfiguredMaxBody(t *testing.T) {
+	// decodeJSONBodyStrict hardcoded 2 MiB, so defaults.max_body reached
+	// parseSecretUpsertBody and the publish payload check but no other admin
+	// JSON body -- the same knob applied inconsistently within one package.
+	store := queue.NewMemoryStore()
+	if err := store.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, DeadReason: "max_retries"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	srv := NewServer(store)
+	srv.MaxBodyBytes = 64
+
+	body := `{"ids":["dead_1","` + strings.Repeat("a", 200) + `"]}`
+	req := httptest.NewRequest(http.MethodPost, "http://example/dlq/requeue", strings.NewReader(body))
+	req.Header.Set(auditReasonHeader, "operator_cleanup")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected the configured cap to reject the body, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServer_AdminBodyCapFallsBackToDefaultWhenUnset(t *testing.T) {
+	store := queue.NewMemoryStore()
+	if err := store.Enqueue(queue.Envelope{ID: "dead_1", Route: "/r", Target: "pull", State: queue.StateDead, DeadReason: "max_retries"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	srv := NewServer(store)
+	// MaxBodyBytes left at its zero value: the package default applies.
+	srv.MaxBodyBytes = 0
+
+	req := httptest.NewRequest(http.MethodPost, "http://example/dlq/requeue", strings.NewReader(`{"ids":["dead_1"]}`))
+	req.Header.Set(auditReasonHeader, "operator_cleanup")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected a small body to pass under the default cap, got %d: %s", rr.Code, rr.Body.String())
+	}
 }

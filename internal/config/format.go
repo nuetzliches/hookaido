@@ -334,6 +334,9 @@ func writeAPIBlock(b *bytes.Buffer, name string, api *APIBlock) {
 		if api.MaxBatchSet {
 			fmt.Fprintf(b, "  max_batch %s\n", formatValue(api.MaxBatch, api.MaxBatchQuoted))
 		}
+		if api.MaxLeaseBatchSet {
+			fmt.Fprintf(b, "  max_lease_batch %s\n", formatValue(api.MaxLeaseBatch, api.MaxLeaseBatchQuoted))
+		}
 		if api.GRPCListenSet {
 			fmt.Fprintf(b, "  grpc_listen %s\n", formatValue(api.GRPCListen, api.GRPCListenQuoted))
 		}

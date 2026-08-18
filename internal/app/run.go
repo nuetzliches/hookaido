@@ -2217,6 +2217,14 @@ func startServers(
 	if compiled.PullAPI.MaxBatch > 0 {
 		pullHandler.MaxBatch = compiled.PullAPI.MaxBatch
 	}
+	// Both transports take the lease-batch cap from the same setting. The HTTP
+	// server's was previously never assigned, so it kept NewServer's default of
+	// 100 while gRPC was fed pull_api.max_batch — with `max_batch 1000`, a gRPC
+	// Ack accepted 1000 lease IDs and the equivalent HTTP call rejected anything
+	// over 100.
+	if compiled.PullAPI.MaxLeaseBatch > 0 {
+		pullHandler.MaxLeaseBatch = compiled.PullAPI.MaxLeaseBatch
+	}
 	if compiled.PullAPI.DefaultLeaseTTL > 0 {
 		pullHandler.DefaultLeaseTTL = compiled.PullAPI.DefaultLeaseTTL
 	}
@@ -2482,7 +2490,7 @@ func startServers(
 			PullServer:    pullHandler,
 			ResolveRoute:  state.resolvePull,
 			Authorize:     state.authorizeWorker,
-			MaxLeaseBatch: compiled.PullAPI.MaxBatch,
+			MaxLeaseBatch: compiled.PullAPI.MaxLeaseBatch,
 		}
 
 		go func() {
@@ -3033,6 +3041,7 @@ func requiresRestartForReload(compiled, running config.Compiled) bool {
 		compiled.PullAPI.GRPCListen != running.PullAPI.GRPCListen ||
 		compiled.AdminAPI.Listen != running.AdminAPI.Listen ||
 		compiled.PullAPI.MaxBatch != running.PullAPI.MaxBatch ||
+		compiled.PullAPI.MaxLeaseBatch != running.PullAPI.MaxLeaseBatch ||
 		compiled.PullAPI.DefaultLeaseTTL != running.PullAPI.DefaultLeaseTTL ||
 		compiled.PullAPI.MaxLeaseTTL != running.PullAPI.MaxLeaseTTL ||
 		compiled.PullAPI.DefaultMaxWait != running.PullAPI.DefaultMaxWait ||

@@ -7,6 +7,68 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-08-18
+
+A hardening release. It closes the six umbrella issues from a full code and
+documentation review ([#206](https://github.com/nuetzliches/hookaido/issues/206),
+[#207](https://github.com/nuetzliches/hookaido/issues/207),
+[#208](https://github.com/nuetzliches/hookaido/issues/208),
+[#209](https://github.com/nuetzliches/hookaido/issues/209),
+[#210](https://github.com/nuetzliches/hookaido/issues/210),
+[#211](https://github.com/nuetzliches/hookaido/issues/211)) together with seven
+security advisories, and adds the CI coverage that would have caught most of it.
+
+The importable Go API is backward compatible — nothing exported by `modules/*`,
+`cmd/*` or the root package was removed or changed — so this stays on the `/v2`
+module path. What does change is configuration validation and runtime behaviour.
+
+### Upgrade notes
+
+**Configs that used to compile may now be rejected.** Each of these was already
+broken or already insecure; the compiler now says so instead of starting anyway.
+
+- An `admin_api` with no `auth token` on a non-loopback `listen` address, or
+  co-listening with `ingress`. **The endpoint was open — treat it as disclosed
+  and add a token.** `docs/docker.md` recommended exactly this without a token
+  and has been corrected.
+- A route that an earlier, unconstrained route prefix-shadows (`/hooks/github`
+  after `/hooks`, or anything after a `/` catch-all). The shadowed route was
+  never receiving traffic; the shadowing one was. Reorder so the more specific
+  path comes first.
+- Two components whose `listen` addresses differ as strings but name one socket
+  (`:8080` vs `0.0.0.0:8080`). These never started — the failure moves from
+  `EADDRINUSE` to a compile error naming both.
+- A size value above `1024gb`, or one whose multiplication overflows.
+  `max_body 18014398509481985k` previously yielded a **1 KiB** limit.
+- An `auth hmac { }` block with no secret, and `auth basic` credentials written
+  in `env:`/`file:`/`vault:`/`raw:` reference syntax. **Rotate any basic-auth
+  credential configured that way and treat it as disclosed.**
+
+**Behaviour changes worth planning for.**
+
+- **MCP `config_apply` now requires a `reason` argument.** Existing clients
+  calling it without one are rejected. It is the same audit triple every other
+  mutating tool already takes.
+- **`pull_api.max_lease_batch` (new, default 100)** replaces the accidental use
+  of `pull_api.max_batch` as the gRPC lease-batch cap. A deployment that raised
+  `max_batch` above 100 and relied on the larger gRPC lease batch must now set
+  `max_lease_batch` explicitly. HTTP behaviour is unchanged.
+- **`Retry-After` is honoured**, so messages can sit in the queue much longer
+  before dead-lettering: `retry max` counts attempts, not elapsed time.
+- **Egress CIDR allow rules now require every resolved address**, so a hostname
+  answering with one in-range and one out-of-range address is refused. Prefer a
+  host rule (`allow "*.internal"`) for private-network targets.
+- **`dns_rebind_protection` blocks more ranges**, including `100.64.0.0/10`.
+  Delivering into CGNAT space now needs an explicit allow rule.
+- **A `max_body` smaller than the default now applies to Admin API bodies too.**
+- **Rate-limit buckets survive a reload**, so a deployment that was unknowingly
+  benefiting from the refill will see `429`s at its configured rate.
+- **Postgres batch metrics** record `enqueue_batch` / `ack_batch` / `nack_batch`
+  / `mark_dead_batch` instead of one per-item operation. Dashboards counting
+  acks through the store-operation metric need the new names.
+- **A reload can now wait up to 60s** (was 15s) before replacing the dispatcher,
+  on configs with long target timeouts.
+
 ### Security
 
 - **The Stripe/Cituro rejection log no longer carries anything derived from the secret** ([GHSA-cpfq-rj4r-hh5c](https://github.com/nuetzliches/hookaido/security/advisories/GHSA-cpfq-rj4r-hh5c)). On the `no_secret_matched` path the code recomputed `HMAC-SHA256(secrets[0], "<ts>.<body>")` and logged its first 8 hex characters as `want_prefix_first_secret`. Both halves of that message are attacker-controlled, so every rejected request handed out 32 verified bits of the correct MAC for a message of the caller's choosing — a chosen-message oracle that materially assists offline brute force of a weak secret, reachable unauthenticated and written into the runtime log sink. The field is removed entirely; a mismatch remains diagnosable from `secrets_tried`, `body_len` and `got_prefix`, none of which is secret-derived. Two related echoes are closed in the same pass: the `ts_parse_error` branch logged the unbounded attacker-supplied timestamp, and — less obviously — its `err.Error()`, since `strconv.ParseInt` returns a `*strconv.NumError` whose message embeds the entire input. Both are replaced by a length and an error classification (`not_a_number` / `out_of_range`), with no header material logged at all — matching the `parse_incomplete` path, which already reported `pairs_parsed` and `header_value_len` instead of the header value. Also resolves CodeQL alerts #66 and #68, both `go/clear-text-logging` on this line.
@@ -435,7 +497,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.10.0...HEAD
+[2.10.0]: https://github.com/nuetzliches/hookaido/compare/v2.9.0...v2.10.0
+[2.9.0]: https://github.com/nuetzliches/hookaido/compare/v2.8.1...v2.9.0
+[2.8.1]: https://github.com/nuetzliches/hookaido/compare/v2.8.0...v2.8.1
+[2.8.0]: https://github.com/nuetzliches/hookaido/compare/v2.7.3...v2.8.0
+[2.7.1]: https://github.com/nuetzliches/hookaido/compare/v2.7.0...v2.7.1
+[2.7.0]: https://github.com/nuetzliches/hookaido/compare/v2.6.0...v2.7.0
+[2.6.0]: https://github.com/nuetzliches/hookaido/compare/v2.5.3...v2.6.0
+[2.4.0]: https://github.com/nuetzliches/hookaido/compare/v2.2.2...v2.4.0
+[2.2.2]: https://github.com/nuetzliches/hookaido/compare/v2.2.1...v2.2.2
+[2.2.1]: https://github.com/nuetzliches/hookaido/compare/v2.2.0...v2.2.1
+[2.2.0]: https://github.com/nuetzliches/hookaido/compare/v2.1.0...v2.2.0
+[2.1.0]: https://github.com/nuetzliches/hookaido/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/nuetzliches/hookaido/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/nuetzliches/hookaido/compare/v1.5.1...v2.0.0
 [1.5.1]: https://github.com/nuetzliches/hookaido/compare/v1.5.0...v1.5.1

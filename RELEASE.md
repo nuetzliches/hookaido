@@ -165,7 +165,7 @@ Container publish workflow is defined in `.github/workflows/container.yml`.
 - Platforms: `linux/amd64`, `linux/arm64`
 - Image tags (derived from one pushed release tag): semver (`X.Y.Z`, `X.Y`, `X`), `latest`, and short `sha-*`
 - Repository tag policy: create/push only `vX.Y.Z` git tags
-- Attestation: `actions/attest-build-provenance@v3` with `push-to-registry: true`
+- Attestation: `actions/attest-build-provenance@v4` with `push-to-registry: true`
 - Metadata: OCI labels include source URL and image description
 - Build metadata: Docker build args wire to `hookaido version --long` (`version`, `commit`, `build_date`)
 

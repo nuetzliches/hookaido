@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ExecDeliverer delivers webhook payloads by executing a local command as a
@@ -34,7 +35,16 @@ type ExecDeliverer struct {
 	MaxStderrBytes int
 }
 
-const defaultMaxStderrBytes = 4096
+const (
+	defaultMaxStderrBytes = 4096
+
+	// execWaitDelay bounds how long Wait may block on the child's I/O after the
+	// process has exited or the per-attempt context has expired. It exists to
+	// put a ceiling on a wedged worker, not to cut short a well-behaved script:
+	// a command that has exited leaves at most a buffered pipe to drain, which
+	// takes microseconds.
+	execWaitDelay = 2 * time.Second
+)
 
 // ErrExecNotFound is returned when the command cannot be found or is not
 // executable.
@@ -47,6 +57,17 @@ func (e *ExecDeliverer) Deliver(ctx context.Context, d Delivery) Result {
 	}
 
 	cmd := exec.CommandContext(ctx, command)
+
+	// Without WaitDelay, cmd.Run() can block forever despite the per-attempt
+	// context deadline. cmd.Stderr is a buffer, so os/exec creates a pipe and a
+	// copying goroutine, and Wait does not return until that pipe reaches EOF.
+	// A target script that spawns a background child inheriting stderr
+	// (`mydaemon &` then exit) keeps the write end open, so killing the direct
+	// child on deadline does not close it. The route worker goroutine was then
+	// wedged permanently: route concurrency degraded to zero worker by worker,
+	// the leased message came back only via lease expiry, and every subsequent
+	// Drain() on reload or shutdown timed out.
+	cmd.WaitDelay = execWaitDelay
 
 	// Build environment from delivery metadata + user-defined env vars.
 	env := buildExecEnv(d)
@@ -79,6 +100,25 @@ func (e *ExecDeliverer) Deliver(ctx context.Context, d Delivery) Result {
 	}
 
 	if err == nil {
+		return Result{StatusCode: 200}
+	}
+
+	// The process's own exit status is authoritative whenever it has one, so
+	// this is checked before the context. Wait can return an error while the
+	// command itself succeeded: a background child that inherited stderr holds
+	// the pipe open, so Wait ends on WaitDelay -- or on the context, if that
+	// expires first -- long after the script exited 0. Reporting a timeout
+	// there would re-run, on the retry schedule, a command that already did its
+	// work. A process the context killed exits by signal, so its ExitCode is
+	// -1 and it falls through to the timeout below.
+	if st := cmd.ProcessState; st != nil && st.ExitCode() == 0 {
+		logger.Warn("exec_lingering_output",
+			slog.String("command", command),
+			slog.String("event_id", d.ID),
+			slog.Duration("wait_delay", execWaitDelay),
+			slog.Any("err", err),
+			slog.String("effect", "the command exited successfully; something it started is still holding its stderr, and the delivery is counted as delivered"),
+		)
 		return Result{StatusCode: 200}
 	}
 

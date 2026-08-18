@@ -265,3 +265,71 @@ func TestExecDeliverer_SignalKill(t *testing.T) {
 		t.Fatalf("expected status 502 for signal kill, got %d (err=%v)", res.StatusCode, res.Err)
 	}
 }
+
+// A script that leaves a background child holding stderr used to wedge the
+// calling route worker forever: cmd.Stderr is a buffer, so os/exec copies it
+// through a pipe and Wait blocks until that pipe reaches EOF -- which killing
+// the direct child on the context deadline does not achieve. Worker by worker,
+// route concurrency degraded to zero and every Drain() timed out.
+func TestExecDeliverer_BackgroundChildHoldingStderrDoesNotWedge(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	// The child inherits stderr and outlives its parent by far longer than the
+	// deadline and WaitDelay combined.
+	script := writeScript(t, dir, "leaky.sh", "#!/bin/sh\nsleep 60 &\nexit 0\n")
+
+	d := &ExecDeliverer{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan Result, 1)
+	start := time.Now()
+	go func() {
+		done <- d.Deliver(ctx, Delivery{ID: "evt-leaky", URL: script, IsExec: true})
+	}()
+
+	select {
+	case res := <-done:
+		elapsed := time.Since(start)
+		// The command itself exited 0, so the delivery counts as delivered:
+		// retrying would re-run a script that already did its work.
+		if res.StatusCode != 200 {
+			t.Fatalf("status = %d (err %v), want 200", res.StatusCode, res.Err)
+		}
+		if elapsed > 10*time.Second {
+			t.Fatalf("delivery took %v, expected it to be bounded by WaitDelay", elapsed)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Deliver never returned: the worker is wedged on the inherited stderr pipe")
+	}
+}
+
+// The same situation, but the script itself also outlives the deadline: the
+// context kill is what ends it, and the result must stay a retriable timeout.
+func TestExecDeliverer_TimeoutWithBackgroundChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	script := writeScript(t, dir, "slow-leaky.sh", "#!/bin/sh\nsleep 60 &\nsleep 30\n")
+
+	d := &ExecDeliverer{}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- d.Deliver(ctx, Delivery{ID: "evt-slow-leaky", URL: script, IsExec: true})
+	}()
+
+	select {
+	case res := <-done:
+		if res.StatusCode != 408 {
+			t.Fatalf("status = %d (err %v), want 408", res.StatusCode, res.Err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Deliver never returned after the context deadline")
+	}
+}

@@ -1121,6 +1121,14 @@ func (s *MemoryStore) RequeueDead(req DeadRequeueRequest) (DeadRequeueResponse, 
 		env.LeaseUntil = time.Time{}
 		env.NextRunAt = now
 		env.DeadReason = ""
+		// A requeue is an operator saying "deliver this again", so the retry
+		// budget starts over. Keeping Attempt meant a message that
+		// dead-lettered at attempt 9 came back at 9: the next dequeue made it
+		// 10, `env.Attempt <= target.Retry.Max` was false for every retryable
+		// outcome, and one 503 or connection refused sent it straight back to
+		// the DLQ with reason max_retries. The configured retry schedule never
+		// applied to requeued messages at all.
+		env.Attempt = 0
 		requeued++
 	}
 
@@ -1341,6 +1349,8 @@ func (s *MemoryStore) RequeueMessages(req MessageRequeueRequest) (MessageRequeue
 		env.LeaseUntil = time.Time{}
 		env.NextRunAt = now
 		env.DeadReason = ""
+		// Same reasoning as RequeueDead: a requeue restarts the retry budget.
+		env.Attempt = 0
 		requeued++
 	}
 
@@ -1438,6 +1448,8 @@ func (s *MemoryStore) RequeueMessagesByFilter(req MessageManageFilterRequest) (M
 		env.LeaseUntil = time.Time{}
 		env.NextRunAt = now
 		env.DeadReason = ""
+		// Same reasoning as RequeueDead: a requeue restarts the retry budget.
+		env.Attempt = 0
 		requeued++
 	}
 

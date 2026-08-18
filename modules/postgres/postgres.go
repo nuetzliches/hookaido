@@ -1213,8 +1213,12 @@ func (s *Store) RequeueDead(req queue.DeadRequeueRequest) (queue.DeadRequeueResp
 		requeued := 0
 		for _, id := range ids {
 			res, err := tx.ExecContext(ctx, `
+-- attempt = 0: a requeue is an operator saying "deliver this again", so the
+-- retry budget starts over. Keeping the attempt count meant a message that
+-- dead-lettered at attempt 9 came back at 9, and the next retryable failure
+-- dead-lettered it again after a single delivery.
 UPDATE queue_items
-SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL, attempt = 0
 WHERE id = $3
   AND state = $4
 `,
@@ -1453,7 +1457,7 @@ func (s *Store) RequeueMessages(req queue.MessageRequeueRequest) (queue.MessageR
 
 		res, err := s.db.ExecContext(context.Background(), `
 UPDATE queue_items
-SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
+SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL, attempt = 0
 WHERE state = ANY($3)
   AND id = ANY($4)
 `,

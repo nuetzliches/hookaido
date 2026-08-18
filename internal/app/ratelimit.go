@@ -13,23 +13,43 @@ type tokenBucketLimiter struct {
 	last   time.Time
 }
 
-func newTokenBucketLimiter(rps float64, burst int, now time.Time) *tokenBucketLimiter {
+// normalizeBucketLimits clamps the configured values the way a live limiter
+// holds them, so a comparison against one sees the same numbers.
+func normalizeBucketLimits(rps float64, burst int) (float64, float64) {
 	if rps <= 0 {
 		rps = 1
 	}
 	if burst <= 0 {
 		burst = 1
 	}
+	return rps, float64(burst)
+}
+
+func newTokenBucketLimiter(rps float64, burst int, now time.Time) *tokenBucketLimiter {
+	rate, burstF := normalizeBucketLimits(rps, burst)
 	t := now
 	if t.IsZero() {
 		t = time.Now()
 	}
 	return &tokenBucketLimiter{
-		rate:   rps,
-		burst:  float64(burst),
-		tokens: float64(burst),
+		rate:   rate,
+		burst:  burstF,
+		tokens: burstF,
 		last:   t,
 	}
+}
+
+// matches reports whether l is already configured for exactly these limits, so
+// a caller can keep it instead of replacing it with a fresh, full bucket. A nil
+// limiter never matches: there is nothing to keep.
+func (l *tokenBucketLimiter) matches(rps float64, burst int) bool {
+	if l == nil {
+		return false
+	}
+	wantRate, wantBurst := normalizeBucketLimits(rps, burst)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.rate == wantRate && l.burst == wantBurst
 }
 
 func (l *tokenBucketLimiter) AllowAt(now time.Time) bool {

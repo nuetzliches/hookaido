@@ -151,3 +151,208 @@ func TestTokenBucketLimiterConcurrency(t *testing.T) {
 		t.Fatalf("expected exactly %d allowed out of %d goroutines, got %d", burst, goroutines, got)
 	}
 }
+
+func TestTokenBucketLimiter_Matches(t *testing.T) {
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	lim := newTokenBucketLimiter(10, 5, now)
+
+	if !lim.matches(10, 5) {
+		t.Fatalf("expected identical limits to match")
+	}
+	if lim.matches(11, 5) {
+		t.Fatalf("expected a changed rps not to match")
+	}
+	if lim.matches(10, 6) {
+		t.Fatalf("expected a changed burst not to match")
+	}
+	// newTokenBucketLimiter clamps both values, so the comparison has to clamp
+	// too or a config of 0 would look like a change on every reload.
+	clamped := newTokenBucketLimiter(0, 0, now)
+	if !clamped.matches(0, 0) {
+		t.Fatalf("expected clamped limits to match their own config")
+	}
+	if !clamped.matches(1, 1) {
+		t.Fatalf("expected clamped limits to match the values they were clamped to")
+	}
+
+	var nilLim *tokenBucketLimiter
+	if nilLim.matches(10, 5) {
+		t.Fatalf("expected a nil limiter never to match")
+	}
+}
+
+func TestConfigureIngressRateLimits_PreservesBucketsAcrossReload(t *testing.T) {
+	// Every new limiter starts with tokens = burst, and this ran on every
+	// successful reload -- including each applied Admin API managed-endpoint
+	// mutation and each --watch write -- so a reload refilled every bucket and
+	// the effective rate limit was unbounded at reload frequency.
+	src := `
+ingress {
+  listen ":8080"
+  rate_limit { rps 10 burst 2 }
+}
+
+"/hooks" {
+  rate_limit { rps 10 burst 2 }
+  deliver "https://a.example.com/x" { }
+}
+`
+	compiled := compileForReloadTest(t, src)
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	state := newRuntimeState(compiled)
+	state.now = func() time.Time { return now }
+	state.configureIngressRateLimits(compiled)
+
+	globalBefore := state.ingressGlobalLimit
+	routeBefore := state.ingressRouteLimits["/hooks"]
+	if globalBefore == nil || routeBefore == nil {
+		t.Fatalf("expected both limiters to be configured")
+	}
+
+	// Drain both buckets at a fixed instant so no refill can occur.
+	for i := 0; i < 2; i++ {
+		if !globalBefore.AllowAt(now) || !routeBefore.AllowAt(now) {
+			t.Fatalf("expected the first %d requests to be allowed", i+1)
+		}
+	}
+	if globalBefore.AllowAt(now) || routeBefore.AllowAt(now) {
+		t.Fatalf("expected both buckets to be empty")
+	}
+
+	// A reload that does not touch the rate limits.
+	state.updateAll(compileForReloadTest(t, src))
+
+	if state.ingressGlobalLimit != globalBefore {
+		t.Fatalf("expected the global limiter to be carried over")
+	}
+	if state.ingressRouteLimits["/hooks"] != routeBefore {
+		t.Fatalf("expected the route limiter to be carried over")
+	}
+	if state.ingressGlobalLimit.AllowAt(now) {
+		t.Fatalf("global bucket refilled across the reload")
+	}
+	if state.ingressRouteLimits["/hooks"].AllowAt(now) {
+		t.Fatalf("route bucket refilled across the reload")
+	}
+}
+
+func TestConfigureIngressRateLimits_ReplacesBucketsWhenLimitsChange(t *testing.T) {
+	before := compileForReloadTest(t, `
+ingress {
+  listen ":8080"
+  rate_limit { rps 10 burst 2 }
+}
+
+"/hooks" {
+  rate_limit { rps 10 burst 2 }
+  deliver "https://a.example.com/x" { }
+}
+`)
+	after := compileForReloadTest(t, `
+ingress {
+  listen ":8080"
+  rate_limit { rps 50 burst 2 }
+}
+
+"/hooks" {
+  rate_limit { rps 10 burst 9 }
+  deliver "https://a.example.com/x" { }
+}
+`)
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	state := newRuntimeState(before)
+	state.now = func() time.Time { return now }
+	state.configureIngressRateLimits(before)
+
+	globalBefore := state.ingressGlobalLimit
+	routeBefore := state.ingressRouteLimits["/hooks"]
+
+	state.updateAll(after)
+
+	if state.ingressGlobalLimit == globalBefore {
+		t.Fatalf("expected a changed rps to produce a fresh global limiter")
+	}
+	if state.ingressRouteLimits["/hooks"] == routeBefore {
+		t.Fatalf("expected a changed burst to produce a fresh route limiter")
+	}
+	// The replacement must actually carry the new limits.
+	if !state.ingressGlobalLimit.matches(50, 2) {
+		t.Fatalf("global limiter did not adopt the new rps")
+	}
+	if !state.ingressRouteLimits["/hooks"].matches(10, 9) {
+		t.Fatalf("route limiter did not adopt the new burst")
+	}
+}
+
+func TestConfigureIngressRateLimits_DropsLimitersForRemovedRoutes(t *testing.T) {
+	before := compileForReloadTest(t, `
+"/hooks" {
+  rate_limit { rps 10 burst 2 }
+  deliver "https://a.example.com/x" { }
+}
+
+"/other" {
+  rate_limit { rps 10 burst 2 }
+  deliver "https://b.example.com/x" { }
+}
+`)
+	after := compileForReloadTest(t, `
+"/hooks" {
+  rate_limit { rps 10 burst 2 }
+  deliver "https://a.example.com/x" { }
+}
+`)
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	state := newRuntimeState(before)
+	state.now = func() time.Time { return now }
+	state.configureIngressRateLimits(before)
+	if _, ok := state.ingressRouteLimits["/other"]; !ok {
+		t.Fatalf("expected /other to start with a limiter")
+	}
+
+	state.updateAll(after)
+
+	if _, ok := state.ingressRouteLimits["/other"]; ok {
+		t.Fatalf("expected the removed route's limiter to be dropped")
+	}
+	if _, ok := state.ingressRouteLimits["/hooks"]; !ok {
+		t.Fatalf("expected /hooks to keep its limiter")
+	}
+}
+
+func TestConfigureIngressRateLimits_ClearsGlobalLimiterWhenDisabled(t *testing.T) {
+	before := compileForReloadTest(t, `
+ingress {
+  listen ":8080"
+  rate_limit { rps 10 burst 2 }
+}
+
+"/hooks" {
+  deliver "https://a.example.com/x" { }
+}
+`)
+	after := compileForReloadTest(t, `
+ingress { listen ":8080" }
+
+"/hooks" {
+  deliver "https://a.example.com/x" { }
+}
+`)
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	state := newRuntimeState(before)
+	state.now = func() time.Time { return now }
+	state.configureIngressRateLimits(before)
+	if state.ingressGlobalLimit == nil {
+		t.Fatalf("expected a global limiter to start configured")
+	}
+
+	state.updateAll(after)
+
+	if state.ingressGlobalLimit != nil {
+		t.Fatalf("expected the global limiter to be cleared when disabled")
+	}
+}

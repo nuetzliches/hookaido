@@ -243,6 +243,8 @@ ingress {
 
 Over-limit requests receive `429 Too Many Requests`.
 
+**Across a config reload**, a bucket whose `rps` and `burst` are unchanged keeps its current token balance — it is not refilled. Only a limiter whose limits actually changed, or one belonging to a new route, starts full. This matters because reloads are frequent and not always deliberate: `hookaido run --watch` triggers one per config write, and every applied Admin API managed-endpoint mutation triggers one too. Refilling on each of those would make the effective limit unbounded at reload frequency.
+
 ## Body and Header Limits
 
 Ingress enforces size limits from `defaults` or per-route config:

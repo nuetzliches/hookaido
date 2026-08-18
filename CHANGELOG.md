@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **Quoted values keep their backslashes.** An unknown escape sequence dropped the backslash and kept only the escaped character, so `cert_file "C:\certs\server.pem"` parsed as `C:certsserver.pem` and `"^/hooks/\d+$"` as `^/hooks/d+$` — silently, with the failure surfacing later as a missing file or a matcher that never matches. `config fmt` and Admin API config rewrites then wrote the corrupted value back. `\\`, `\"`, `\n`, `\t` and `\r` are unchanged; every other backslash is now preserved, and the formatter re-escapes it so values survive any number of format cycles.
+
+- **Admin API managed-endpoint mutations no longer delete the comments in your Hookaidofile.** Every applied upsert or delete rewrote the file through the formatter, which regenerates it from a parse tree that keeps comments only above the first statement — one admin call erased every route annotation and rotation note in the file the project declares the source of truth. Mutations now splice just the `application`/`endpoint_name` directives into the existing file, leaving comments, blank lines and formatting untouched, and verify the spliced result against the canonical form before writing. `config fmt` still regenerates the file (documented under [Values, Quoting and Comments](docs/configuration.md#values-quoting-and-comments)).
+
+- **Parse errors in a value position report what actually went wrong.** An unterminated string or invalid UTF-8 was reported as `expected value` at position `0:0` — a position that cannot exist, since lines are 1-based — instead of `unterminated string at 12:18`.
+
 ## [2.10.1] - 2026-08-18
 
 Publishes the container images for the 2.10.0 release. 2.10.0 itself is complete

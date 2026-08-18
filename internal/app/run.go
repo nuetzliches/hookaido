@@ -1729,7 +1729,28 @@ func mutateManagedEndpointConfig(
 		return admin.ManagementEndpointMutationResult{}, running, errors.New(config.FormatValidationText(res))
 	}
 
-	if err := writeFileAtomic(path, formatted); err != nil {
+	// Write a source-preserving splice when one is available. Format
+	// regenerates the file from the AST, which keeps comments only in the
+	// preamble, so writing its output on every applied managed-endpoint
+	// mutation deleted every in-body comment (route annotations, rotation
+	// notes) from the file the project declares the source of truth -- an
+	// Admin API call silently rewriting an operator's file is a different
+	// thing from an explicit `config fmt`. RewriteManagedEndpoints touches
+	// only the two managed-endpoint directives and verifies its own output
+	// against the canonical form, so falling back to `formatted` stays
+	// correct, just lossy; the warning is there so the loss is never silent.
+	payload := formatted
+	if spliced, rewriteErr := config.RewriteManagedEndpoints(data, cfg); rewriteErr == nil {
+		payload = spliced
+	} else if config.HasInBodyComments(data) {
+		logger.Warn("config_rewrite_dropped_comments",
+			slog.String("path", path),
+			slog.String("trigger", trigger),
+			slog.Any("err", rewriteErr),
+		)
+	}
+
+	if err := writeFileAtomic(path, payload); err != nil {
 		return admin.ManagementEndpointMutationResult{}, running, err
 	}
 

@@ -1369,6 +1369,84 @@ func TestApplyManagedEndpointDelete_ConflictWhenCurrentRouteHasActiveBacklog(t *
 	}
 }
 
+// An Admin API managed-endpoint mutation rewrites the Hookaidofile. It used to
+// do that through Format, which regenerates the file from an AST that keeps
+// comments only in the preamble -- so one admin call deleted every route
+// annotation in the file the project declares the source of truth.
+func TestMutateManagedEndpointConfig_PreservesInBodyComments(t *testing.T) {
+	src := `# Hookaidofile for the billing DMZ.
+pull_api { auth token "raw:t" }
+
+# Invoice sink. Do not repoint without telling the billing team.
+"/a" {
+  # mapped by the Admin API
+  application "billing"
+  endpoint_name "invoice.created"
+  pull { path "/e1" }
+}
+
+# Spare route, kept for the cutover.
+"/b" {
+  pull { path "/e2" }
+}
+`
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	running := compileForReloadTest(t, src)
+	state := newRuntimeState(running)
+	if err := state.loadAuth(running); err != nil {
+		t.Fatalf("loadAuth: %v", err)
+	}
+
+	if _, _, err := mutateManagedEndpointConfig(
+		cfgPath,
+		running,
+		state,
+		slog.Default(),
+		func(cfg *config.Config, compiled config.Compiled) (admin.ManagementEndpointMutationResult, error) {
+			return applyManagedEndpointUpsert(cfg, compiled, admin.ManagementEndpointUpsertRequest{
+				Application:  "billing",
+				EndpointName: "invoice.created",
+				Route:        "/b",
+			}, nil)
+		},
+		"test_mutation",
+	); err != nil {
+		t.Fatalf("mutate config: %v", err)
+	}
+
+	written, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	got := string(written)
+	for _, comment := range []string{
+		"# Hookaidofile for the billing DMZ.",
+		"# Invoice sink. Do not repoint without telling the billing team.",
+		"# mapped by the Admin API",
+		"# Spare route, kept for the cutover.",
+	} {
+		if !strings.Contains(got, comment) {
+			t.Fatalf("admin mutation dropped comment %q:\n%s", comment, got)
+		}
+	}
+
+	cfg, err := config.Parse(written)
+	if err != nil {
+		t.Fatalf("parse written config: %v", err)
+	}
+	if cfg.Routes[0].ApplicationSet || cfg.Routes[0].EndpointNameSet {
+		t.Fatalf("managed endpoint was not cleared on /a:\n%s", got)
+	}
+	if cfg.Routes[1].Application != "billing" || cfg.Routes[1].EndpointName != "invoice.created" {
+		t.Fatalf("managed endpoint was not set on /b:\n%s", got)
+	}
+}
+
 func TestMutateManagedEndpointConfig_UpsertAndReload(t *testing.T) {
 	src := `
 pull_api { auth token "raw:t" }

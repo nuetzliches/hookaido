@@ -3673,7 +3673,15 @@ func isDeliverDirective(name string) bool {
 }
 
 func (p *parser) parseValue() (string, bool, error) {
-	tok, _ := p.next()
+	// The lexer error has to be propagated here. Unlike the directive loops,
+	// which peek (and return the error) before consuming, this is the one call
+	// site that reaches the lexer directly, so swallowing the error reported an
+	// unterminated string or invalid UTF-8 as "expected value" at position 0:0
+	// -- a position that cannot exist, since lines are 1-based.
+	tok, err := p.next()
+	if err != nil {
+		return "", false, err
+	}
 	switch tok.kind {
 	case tokString, tokIdent:
 		return tok.text, tok.kind == tokString, nil

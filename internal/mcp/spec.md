@@ -118,7 +118,7 @@ Arguments:
 Mode enum:
 - `preview_only` (default): validate/compile only; no write
 - `write_only`: atomic write to configured path after successful validate/compile
-- `write_and_reload`: atomic write + bounded admin health check (`GET {admin_prefix}/healthz`), rollback to previous file on failed health check
+- `write_and_reload`: atomic write + verification that the running instance adopted the written config, rollback to the previous file when it did not
 
 Notes:
 - `reason` is **required**, `actor` and `request_id` are optional — the same audit triple every other mutating tool takes. They are echoed on the response under `audit` and recorded in `metadata.config_mutation`.
@@ -126,7 +126,9 @@ Notes:
 - `reload_timeout` is optional and only used by `write_and_reload` (default `5s`).
 - Admin auth tokens are loaded for the health check; unresolved token refs fail `write_and_reload`.
 - Token refs used by MCP health/reload flows support `env:`, `file:`, `vault:`, and `raw:` schemes via the shared secrets resolver.
-- `write_and_reload` does not signal a running `hookaido run` process; runtime reload is handled by config file watch (`--watch`) or explicit `instance_reload`.
+- `write_and_reload` verifies the reload rather than inferring it from liveness. It sends `SIGHUP` when a pid file is configured (so it does not depend on `--watch`, which defaults to off), then polls `GET {admin_prefix}/healthz?details=true` until `diagnostics.config.fingerprint` equals the SHA-256 of the bytes it wrote. If that does not happen within `reload_timeout` the previous file is restored and the tool reports `ok: false`, `rolled_back: true`.
+- Response fields: `reload_signaled` reports whether a `SIGHUP` was sent; `reload_verification` is present only when the instance could not report its config identity (an older build), in which case `applied` is `true` and `reloaded` is `false` — the write happened, the adoption is unverified.
+- `instance_reload` verifies the same way after signalling.
 
 ### `admin_health`
 Return local read-only snapshot (`config_readable`, `db_exists`, `db_readable`).
@@ -793,6 +795,8 @@ Notes:
   - `timestamp`, `principal`, `role`, `tool`, `input_hash`, `result`, `duration_ms` (and `error` when applicable)
   - Config-lifecycle mutation tools (`config_apply`, `management_endpoint_upsert`, `management_endpoint_delete`) include `metadata.config_mutation` (`operation`, `mode`, path/selector fields, the audit triple `reason`/`actor`/`request_id`, and apply outcome flags such as `ok`, `applied`, `reloaded`, `rolled_back` when available). `config_apply` additionally records `content_sha256` and `content_bytes`, so a reviewer can identify the config text that was applied — `input_hash` covers the whole argument object and changes with the reason or mode too.
   - Runtime process-control tools (`instance_start`, `instance_stop`, `instance_reload`) include `metadata.runtime_control` (`operation`, pid/timeout context, and outcome flags such as `started|stopped|reloaded`, `already_running|already_stopped`, `signaled` when available).
+- `instance_stop` without `force` is refused on Windows: the platform has no graceful stop (every signal maps to `TerminateProcess`), so a stop there is always a hard kill and is reported as `forced: true`. Pass `force` to terminate deliberately.
+- A read-only tool set (no `--enable-mutations`) opens the SQLite database read-only: no schema migrations, no WAL/journal pragmas, no checkpoint loop. Pointing a newer binary's `mcp serve --db` at a running older server no longer migrates its schema forward.
   - ID-based queue mutation tools (`dlq_requeue`, `dlq_delete`, `messages_cancel`, `messages_requeue`, `messages_resume`) include `metadata.id_mutation` (`operation`, `changed_field`, `ids_requested`, `ids_unique`, `changed` when available).
   - `messages_publish` also includes `metadata.admin_proxy_publish` rollback counters (`rollback_attempts`, `rollback_succeeded`, `rollback_failed`, `rollback_ids`) plus running totals (`*_total`) for Admin-proxy publish rollback observability.
   - `messages_*_by_filter` also include `metadata.filter_mutation` (`operation`, `changed_field`, `matched`, `changed`, `preview_only`) for mutation-result observability.

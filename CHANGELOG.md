@@ -7,7 +7,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /healthz?details=true` reports the running config's identity** under `diagnostics.config`: `fingerprint` (SHA-256 of the config file bytes as loaded), `generation` and `loaded_at`. Liveness alone cannot tell you which config a process is running, so this is what lets a deployment pipeline — or the MCP tools below — confirm that a config it wrote was actually adopted.
+
 ### Fixed
+
+- **MCP `config_apply` no longer reports a reload that did not happen.** The "reload health check" polled `GET /healthz` for a 200 — the liveness endpoint a running instance answers regardless of which config it runs. With `hookaido run` started without `--watch` (the default) the file write triggered nothing at all, and the tool still returned `ok/applied/reloaded`: a token revoked through `config_apply` was reported applied while the old token kept authenticating. A reload that failed at apply time looked identical. Because the check could not fail for those reasons, the rollback path was effectively dead code. `config_apply` now signals the instance when a pid file is configured, then waits for it to report the fingerprint of the bytes just written, and rolls the file back when it does not. `instance_reload` verifies the same way. An instance too old to report its config identity yields `applied: true, reloaded: false` plus a `reload_verification` note rather than a false success.
+
+- **MCP `messages_publish` is atomic on the direct SQLite path.** A batch was enqueued item by item, so a mid-batch `ErrQueueFull` left items `[0,k)` queued while the tool returned only an error — and retrying the same batch then failed at item 0 with "already exists", leaving the operation permanently half-applied and un-retryable without manual cleanup. It now uses the backend's transactional batch enqueue, matching the contract the admin-proxy path already kept.
+
+- **MCP `instance_stop` on Windows no longer hard-kills while reporting a graceful stop.** Windows maps every signal to `TerminateProcess`, so the SIGTERM phase terminated the queue server with no drain and no shutdown hooks, and both the tool output (`forced: false`) and the audit event recorded it as graceful. An un-forced stop is now refused there with an explanation; `force` terminates and is reported as `forced: true`.
+
+- **MCP read-only tool sets open the database read-only.** Without `--enable-mutations`, `mcp serve --db` still called the full store constructor on every tool request: `BEGIN IMMEDIATE` migration transactions and `PRAGMA journal_mode=WAL` against the running server's database, plus a checkpoint loop. Pointing a newer binary's MCP server at an older still-running server migrated its schema forward, and the older server then failed its downgrade guard at the next restart; every call also contended for the write lock with the live server.
 
 - **A cancelled dequeue no longer parks a goroutine or leases into a dead connection.** `queue.Store.Dequeue` takes no context, so a gRPC worker whose own deadline fired left the handler blocked inside the store for the rest of `max_wait` — and any item that arrived meanwhile was leased into a stream gRPC had already discarded, invisible for the full lease TTL (30s by default) until the expiry sweep reclaimed it. Every client timeout thus became a lease-TTL delivery delay. All three backends now implement a context-aware dequeue, and the pull API passes the request context through from HTTP, SSE and gRPC: the long poll ends with its caller, and a caller that is already gone is never handed a lease.
 

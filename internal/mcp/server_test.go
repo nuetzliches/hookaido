@@ -2013,7 +2013,11 @@ func TestToolConfigApplyWriteAndReloadSuccess(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			w.WriteHeader(http.StatusOK)
+			// Reports the fingerprint of whatever the file currently holds,
+			// which is what a running instance with --watch does: config_apply
+			// may only claim a reload once the instance says it runs those
+			// bytes.
+			writeStubHealthz(t, w, r, cfgPath)
 		}),
 	}
 	done := make(chan struct{})

@@ -31,11 +31,25 @@ Returns `200` when the instance is healthy.
 
 Returns detailed JSON diagnostics (follows `admin_api.auth` — requires bearer token when configured):
 
+`diagnostics.config` identifies the config the process is actually running:
+`fingerprint` is the SHA-256 of the config file's bytes as loaded, `generation`
+counts successful loads (starting at 1 for startup), and `loaded_at` is when the
+current one took effect. Liveness alone cannot answer that question — `/healthz`
+returns 200 whichever config is in force — so this is what lets a deployment
+pipeline confirm that a config it wrote was adopted rather than silently
+ignored, which is exactly what the MCP `config_apply` and `instance_reload`
+tools do with it.
+
 ```json
 {
   "ok": true,
   "time": "2026-02-12T20:15:00Z",
   "diagnostics": {
+    "config": {
+      "fingerprint": "9f2c…",
+      "generation": 3,
+      "loaded_at": "2026-02-12T20:10:00Z"
+    },
     "queue": {
       "total": 1523,
       "by_state": { "queued": 1200, "leased": 300, "dead": 23 },

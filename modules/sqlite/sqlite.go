@@ -270,6 +270,7 @@ type Store struct {
 	dlqMaxDepth              int
 	attemptsRetentionMaxAge  time.Duration
 	attemptsMaxRows          int
+	readOnly                 bool
 	checkpointInterval       time.Duration
 	checkpointStop           chan struct{}
 	checkpointDone           chan struct{}
@@ -371,14 +372,9 @@ func NewStore(dbPath string, opts ...Option) (*Store, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-
+	// Options are applied before the database is opened, because read-only mode
+	// changes the DSN itself.
 	s := &Store{
-		db:                 db,
 		nowFn:              time.Now,
 		notify:             make(chan struct{}),
 		pollInterval:       1 * time.Second,
@@ -390,13 +386,57 @@ func NewStore(dbPath string, opts ...Option) (*Store, error) {
 		opt(s)
 	}
 
+	dsn := dbPath
+	if s.readOnly {
+		if _, err := os.Stat(dbPath); err != nil {
+			return nil, err
+		}
+		dsn = readOnlyDSN(dbPath)
+	} else if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	s.db = db
+
 	if err := s.init(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	s.startCheckpointLoop()
+	if !s.readOnly {
+		s.startCheckpointLoop()
+	}
 
 	return s, nil
+}
+
+// WithReadOnly opens the database read-only: no migrations, no journal or
+// synchronous pragmas, no checkpoint loop.
+//
+// It exists for processes that inspect another instance's database, such as
+// `hookaido mcp serve --db` with a read-only tool set. Opening read-write there
+// ran `BEGIN IMMEDIATE` migration transactions against the running server's
+// database on every tool request -- so pointing a newer binary's MCP server at
+// an older server's database migrated the schema forward under it, and the
+// older server then failed its downgrade guard at the next restart. Every call
+// also briefly contended for the single write lock with the live server.
+func WithReadOnly(readOnly bool) Option {
+	return func(s *Store) {
+		s.readOnly = readOnly
+	}
+}
+
+// readOnlyDSN turns a plain file path into a modernc sqlite DSN that opens the
+// database read-only. The immutable flag is deliberately not set: the file is
+// being written by another process.
+func readOnlyDSN(dbPath string) string {
+	return "file:" + filepath.ToSlash(dbPath) + "?mode=ro"
 }
 
 func WithQueueLimits(maxDepth int, dropPolicy string) Option {
@@ -417,6 +457,15 @@ func (s *Store) Close() error {
 
 func (s *Store) init() error {
 	ctx := context.Background()
+
+	if s.readOnly {
+		// A read-only connection cannot set these pragmas or run migrations,
+		// and must not: the schema belongs to whichever process owns the file.
+		if _, err := s.db.ExecContext(ctx, "PRAGMA busy_timeout=5000;"); err != nil {
+			return fmt.Errorf("sqlite: set busy_timeout: %w", err)
+		}
+		return nil
+	}
 
 	var journalMode string
 	if err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL;").Scan(&journalMode); err != nil {
@@ -3440,6 +3489,7 @@ func (backend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() error, er
 		WithDeliveredRetention(cfg.DeliveredRetentionMaxAge),
 		WithDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
 		WithAttemptsRetention(cfg.AttemptsRetentionMaxAge, cfg.AttemptsRetentionMaxRows),
+		WithReadOnly(cfg.ReadOnly),
 	)
 	if err != nil {
 		return nil, nil, err

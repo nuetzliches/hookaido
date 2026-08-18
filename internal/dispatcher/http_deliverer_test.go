@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -609,5 +611,147 @@ func TestHTTPDeliverer_DrainsShortBodyFully(t *testing.T) {
 	}
 	if body.read != 512 {
 		t.Fatalf("drained %d bytes, want 512", body.read)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "absent", value: "", want: 0},
+		{name: "delta seconds", value: "120", want: 2 * time.Minute},
+		{name: "delta seconds with surrounding space", value: "  30 ", want: 30 * time.Second},
+		{name: "zero", value: "0", want: 0},
+		{name: "negative", value: "-5", want: 0},
+		{name: "http date in the future", value: "Tue, 18 Aug 2026 12:05:00 GMT", want: 5 * time.Minute},
+		{name: "http date in the past", value: "Tue, 18 Aug 2026 11:55:00 GMT", want: 0},
+		{name: "unparseable", value: "soon please", want: 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			if tc.value != "" {
+				h.Set("Retry-After", tc.value)
+			}
+			if got := parseRetryAfter(h, now); got != tc.want {
+				t.Fatalf("parseRetryAfter(%q) = %s, want %s", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHTTPDeliverer_SurfacesRetryAfterOnResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDeliverer(srv.Client(), EgressPolicy{})
+	res := d.Deliver(context.Background(), Delivery{
+		Method: http.MethodPost,
+		URL:    srv.URL + "/hook",
+		Header: http.Header{},
+		Body:   []byte(`{}`),
+	})
+	if res.Err != nil {
+		t.Fatalf("deliver err: %v", res.Err)
+	}
+	if res.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status: got %d, want 429", res.StatusCode)
+	}
+	if res.RetryAfter != time.Hour {
+		t.Fatalf("retry-after: got %s, want 1h", res.RetryAfter)
+	}
+}
+
+func TestHTTPDeliverer_RereadsFileSigningSecretPastTTL(t *testing.T) {
+	// Rotating a file:- or vault:-backed signing secret used to have no effect
+	// without editing the Hookaidofile, SIGHUP included, so revoking a leaked key
+	// required a full process restart.
+	path := filepath.Join(t.TempDir(), "signing.key")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	ref := "file:" + path
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	d := NewHTTPDeliverer(&http.Client{}, EgressPolicy{})
+	d.Now = func() time.Time { return now }
+
+	got, err := d.loadSigningSecret(ref)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("got %q, want %q", got, "first")
+	}
+
+	if err := os.WriteFile(path, []byte("second"), 0o600); err != nil {
+		t.Fatalf("rotate secret: %v", err)
+	}
+
+	// Still inside the TTL: the cached value stands.
+	now = now.Add(signingSecretTTL - time.Second)
+	got, err = d.loadSigningSecret(ref)
+	if err != nil {
+		t.Fatalf("load inside ttl: %v", err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("inside ttl: got %q, want the cached %q", got, "first")
+	}
+
+	// Past the TTL: re-read.
+	now = now.Add(2 * time.Second)
+	got, err = d.loadSigningSecret(ref)
+	if err != nil {
+		t.Fatalf("load past ttl: %v", err)
+	}
+	if string(got) != "second" {
+		t.Fatalf("past ttl: got %q, want the rotated %q", got, "second")
+	}
+}
+
+func TestHTTPDeliverer_KeepsEnvSigningSecretCached(t *testing.T) {
+	// env: is fixed for the process, so re-reading it could never observe a
+	// rotation -- caching it for the deliverer's life avoids pointless work.
+	t.Setenv("HOOKAIDO_TEST_SIGNING_SECRET", "first")
+	ref := "env:HOOKAIDO_TEST_SIGNING_SECRET"
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	d := NewHTTPDeliverer(&http.Client{}, EgressPolicy{})
+	d.Now = func() time.Time { return now }
+
+	if _, err := d.loadSigningSecret(ref); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	t.Setenv("HOOKAIDO_TEST_SIGNING_SECRET", "second")
+
+	now = now.Add(10 * signingSecretTTL)
+	got, err := d.loadSigningSecret(ref)
+	if err != nil {
+		t.Fatalf("load past ttl: %v", err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("got %q, want the cached %q", got, "first")
+	}
+}
+
+func TestSigningSecretRefIsRereadable(t *testing.T) {
+	cases := map[string]bool{
+		"file:/run/secrets/key":            true,
+		"vault:secret/data/hookaido#token": true,
+		"env:HOOKAIDO_SIGNING_SECRET":      false,
+		"raw:literal":                      false,
+		"  file:/run/secrets/key":          true,
+	}
+	for ref, want := range cases {
+		if got := signingSecretRefIsRereadable(ref); got != want {
+			t.Errorf("signingSecretRefIsRereadable(%q) = %v, want %v", ref, got, want)
+		}
 	}
 }

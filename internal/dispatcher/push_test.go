@@ -1378,3 +1378,101 @@ func TestDispatcher_StartMultiTargetSharesWorkersAcrossTargets(t *testing.T) {
 		t.Fatal("expected dispatcher drain to complete")
 	}
 }
+
+func TestHandleDelivery_RetryAfterExtendsTheBackoff(t *testing.T) {
+	// The scheduled delay for attempt 1 is 2s; the target asks for an hour. A
+	// target answering 429 Retry-After: 3600 used to get all its attempts inside
+	// ~6 minutes and then be dead-lettered, when waiting would have succeeded.
+	store := &stubPushStore{}
+	d := PushDispatcher{
+		Store: store,
+		Deliverer: staticDeliverer{res: Result{
+			StatusCode: http.StatusTooManyRequests,
+			RetryAfter: 3600 * time.Second,
+		}},
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 1}
+	target := TargetConfig{
+		URL:     "https://x",
+		Timeout: time.Second,
+		Retry:   RetryConfig{Max: 3, Base: 2 * time.Second, Cap: 10 * time.Second, Jitter: 0},
+	}
+	d.handleDelivery(d.Logger, env, target)
+
+	if store.nackDelay != time.Hour {
+		t.Fatalf("nack delay=%s, want the clamped hour", store.nackDelay)
+	}
+}
+
+func TestHandleDelivery_RetryAfterIsClampedToTheCeiling(t *testing.T) {
+	store := &stubPushStore{}
+	d := PushDispatcher{
+		Store: store,
+		Deliverer: staticDeliverer{res: Result{
+			StatusCode: http.StatusServiceUnavailable,
+			RetryAfter: 72 * time.Hour,
+		}},
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 1}
+	target := TargetConfig{
+		URL:     "https://x",
+		Timeout: time.Second,
+		Retry:   RetryConfig{Max: 3, Base: 2 * time.Second, Cap: 10 * time.Second, Jitter: 0},
+	}
+	d.handleDelivery(d.Logger, env, target)
+
+	if store.nackDelay != maxRetryAfterDelay {
+		t.Fatalf("nack delay=%s, want %s", store.nackDelay, maxRetryAfterDelay)
+	}
+}
+
+func TestHandleDelivery_RetryAfterShorterThanBackoffIsIgnored(t *testing.T) {
+	// The hint raises the delay, it never lowers it: a target asking to be
+	// retried sooner than the schedule allows must not defeat the backoff.
+	store := &stubPushStore{}
+	d := PushDispatcher{
+		Store: store,
+		Deliverer: staticDeliverer{res: Result{
+			StatusCode: http.StatusServiceUnavailable,
+			RetryAfter: 500 * time.Millisecond,
+		}},
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 1}
+	target := TargetConfig{
+		URL:     "https://x",
+		Timeout: time.Second,
+		Retry:   RetryConfig{Max: 3, Base: 2 * time.Second, Cap: 10 * time.Second, Jitter: 0},
+	}
+	d.handleDelivery(d.Logger, env, target)
+
+	if store.nackDelay != 2*time.Second {
+		t.Fatalf("nack delay=%s, want the scheduled 2s", store.nackDelay)
+	}
+}
+
+func TestHandleDelivery_NoRetryAfterKeepsTheSchedule(t *testing.T) {
+	store := &stubPushStore{}
+	d := PushDispatcher{
+		Store:     store,
+		Deliverer: staticDeliverer{res: Result{StatusCode: http.StatusBadGateway}},
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	env := queue.Envelope{Route: "/r", Target: "https://x", LeaseID: "lease_1", Attempt: 1}
+	target := TargetConfig{
+		URL:     "https://x",
+		Timeout: time.Second,
+		Retry:   RetryConfig{Max: 3, Base: 2 * time.Second, Cap: 10 * time.Second, Jitter: 0},
+	}
+	d.handleDelivery(d.Logger, env, target)
+
+	if store.nackDelay != 2*time.Second {
+		t.Fatalf("nack delay=%s, want the scheduled 2s", store.nackDelay)
+	}
+}

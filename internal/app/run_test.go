@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1751,5 +1754,63 @@ pull_api { auth token "raw:t" }
 	}
 	if route != "/a" {
 		t.Fatalf("expected mapping on /a after rollback, got %q", route)
+	}
+}
+
+// loadAuth installs the sealer on reload while the Admin API is already
+// serving, and sealSecretValue reads it under s.mu. The write used to happen
+// outside that lock, so every secret-persisting request raced a reload. Run
+// under -race, which CI enables.
+func TestLoadAuth_SealerWriteIsSynchronized(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x2a}, 32))
+	t.Setenv("HOOKAIDO_SECRET_ENCRYPTION_KEY", key)
+
+	compiled := compileForReloadTest(t, `
+secrets {
+  secret "inbound" {
+    value "raw:seed"
+    valid_from "2026-01-01T00:00:00Z"
+    runtime true
+  }
+}
+
+"/x" {
+  auth hmac secret_ref "inbound"
+  deliver "https://a.example.com/x" { }
+}
+`)
+
+	state := newRuntimeState(compiled)
+
+	// Reloads are serialized by reloadMu in Run, so loadAuth never races itself
+	// — the concurrency that matters is a reload against Admin API requests
+	// sealing secrets.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 20; j++ {
+			if err := state.loadAuth(compiled); err != nil {
+				t.Errorf("loadAuth: %v", err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				// Before any loadAuth has completed this legitimately reports
+				// "sealer not configured"; the point is that the read and the
+				// write are ordered, not which one wins.
+				_, _ = state.sealSecretValue([]byte("payload"))
+			}
+		}()
+	}
+	wg.Wait()
+
+	if _, err := state.sealSecretValue([]byte("payload")); err != nil {
+		t.Fatalf("expected a sealer to be installed after loadAuth: %v", err)
 	}
 }

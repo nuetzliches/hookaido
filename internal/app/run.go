@@ -279,6 +279,20 @@ func run() int {
 		return result, nil
 	}
 
+	// The queue store must be in place before the SIGHUP handler can run.
+	// reloadNow hands `store` to a fresh dispatcher, and Start() silently no-ops
+	// on a nil Store — so a supervisor that writes the config and signals in one
+	// step could land inside the window and leave push delivery dead until
+	// restart, with nothing logged. Assigning before the goroutine is created
+	// also establishes the happens-before edge the reloadMu-guarded reads need.
+	openedStore, queueBackend, closeStore, err := newQueueStore(compiled, *dbPath, resolvePostgresDSN(*postgresDSN))
+	if err != nil {
+		runtimeLogger.Error("open_queue_failed", slog.Any("err", err))
+		return 1
+	}
+	store = openedStore
+	defer func() { _ = closeStore() }()
+
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	defer signal.Stop(hupCh)
@@ -292,12 +306,6 @@ func run() int {
 			}
 		}
 	}()
-	store, queueBackend, closeStore, err := newQueueStore(compiled, *dbPath, resolvePostgresDSN(*postgresDSN))
-	if err != nil {
-		runtimeLogger.Error("open_queue_failed", slog.Any("err", err))
-		return 1
-	}
-	defer func() { _ = closeStore() }()
 	runtimeLogger.Info("queue_backend_selected", slog.String("backend", queueBackend))
 	appMetrics.queueStore = store
 	if trendStore, ok := any(store).(queue.BacklogTrendStore); ok {
@@ -312,25 +320,40 @@ func run() int {
 	// Must come after startServers because attachSecretStore (called inside)
 	// is what populates runtimeState.secretStore.
 	startSecretGC(ctx, state, appMetrics, runtimeLogger)
+
+	// Registered unconditionally: a reload can create a dispatcher even when the
+	// initial config had no deliver routes, and this defer used to sit inside the
+	// HasDeliverRoutes branch — so starting pull-only, SIGHUP-ing in a deliver
+	// block and then SIGTERM-ing killed the route goroutines mid-delivery with no
+	// stopCh close and no wg.Wait(), while closeStore() ran underneath goroutines
+	// still calling Dequeue/Ack/RecordAttempt. It must also stay registered after
+	// the closeStore defer above so that LIFO ordering drains before the store
+	// closes.
+	defer func() {
+		reloadMu.Lock()
+		p := currentPush
+		reloadMu.Unlock()
+		if p == nil {
+			return
+		}
+		// Drain in-flight deliveries before exit. The timeout should
+		// cover the longest possible delivery (timeout + retry delay).
+		const drainTimeout = 15 * time.Second
+		if ok := p.Drain(drainTimeout); !ok {
+			runtimeLogger.Warn("dispatcher_drain_timeout", slog.Duration("timeout", drainTimeout))
+		} else {
+			runtimeLogger.Info("dispatcher_drained")
+		}
+	}()
+
 	if compiled.HasDeliverRoutes {
+		// Under reloadMu: the SIGHUP goroutine is already running and reads
+		// currentPush under the same lock.
+		reloadMu.Lock()
 		currentPush = startPushDispatcher(compiled, store, runtimeLogger, appMetrics)
-		defer func() {
-			reloadMu.Lock()
-			p := currentPush
-			reloadMu.Unlock()
-			if p == nil {
-				return
-			}
-			// Drain in-flight deliveries before exit. The timeout should
-			// cover the longest possible delivery (timeout + retry delay).
-			const drainTimeout = 15 * time.Second
-			if ok := p.Drain(drainTimeout); !ok {
-				runtimeLogger.Warn("dispatcher_drain_timeout", slog.Duration("timeout", drainTimeout))
-			} else {
-				runtimeLogger.Info("dispatcher_drained")
-			}
-		}()
-		runtimeLogger.Info("dispatcher_started", slog.Int("routes", len(currentPush.Routes)))
+		routeCount := len(currentPush.Routes)
+		reloadMu.Unlock()
+		runtimeLogger.Info("dispatcher_started", slog.Int("routes", routeCount))
 	}
 	if *watch {
 		go watchConfig(ctx, *configPath, runtimeLogger, func() {
@@ -1157,7 +1180,14 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			break
 		}
 	}
-	if anyRuntime && s.sealer == nil {
+	// The sealer is read under s.mu by hydrateRuntimeSecrets and
+	// sealSecretValue, so both the check and the write take the lock. loadAuth
+	// runs on reload while the Admin API is already serving, so an unsynchronized
+	// write here raced every secret-persisting request.
+	s.mu.RLock()
+	haveSealer := s.sealer != nil
+	s.mu.RUnlock()
+	if anyRuntime && !haveSealer {
 		keyRef := strings.TrimSpace(os.Getenv("HOOKAIDO_SECRET_ENCRYPTION_KEY"))
 		if keyRef == "" {
 			return fmt.Errorf("HOOKAIDO_SECRET_ENCRYPTION_KEY is required when any secret is declared runtime=true")
@@ -1166,7 +1196,13 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		if err != nil {
 			return fmt.Errorf("HOOKAIDO_SECRET_ENCRYPTION_KEY: %w", err)
 		}
-		s.sealer = sealer
+		s.mu.Lock()
+		// Re-check: another loadAuth may have installed one between the read
+		// above and this write.
+		if s.sealer == nil {
+			s.sealer = sealer
+		}
+		s.mu.Unlock()
 	}
 
 	// Build per-name pools. For runtime=true pools, preserve any existing *Pool

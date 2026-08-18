@@ -108,7 +108,10 @@ Arguments:
   "path": "./Hookaidofile",
   "content": "\"/webhooks/github\" { deliver \"https://ci.internal/build\" {} }\n",
   "mode": "preview_only",
-  "reload_timeout": "5s"
+  "reload_timeout": "5s",
+  "reason": "add github ci route",
+  "actor": "ops@example.test",
+  "request_id": "req-4711"
 }
 ```
 
@@ -118,6 +121,8 @@ Mode enum:
 - `write_and_reload`: atomic write + bounded admin health check (`GET {admin_prefix}/healthz`), rollback to previous file on failed health check
 
 Notes:
+- `reason` is **required**, `actor` and `request_id` are optional — the same audit triple every other mutating tool takes. They are echoed on the response under `audit` and recorded in `metadata.config_mutation`.
+- `management_endpoint_upsert` / `management_endpoint_delete` apply through this tool internally and pass their own audit triple down; they do not ask for a second reason.
 - `reload_timeout` is optional and only used by `write_and_reload` (default `5s`).
 - Admin auth tokens are loaded for the health check; unresolved token refs fail `write_and_reload`.
 - Token refs used by MCP health/reload flows support `env:`, `file:`, `vault:`, and `raw:` schemes via the shared secrets resolver.
@@ -786,7 +791,7 @@ Notes:
 - Mutation tools and runtime-control tools use strict argument allowlists: unknown top-level arguments are rejected (and `messages_publish` additionally rejects unknown per-item keys). This matches the `"additionalProperties": false` each tool declares in its input schema.
 - Mutating tool calls emit structured JSONL audit events to stderr with:
   - `timestamp`, `principal`, `role`, `tool`, `input_hash`, `result`, `duration_ms` (and `error` when applicable)
-  - Config-lifecycle mutation tools (`config_apply`, `management_endpoint_upsert`, `management_endpoint_delete`) include `metadata.config_mutation` (`operation`, `mode`, path/selector fields, and apply outcome flags such as `ok`, `applied`, `reloaded`, `rolled_back` when available).
+  - Config-lifecycle mutation tools (`config_apply`, `management_endpoint_upsert`, `management_endpoint_delete`) include `metadata.config_mutation` (`operation`, `mode`, path/selector fields, the audit triple `reason`/`actor`/`request_id`, and apply outcome flags such as `ok`, `applied`, `reloaded`, `rolled_back` when available). `config_apply` additionally records `content_sha256` and `content_bytes`, so a reviewer can identify the config text that was applied — `input_hash` covers the whole argument object and changes with the reason or mode too.
   - Runtime process-control tools (`instance_start`, `instance_stop`, `instance_reload`) include `metadata.runtime_control` (`operation`, pid/timeout context, and outcome flags such as `started|stopped|reloaded`, `already_running|already_stopped`, `signaled` when available).
   - ID-based queue mutation tools (`dlq_requeue`, `dlq_delete`, `messages_cancel`, `messages_requeue`, `messages_resume`) include `metadata.id_mutation` (`operation`, `changed_field`, `ids_requested`, `ids_unique`, `changed` when available).
   - `messages_publish` also includes `metadata.admin_proxy_publish` rollback counters (`rollback_attempts`, `rollback_succeeded`, `rollback_failed`, `rollback_ids`) plus running totals (`*_total`) for Admin-proxy publish rollback observability.

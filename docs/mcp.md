@@ -66,6 +66,8 @@ Runtime control tools (`instance_start`, `instance_stop`, `instance_reload`) req
 - `write_only` — atomic write after successful validation
 - `write_and_reload` — write + health check + rollback on failure
 
+`config_apply` requires a `reason` (with optional `actor` / `request_id`), like every other mutating tool. It is the highest-blast-radius call in the surface — under `hookaido run --watch` the write alone triggers a live reload — and the audit event records the reason alongside a `content_sha256` digest of the applied config, so a later review can tell both what was applied and why.
+
 `write_and_reload` does not send a reload signal to a running process. Runtime adoption happens via file watch (`hookaido run --watch`) or an explicit `instance_reload` call.
 
 ### Queue/Admin Read Tools

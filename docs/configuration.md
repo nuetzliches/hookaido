@@ -265,10 +265,13 @@ delivered_retention {
 
 Pruning uses the same `queue_retention.prune_interval` cadence. Set `max_age off` to disable.
 
-When `queue { backend memory }` is used and delivered retention is enabled, `queue_limits.max_depth`
-also guards `queued + leased + delivered` items. This prevents unbounded delivered-retention growth
-under sustained pull/ack workloads. If the guard is reached, new enqueues are rejected until retention
-pruning frees capacity.
+Delivered items are retention history, not backlog: they never count against
+`queue_limits.max_depth`, which measures `queued + leased` on every backend.
+
+With `queue { backend memory }` the tombstones hold their payloads in memory until they age out, so
+their number is bounded separately: at most `queue_limits.max_depth` of them are kept, and the oldest
+are evicted first (metric label `delivered_retention_depth`). That bound never rejects an enqueue and
+never evicts a queued message — it trims history only.
 
 ### `dlq_retention`
 

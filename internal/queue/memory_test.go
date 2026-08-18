@@ -1583,7 +1583,10 @@ func TestMemoryStore_MaxDepthCountsOnlyActive(t *testing.T) {
 	}
 }
 
-func TestMemoryStore_DeliveredRetentionRespectsMaxDepth(t *testing.T) {
+// Delivered tombstones age out on their own schedule, independent of the
+// backlog. This used to also assert that they filled the queue -- which is the
+// behaviour #254 reports as a bug, now covered by the tests below.
+func TestMemoryStore_DeliveredRetentionPrunesByAge(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	s := NewMemoryStore(
@@ -1593,29 +1596,7 @@ func TestMemoryStore_DeliveredRetentionRespectsMaxDepth(t *testing.T) {
 		WithDeliveredRetention(time.Hour),
 	)
 
-	if err := s.Enqueue(Envelope{ID: "a", Route: "/r", Target: "t"}); err != nil {
-		t.Fatalf("enqueue a: %v", err)
-	}
-	if err := s.Enqueue(Envelope{ID: "b", Route: "/r", Target: "t"}); err != nil {
-		t.Fatalf("enqueue b: %v", err)
-	}
-
-	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "t", Batch: 2, LeaseTTL: time.Minute})
-	if err != nil {
-		t.Fatalf("dequeue: %v", err)
-	}
-	if len(resp.Items) != 2 {
-		t.Fatalf("expected 2 dequeued items, got %d", len(resp.Items))
-	}
-	for _, item := range resp.Items {
-		if err := s.Ack(item.LeaseID); err != nil {
-			t.Fatalf("ack %s: %v", item.ID, err)
-		}
-	}
-
-	if err := s.Enqueue(Envelope{ID: "c", Route: "/r", Target: "t"}); err != ErrQueueFull {
-		t.Fatalf("expected ErrQueueFull while delivered retention is at max_depth, got %v", err)
-	}
+	drain(t, s, "a", "b")
 
 	stats, err := s.Stats()
 	if err != nil {
@@ -1631,12 +1612,19 @@ func TestMemoryStore_DeliveredRetentionRespectsMaxDepth(t *testing.T) {
 	nowVar = nowVar.Add(2 * time.Hour)
 	_, _ = s.Dequeue(DequeueRequest{Route: "/r", Target: "t"})
 
-	if err := s.Enqueue(Envelope{ID: "c", Route: "/r", Target: "t"}); err != nil {
-		t.Fatalf("enqueue c after retention prune: %v", err)
+	stats, err = s.Stats()
+	if err != nil {
+		t.Fatalf("stats after prune: %v", err)
+	}
+	if stats.ByState[StateDelivered] != 0 {
+		t.Fatalf("expected the tombstones to age out, got %d", stats.ByState[StateDelivered])
 	}
 }
 
-func TestMemoryStore_EnqueueBatch_DeliveredRetentionRespectsMaxDepth(t *testing.T) {
+// Delivered tombstones are retention history, not backlog. Counting them
+// against max_depth made completed work block ingest: with the queue drained
+// and every message acked, a fresh enqueue was refused with ErrQueueFull.
+func TestMemoryStore_DeliveredHistoryDoesNotBlockIngest(t *testing.T) {
 	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
 	nowVar := now
 	s := NewMemoryStore(
@@ -1646,35 +1634,159 @@ func TestMemoryStore_EnqueueBatch_DeliveredRetentionRespectsMaxDepth(t *testing.
 		WithDeliveredRetention(time.Hour),
 	)
 
-	for _, id := range []string{"a", "b", "c"} {
+	drain(t, s, "a", "b", "c")
+
+	n, err := s.EnqueueBatch([]Envelope{
+		{ID: "d", Route: "/r", Target: "t"},
+		{ID: "e", Route: "/r", Target: "t"},
+	})
+	if err != nil {
+		t.Fatalf("enqueue batch onto an empty backlog: n=%d err=%v", n, err)
+	}
+	if n != 2 {
+		t.Fatalf("committed=%d, want 2", n)
+	}
+
+	// The backlog itself still bounds ingest: one more fits, the next does not.
+	if err := s.Enqueue(Envelope{ID: "f", Route: "/r", Target: "t"}); err != nil {
+		t.Fatalf("enqueue f: %v", err)
+	}
+	if err := s.Enqueue(Envelope{ID: "g", Route: "/r", Target: "t"}); err != ErrQueueFull {
+		t.Fatalf("enqueue g: got %v, want ErrQueueFull once the backlog reaches max_depth", err)
+	}
+}
+
+// drop_oldest picked its eviction candidates from queued items only, so with
+// the depth check counting tombstones it destroyed live, undelivered webhooks
+// to preserve already-delivered history.
+func TestMemoryStore_DropOldestKeepsQueuedMessagesOverDeliveredHistory(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := NewMemoryStore(
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithQueueLimits(4, "drop_oldest"),
+		WithQueueRetention(0, 1*time.Second),
+		WithDeliveredRetention(time.Hour),
+	)
+
+	drain(t, s, "old1", "old2", "old3")
+
+	for _, id := range []string{"live1", "live2"} {
 		if err := s.Enqueue(Envelope{ID: id, Route: "/r", Target: "t"}); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
 	}
+	if err := s.Enqueue(Envelope{ID: "live3", Route: "/r", Target: "t"}); err != nil {
+		t.Fatalf("enqueue live3: %v", err)
+	}
 
-	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "t", Batch: 3, LeaseTTL: time.Minute})
+	for _, id := range []string{"live1", "live2", "live3"} {
+		if got := s.stateOf(id); got != StateQueued {
+			t.Fatalf("live message %s is %q, want queued: it was evicted to keep delivered history", id, got)
+		}
+	}
+}
+
+// The bound the depth check was reaching for is kept, expressed against
+// history: at most max_depth tombstones, oldest first.
+func TestMemoryStore_DeliveredHistoryIsCappedAtMaxDepth(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := NewMemoryStore(
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithQueueLimits(3, "reject"),
+		WithQueueRetention(0, 1*time.Second),
+		WithDeliveredRetention(time.Hour),
+	)
+
+	// Four deliveries, so history is one over the cap before the next enqueue.
+	drain(t, s, "a", "b", "c")
+	drain(t, s, "d")
+
+	if err := s.Enqueue(Envelope{ID: "e", Route: "/r", Target: "t"}); err != nil {
+		t.Fatalf("enqueue e: %v", err)
+	}
+
+	s.mu.Lock()
+	delivered := s.deliveredCountLocked()
+	s.mu.Unlock()
+	if delivered != 3 {
+		t.Fatalf("delivered tombstones = %d, want 3 (max_depth)", delivered)
+	}
+	if got := s.stateOf("a"); got != "" {
+		t.Fatalf("oldest tombstone a is %q, want it evicted", got)
+	}
+	if got := s.stateOf("d"); got != StateDelivered {
+		t.Fatalf("newest tombstone d is %q, want delivered", got)
+	}
+
+	metrics := s.RuntimeMetrics()
+	if metrics.Memory == nil {
+		t.Fatal("expected memory runtime metrics")
+	}
+	if got := metrics.Memory.EvictionsTotalByReason[memoryEvictionReasonDeliveredRetentionDepth]; got != 1 {
+		t.Fatalf("expected one %s eviction, got %d in %v",
+			memoryEvictionReasonDeliveredRetentionDepth, got, metrics.Memory.EvictionsTotalByReason)
+	}
+}
+
+// A rejected enqueue must not destroy history either: the all-or-nothing
+// contract covers the tombstones trimmed to make room.
+func TestMemoryStore_RejectedEnqueueRestoresTrimmedHistory(t *testing.T) {
+	now := time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	s := NewMemoryStore(
+		WithNowFunc(func() time.Time { return nowVar }),
+		WithQueueLimits(2, "reject"),
+		WithQueueRetention(0, 1*time.Second),
+		WithDeliveredRetention(time.Hour),
+	)
+
+	drain(t, s, "a", "b")
+	drain(t, s, "c")
+
+	// The backlog is empty, so this enqueue trims history and then fails on the
+	// duplicate ID check.
+	if err := s.Enqueue(Envelope{ID: "c", Route: "/r", Target: "t"}); err != ErrEnvelopeExists {
+		t.Fatalf("enqueue duplicate: got %v, want ErrEnvelopeExists", err)
+	}
+	if got := s.stateOf("a"); got != StateDelivered {
+		t.Fatalf("tombstone a is %q after a rejected enqueue, want delivered", got)
+	}
+}
+
+// drain enqueues the given ids, dequeues them and acks them, leaving one
+// delivered tombstone each.
+func drain(t *testing.T, s *MemoryStore, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if err := s.Enqueue(Envelope{ID: id, Route: "/r", Target: "t"}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+	resp, err := s.Dequeue(DequeueRequest{Route: "/r", Target: "t", Batch: len(ids), LeaseTTL: time.Minute})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
-	if len(resp.Items) != 3 {
-		t.Fatalf("expected 3 dequeued items, got %d", len(resp.Items))
+	if len(resp.Items) != len(ids) {
+		t.Fatalf("dequeued %d items, want %d", len(resp.Items), len(ids))
 	}
 	for _, item := range resp.Items {
 		if err := s.Ack(item.LeaseID); err != nil {
 			t.Fatalf("ack %s: %v", item.ID, err)
 		}
 	}
+}
 
-	n, err := s.EnqueueBatch([]Envelope{
-		{ID: "d", Route: "/r", Target: "t"},
-		{ID: "e", Route: "/r", Target: "t"},
-	})
-	if err != ErrQueueFull {
-		t.Fatalf("expected ErrQueueFull, got n=%d err=%v", n, err)
+// stateOf reports the state of an item, or "" when it is gone.
+func (s *MemoryStore) stateOf(id string) State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	env := s.items[id]
+	if env == nil {
+		return ""
 	}
-	if n != 0 {
-		t.Fatalf("expected 0 committed, got %d", n)
-	}
+	return env.State
 }
 
 func TestMemoryStore_EnqueueBatch_AllOrNothing(t *testing.T) {

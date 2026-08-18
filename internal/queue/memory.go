@@ -63,11 +63,12 @@ type backlogTrendRow struct {
 const backlogTrendMaxRows = 200000
 
 const (
-	memoryEvictionReasonDropOldest         = "drop_oldest"
-	memoryEvictionReasonQueueRetentionAge  = "queue_retention_age"
-	memoryEvictionReasonDeliveredRetention = "delivered_retention_age"
-	memoryEvictionReasonDeadRetentionAge   = "dead_retention_age"
-	memoryEvictionReasonDeadRetentionDepth = "dead_retention_depth"
+	memoryEvictionReasonDropOldest              = "drop_oldest"
+	memoryEvictionReasonQueueRetentionAge       = "queue_retention_age"
+	memoryEvictionReasonDeliveredRetention      = "delivered_retention_age"
+	memoryEvictionReasonDeliveredRetentionDepth = "delivered_retention_depth"
+	memoryEvictionReasonDeadRetentionAge        = "dead_retention_age"
+	memoryEvictionReasonDeadRetentionDepth      = "dead_retention_depth"
 
 	defaultMemoryPressureRetainedItemFloor = 1000
 	defaultMemoryPressureRetainedBytes     = 256 << 20 // 256 MiB
@@ -187,9 +188,10 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 	}()
 
 	if s.maxDepth > 0 {
+		evicted = append(evicted, s.trimDeliveredHistoryLocked()...)
+
 		activeCount := s.activeCountLocked()
-		activeDeliveredCount := s.activeDeliveredCountLocked()
-		for activeCount >= s.maxDepth || (s.deliveredRetentionMaxAge > 0 && activeDeliveredCount >= s.maxDepth) {
+		for activeCount >= s.maxDepth {
 			if s.dropPolicy != "drop_oldest" {
 				return ErrQueueFull
 			}
@@ -199,7 +201,6 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 			}
 			evicted = append(evicted, it)
 			activeCount = s.activeCountLocked()
-			activeDeliveredCount = s.activeDeliveredCountLocked()
 		}
 	}
 
@@ -263,14 +264,10 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 
 	// Pre-validate: check depth, duplicates, and prepare copies.
 	activeCount := s.activeCountLocked()
-	activeDeliveredCount := s.activeDeliveredCountLocked()
 	needed := len(items)
 	if s.maxDepth > 0 {
 		if s.dropPolicy != "drop_oldest" {
 			if activeCount+needed > s.maxDepth {
-				return 0, ErrQueueFull
-			}
-			if s.deliveredRetentionMaxAge > 0 && activeDeliveredCount+needed > s.maxDepth {
 				return 0, ErrQueueFull
 			}
 		}
@@ -331,14 +328,15 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 	}()
 
 	if s.maxDepth > 0 {
-		for activeCount+len(prepared) > s.maxDepth || (s.deliveredRetentionMaxAge > 0 && activeDeliveredCount+len(prepared) > s.maxDepth) {
+		evicted = append(evicted, s.trimDeliveredHistoryLocked()...)
+
+		for activeCount+len(prepared) > s.maxDepth {
 			it, ok := s.dropOldestQueuedTrackedLocked()
 			if !ok {
 				return 0, ErrQueueFull
 			}
 			evicted = append(evicted, it)
 			activeCount = s.activeCountLocked()
-			activeDeliveredCount = s.activeDeliveredCountLocked()
 		}
 	}
 
@@ -372,17 +370,74 @@ func (s *MemoryStore) activeCountLocked() int {
 	return n
 }
 
-// activeDeliveredCountLocked counts queued, leased, and delivered items.
-// For memory backend this protects against unbounded delivered-retention growth
-// under sustained pull workloads.
-func (s *MemoryStore) activeDeliveredCountLocked() int {
+// deliveredCountLocked counts the delivered tombstones kept by
+// delivered_retention.
+func (s *MemoryStore) deliveredCountLocked() int {
 	n := 0
 	for _, env := range s.items {
-		if env.State == StateQueued || env.State == StateLeased || env.State == StateDelivered {
+		if env.State == StateDelivered {
 			n++
 		}
 	}
 	return n
+}
+
+// trimDeliveredHistoryLocked evicts the oldest delivered tombstones beyond
+// max_depth, returning what it removed so a caller whose enqueue is rejected
+// afterwards can put them back.
+//
+// Retention history is bounded here rather than in the depth admission check,
+// which used to count delivered items against max_depth. That made completed
+// work exert backpressure on ingest: with max_depth 10000 and 9,999 delivered
+// tombstones, five live queued messages were enough to fill the queue. Under
+// the default reject policy ingress answered 503 with a near-empty backlog,
+// and under drop_oldest it was worse -- eviction only ever considered queued
+// items, so live, undelivered webhooks were destroyed one by one to preserve
+// already-delivered history, and once none were left the enqueue still failed.
+//
+// Counting only queued and leased items also restores parity with the SQLite
+// and Postgres backends, which have always measured depth that way.
+//
+// The bound the old check was reaching for is real -- tombstones hold their
+// payloads in memory until the age-based prune -- so it stays, expressed
+// against history itself: at most max_depth tombstones, oldest evicted first,
+// mirroring the dlq depth cap.
+func (s *MemoryStore) trimDeliveredHistoryLocked() []evictedItem {
+	if s.maxDepth <= 0 || s.deliveredRetentionMaxAge <= 0 {
+		return nil
+	}
+	delivered := s.deliveredCountLocked()
+	if delivered <= s.maxDepth {
+		return nil
+	}
+
+	var evicted []evictedItem
+	for delivered > s.maxDepth {
+		it, ok := s.dropOldestDeliveredTrackedLocked()
+		if !ok {
+			break
+		}
+		evicted = append(evicted, it)
+		delivered--
+	}
+	return evicted
+}
+
+// dropOldestDeliveredTrackedLocked evicts the delivered tombstone that was
+// enqueued longest ago -- the one closest to being pruned by age anyway -- and
+// returns what it removed, so the caller can undo it.
+func (s *MemoryStore) dropOldestDeliveredTrackedLocked() (evictedItem, bool) {
+	for _, id := range s.order {
+		env := s.items[id]
+		if env == nil || env.State != StateDelivered {
+			continue
+		}
+		if !s.evictLocked(id, memoryEvictionReasonDeliveredRetentionDepth) {
+			return evictedItem{}, false
+		}
+		return evictedItem{id: id, env: env, reason: memoryEvictionReasonDeliveredRetentionDepth}, true
+	}
+	return evictedItem{}, false
 }
 
 func (s *MemoryStore) evictLocked(id string, reason string) bool {

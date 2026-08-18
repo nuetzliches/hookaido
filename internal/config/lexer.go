@@ -21,6 +21,12 @@ type token struct {
 	kind tokenKind
 	text string
 	pos  position
+
+	// off and end delimit the token in the source, as byte offsets. They let
+	// callers that need to rewrite a file in place (see edit.go) address the
+	// exact bytes of a statement instead of regenerating the file from the AST.
+	off int
+	end int
 }
 
 type position struct {
@@ -51,7 +57,7 @@ func newLexer(src string) *lexer {
 func (l *lexer) nextToken() (token, error) {
 	for {
 		if l.i >= len(l.src) {
-			return token{kind: tokEOF, pos: position{line: l.line, col: l.col}}, nil
+			return token{kind: tokEOF, pos: position{line: l.line, col: l.col}, off: l.i, end: l.i}, nil
 		}
 
 		r, size := utf8.DecodeRuneInString(l.src[l.i:])
@@ -65,15 +71,16 @@ func (l *lexer) nextToken() (token, error) {
 		}
 
 		pos := position{line: l.line, col: l.col}
+		off := l.i
 		switch r {
 		case '{':
 			if text, ok, err := l.readPlaceholder(); err != nil {
 				return token{}, err
 			} else if ok {
-				return token{kind: tokIdent, text: text, pos: pos}, nil
+				return token{kind: tokIdent, text: text, pos: pos, off: off, end: l.i}, nil
 			}
 			l.consumeRune(r, size)
-			return token{kind: tokLBrace, text: "{", pos: pos}, nil
+			return token{kind: tokLBrace, text: "{", pos: pos, off: off, end: l.i}, nil
 		case '#':
 			// Comment until end of line (including the leading '#').
 			start := l.i
@@ -84,19 +91,19 @@ func (l *lexer) nextToken() (token, error) {
 				}
 				l.consumeRune(r2, size2)
 			}
-			return token{kind: tokComment, text: l.src[start:l.i], pos: pos}, nil
+			return token{kind: tokComment, text: l.src[start:l.i], pos: pos, off: off, end: l.i}, nil
 		case '}':
 			l.consumeRune(r, size)
-			return token{kind: tokRBrace, text: "}", pos: pos}, nil
+			return token{kind: tokRBrace, text: "}", pos: pos, off: off, end: l.i}, nil
 		case '"':
 			s, err := l.readString()
 			if err != nil {
 				return token{}, err
 			}
-			return token{kind: tokString, text: s, pos: pos}, nil
+			return token{kind: tokString, text: s, pos: pos, off: off, end: l.i}, nil
 		default:
 			ident := l.readIdent()
-			return token{kind: tokIdent, text: ident, pos: pos}, nil
+			return token{kind: tokIdent, text: ident, pos: pos, off: off, end: l.i}, nil
 		}
 	}
 }
@@ -197,8 +204,14 @@ func (l *lexer) readString() (string, error) {
 			case 'r':
 				out = append(out, '\r')
 			default:
-				// Keep unknown escapes as-is (best-effort).
-				out = append(out, er)
+				// Keep unknown escapes as-is: backslash and the escaped
+				// rune. Dropping the backslash here silently corrupted
+				// every quoted Windows path (`"C:\certs\x.pem"` became
+				// `C:certsx.pem`), and `config fmt`/the Admin API config
+				// rewrite then persisted the corruption. Emitting both
+				// runes stays round-trip safe because quoteString escapes
+				// a literal backslash as `\\`.
+				out = append(out, '\\', er)
 			}
 			continue
 		}

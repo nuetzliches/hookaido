@@ -44,6 +44,28 @@ internal {
 
 Route paths can be quoted or unquoted but must start with `/`.
 
+## Values, Quoting and Comments
+
+Values are bare words or double-quoted strings. Quote a value when it contains
+whitespace, `#`, `{`, `}`, or `"`.
+
+Inside a quoted string, `\\`, `\"`, `\n`, `\t` and `\r` are escape sequences.
+Any other backslash is kept verbatim, so `"^/hooks/\d+$"` is the regex you wrote
+and `"C:\certs\server.pem"` is the path you wrote.
+
+The escapes that do exist still apply, so a Windows path whose next character is
+`n`, `t`, `r`, `"` or `\` needs the backslash doubled — `"C:\new\tools"` contains
+a newline and a tab. Writing `"C:\\new\\tools"` (or using forward slashes, which
+Windows accepts) avoids the question entirely. `config fmt` re-escapes
+backslashes when it writes a value back, so a value survives any number of
+format cycles unchanged.
+
+`#` starts a comment that runs to the end of the line. Comments are preserved by
+Admin API config rewrites, which splice only the directive they change.
+`config fmt` regenerates the file from the parsed config and keeps only the
+comments above the first statement — run it on a file whose comments you intend
+to keep, and review the diff.
+
 ## Channel Types
 
 Routes are organized into three channel types that control which directives are allowed:

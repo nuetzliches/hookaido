@@ -1,6 +1,9 @@
 package queue
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type State string
 
@@ -233,6 +236,32 @@ type BatchEnqueuer interface {
 // after which a fresh channel must be obtained by calling NotifyCh again.
 type StoreNotifier interface {
 	NotifyCh() <-chan struct{}
+}
+
+// ContextDequeuer is an optional extension for stores whose long-poll Dequeue
+// can be abandoned when the caller's context is done.
+//
+// Store.Dequeue takes no context, so a worker that gave up -- a gRPC client
+// whose own deadline fired, an HTTP consumer that disconnected -- left the
+// handler blocked inside the store for the rest of max_wait. Any items that
+// arrived meanwhile were leased into a dead connection and stayed invisible for
+// the whole lease TTL before the expiry sweep reclaimed them, turning each
+// client timeout into a lease-TTL delivery delay.
+type ContextDequeuer interface {
+	DequeueContext(ctx context.Context, req DequeueRequest) (DequeueResponse, error)
+}
+
+// LeaseRouteResolver is an optional extension for stores that can report which
+// route a lease belongs to.
+//
+// It exists so route-scoped credentials can be enforced where the lease
+// operations happen: Ack, Nack, MarkDead and Extend take only a lease ID, so a
+// client authorized for one endpoint could settle another route's in-flight
+// message if it learned that lease ID.
+type LeaseRouteResolver interface {
+	// LeaseRoutes maps each known lease ID to the route of the item it holds.
+	// Unknown leases are absent from the result rather than an error.
+	LeaseRoutes(leaseIDs []string) (map[string]string, error)
 }
 
 const statsTopBacklogLimit = 10

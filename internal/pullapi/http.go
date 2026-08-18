@@ -49,6 +49,12 @@ type Server struct {
 	ObserveSSEConnect    func(route string)
 	ObserveSSEDisconnect func(route string, statusCode int, messagesSent int, duration time.Duration)
 
+	// LeaseRouteScoped reports whether the running config uses per-route pull
+	// credentials. When it does, lease operations are checked against the route
+	// they were issued for; when it does not, every client is authorized for
+	// every route anyway and the check is skipped. See lease_scope.go.
+	LeaseRouteScoped func() bool
+
 	RecentLeaseOpTTL time.Duration
 	RecentLeaseOpCap int
 
@@ -192,7 +198,7 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 		leaseTTL = d
 	}
 
-	outcome, opErr := s.Dequeue(route, DequeueParams{
+	outcome, opErr := s.Dequeue(r.Context(), route, DequeueParams{
 		Batch:       req.Batch,
 		MaxWait:     maxWait,
 		HasMaxWait:  req.MaxWait != "",

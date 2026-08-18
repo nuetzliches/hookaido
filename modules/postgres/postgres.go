@@ -609,6 +609,13 @@ func (s *Store) EnqueueBatch(items []queue.Envelope) (int, error) {
 }
 
 func (s *Store) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	return s.DequeueContext(context.Background(), req)
+}
+
+// DequeueContext is Dequeue with the caller's context honoured: a consumer that
+// has gone away neither keeps a goroutine parked for the rest of max_wait nor
+// receives a lease it can never settle.
+func (s *Store) DequeueContext(dequeueCtx context.Context, req queue.DequeueRequest) (queue.DequeueResponse, error) {
 	return runPostgresStoreOperationResult(s, "dequeue", func() (queue.DequeueResponse, error) {
 		if s == nil || s.db == nil {
 			return queue.DequeueResponse{}, errors.New("postgres store is closed")
@@ -642,6 +649,12 @@ func (s *Store) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error)
 
 		deadline := time.Now().Add(maxWait)
 		for {
+			// Checked before the scan, so a cancelled caller never has items
+			// leased to it.
+			if err := dequeueCtx.Err(); err != nil {
+				return queue.DequeueResponse{}, err
+			}
+
 			resp, err := s.dequeueOnce(req, batch, leaseTTL)
 			if err != nil {
 				return queue.DequeueResponse{}, err
@@ -669,6 +682,11 @@ func (s *Store) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error)
 				continue
 			case <-timer.C:
 				continue
+			case <-dequeueCtx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return queue.DequeueResponse{}, dequeueCtx.Err()
 			}
 		}
 	})
@@ -825,6 +843,42 @@ WHERE id = $4
 		s.signal()
 	}
 	return queue.DequeueResponse{Items: items}, nil
+}
+
+// LeaseRoutes reports the route each known lease belongs to.
+func (s *Store) LeaseRoutes(leaseIDs []string) (map[string]string, error) {
+	return runPostgresStoreOperationResult(s, "lease_routes", func() (map[string]string, error) {
+		ids := normalizeUniqueIDs(leaseIDs)
+		if len(ids) == 0 {
+			return map[string]string{}, nil
+		}
+
+		rows, err := s.db.QueryContext(context.Background(), `
+SELECT lease_id, route
+FROM queue_items
+WHERE lease_id = ANY($1)
+`, ids)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		out := make(map[string]string, len(ids))
+		for rows.Next() {
+			var leaseID sql.NullString
+			var route string
+			if err := rows.Scan(&leaseID, &route); err != nil {
+				return nil, err
+			}
+			if leaseID.Valid {
+				out[leaseID.String] = route
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return out, nil
+	})
 }
 
 func (s *Store) Ack(leaseID string) error {

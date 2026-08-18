@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strings"
@@ -745,6 +746,13 @@ func (s *MemoryStore) maybePruneLocked(now time.Time) {
 }
 
 func (s *MemoryStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
+	return s.DequeueContext(context.Background(), req)
+}
+
+// DequeueContext is Dequeue with the caller's context honoured: a consumer that
+// has gone away neither keeps a goroutine parked for the rest of max_wait nor
+// receives a lease it can never settle.
+func (s *MemoryStore) DequeueContext(ctx context.Context, req DequeueRequest) (DequeueResponse, error) {
 	batch := req.Batch
 	if batch <= 0 {
 		batch = 1
@@ -766,6 +774,12 @@ func (s *MemoryStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
 	deadline := time.Now().Add(maxWait)
 
 	for {
+		// Checked before the scan, so a cancelled caller never has items
+		// leased to it.
+		if err := ctx.Err(); err != nil {
+			return DequeueResponse{}, err
+		}
+
 		s.mu.Lock()
 		now := req.Now
 		if now.IsZero() {
@@ -839,8 +853,33 @@ func (s *MemoryStore) Dequeue(req DequeueRequest) (DequeueResponse, error) {
 			continue
 		case <-timer.C:
 			return DequeueResponse{}, nil
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return DequeueResponse{}, ctx.Err()
 		}
 	}
+}
+
+// LeaseRoutes reports the route each known lease belongs to.
+func (s *MemoryStore) LeaseRoutes(leaseIDs []string) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make(map[string]string, len(leaseIDs))
+	for _, leaseID := range leaseIDs {
+		itemID, ok := s.leases[leaseID]
+		if !ok {
+			continue
+		}
+		env := s.items[itemID]
+		if env == nil {
+			continue
+		}
+		out[leaseID] = env.Route
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) Ack(leaseID string) error {

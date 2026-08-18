@@ -1,6 +1,7 @@
 package pullapi
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func TestPullOpsDequeueClampsAndDefaults(t *testing.T) {
 	srv.DefaultLeaseTTL = 30 * time.Second
 	srv.MaxLeaseTTL = 20 * time.Second
 
-	_, opErr := srv.Dequeue("/hooks/github", DequeueParams{
+	_, opErr := srv.Dequeue(context.Background(), "/hooks/github", DequeueParams{
 		Batch:       99,
 		HasMaxWait:  false,
 		HasLeaseTTL: false,

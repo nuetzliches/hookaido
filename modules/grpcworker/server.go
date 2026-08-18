@@ -59,7 +59,7 @@ func (s *Server) Dequeue(ctx context.Context, req *workerapipb.DequeueRequest) (
 		return nil, status.Error(codes.Internal, "pull server is not configured")
 	}
 
-	outcome, opErr := s.Pull.Dequeue(route, pullapi.DequeueParams{
+	outcome, opErr := s.Pull.Dequeue(ctx, route, pullapi.DequeueParams{
 		Batch:       int(req.GetBatch()),
 		MaxWait:     maxWait,
 		HasMaxWait:  hasMaxWait,

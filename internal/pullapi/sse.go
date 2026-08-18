@@ -118,7 +118,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 		}
 
 		// Non-blocking dequeue.
-		outcome, opErr := s.Dequeue(route, DequeueParams{
+		outcome, opErr := s.Dequeue(ctx, route, DequeueParams{
 			Batch:       batch,
 			MaxWait:     0,
 			HasMaxWait:  true,

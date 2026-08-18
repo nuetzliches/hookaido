@@ -41,6 +41,45 @@ jobs:
           name: coverage
           path: coverage.out
 
+  # The Postgres backend is the production recommendation, but its tests skip
+  # silently without HOOKAIDO_TEST_POSTGRES_DSN -- including the cross-backend
+  # queue.Store contract tests, which are the ones that establish parity with
+  # sqlite and memory. Without this job they only ever ran against those two
+  # here, which is how several Postgres-only divergences reached main (#207).
+  #
+  # Service containers are Linux-only, so this cannot be folded into the
+  # matrixed `test` job that also covers Windows.
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: hookaido
+          POSTGRES_PASSWORD: hookaido
+          POSTGRES_DB: hookaido
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hookaido"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      # -p 1 matters: the packages below share one database, so running their
+      # tests in parallel makes them race on the same tables. This is what
+      # `make test-pg` does.
+      - name: Test (Postgres backend)
+        env:
+          HOOKAIDO_TEST_POSTGRES_DSN: postgres://hookaido:hookaido@127.0.0.1:5432/hookaido?sslmode=disable
+        run: go test -race -p 1 ./internal/queue/ ./internal/secrets/ ./modules/postgres/
+
   lint:
     runs-on: ubuntu-latest
     steps:

@@ -16,6 +16,13 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+      # actions/attest-build-provenance also writes an artifact-metadata storage
+      # record. Without this scope it warns 'Please check that the
+      # "artifact-metadata:write" permission has been included' and fails to
+      # persist the record, while still reporting the job as successful -- so the
+      # provenance is attested but its metadata record is missing. release.yml
+      # already grants it.
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

@@ -43,6 +43,14 @@ func sendSignal(pid int, sig syscall.Signal) error {
 	if sig == syscall.SIGHUP {
 		return fmt.Errorf("signal %s is not supported on Windows", sig)
 	}
+	// SIGTERM has no Windows equivalent: p.Signal maps it to TerminateProcess,
+	// which is a hard kill. Refusing it here is what keeps a stop that skipped
+	// the drain from being reported as graceful; stopPID escalates to
+	// SIGKILL -- the same TerminateProcess -- only when force is set, and then
+	// reports forced: true.
+	if sig == syscall.SIGTERM {
+		return fmt.Errorf("%w (signal %s)", errGracefulStopUnsupported, sig)
+	}
 
 	p, err := os.FindProcess(pid)
 	if err != nil {

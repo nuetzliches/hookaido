@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -212,6 +214,7 @@ func run() int {
 	defer stop()
 
 	state := newRuntimeState(compiled)
+	state.setConfigFingerprint(data)
 	if err := state.loadAuth(compiled); err != nil {
 		runtimeLogger.Error("load_auth_failed", slog.Any("err", err))
 		return 1
@@ -426,6 +429,9 @@ type runtimeState struct {
 	pullAuthorize        pullapi.Authorizer
 	workerAuthorize      workerapi.Authorizer
 	adminAuthorize       admin.Authorizer
+	configFingerprint    string
+	configGeneration     int
+	configLoadedAt       time.Time
 	pullByRoute          map[string]pullapi.Authorizer
 	workerByRoute        map[string]workerapi.Authorizer
 	basicByRoute         map[string]*ingress.BasicAuth
@@ -461,6 +467,36 @@ func newRuntimeState(compiled config.Compiled) *runtimeState {
 	s.adaptiveController = newAdaptiveAdmissionController(compiled.Defaults.AdaptiveBackpressure, compiled.Defaults.TrendSignals)
 	s.configureIngressRateLimits(compiled)
 	return s
+}
+
+// setConfigFingerprint records which config bytes the process is running.
+//
+// It is what lets a caller verify that a config it wrote was actually adopted.
+// Liveness alone cannot: /healthz answers 200 whichever config is in force, so
+// a write that no reload picked up -- the instance runs without --watch, or the
+// reload failed at apply time and kept the old config -- was indistinguishable
+// from a successful apply.
+func (s *runtimeState) setConfigFingerprint(raw []byte) {
+	sum := sha256.Sum256(raw)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configFingerprint = hex.EncodeToString(sum[:])
+	s.configGeneration++
+	s.configLoadedAt = time.Now().UTC()
+}
+
+// configDiagnostics reports the running config identity for /healthz?details=true.
+func (s *runtimeState) configDiagnostics() map[string]any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := map[string]any{
+		"fingerprint": s.configFingerprint,
+		"generation":  s.configGeneration,
+	}
+	if !s.configLoadedAt.IsZero() {
+		out["loaded_at"] = s.configLoadedAt.Format(time.RFC3339Nano)
+	}
+	return out
 }
 
 func (s *runtimeState) updateAll(compiled config.Compiled) {
@@ -1728,6 +1764,7 @@ func reloadConfig(path string, running config.Compiled, state *runtimeState, log
 		return running, false
 	}
 	state.updateAll(compiled)
+	state.setConfigFingerprint(data)
 
 	logger.Info("config_reloaded_ok", slog.String("trigger", trigger))
 	return compiled, true
@@ -2576,7 +2613,17 @@ func startServers(
 		appMetrics.observePublishResult(event.Accepted, event.Rejected, event.Code, event.Scoped)
 	}
 	if appMetrics != nil {
-		adminH.HealthDiagnostics = appMetrics.healthDiagnostics
+		// The config identity rides along with the health diagnostics so a
+		// caller that applied a config can verify the running process adopted
+		// it, rather than inferring success from liveness.
+		adminH.HealthDiagnostics = func() map[string]any {
+			out := appMetrics.healthDiagnostics()
+			if out == nil {
+				out = map[string]any{}
+			}
+			out["config"] = state.configDiagnostics()
+			return out
+		}
 	}
 
 	// Build the HTTP components. Ingress serves its bare route paths; the API

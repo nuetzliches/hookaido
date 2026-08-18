@@ -220,9 +220,22 @@ admin_api { listen %q }
 		}
 	}
 
-	stopResp := callTool(t, s, "instance_stop", map[string]any{
-		"timeout": "8s",
-	})
+	stopArgs := map[string]any{"timeout": "8s"}
+	if runtime.GOOS == "windows" {
+		// Windows has no graceful stop: os.Process.Signal maps everything to
+		// TerminateProcess. An un-forced stop therefore reports that rather
+		// than hard-killing the queue server and calling it graceful.
+		gracefulResp := callTool(t, s, "instance_stop", stopArgs)
+		if !gracefulResp.IsError {
+			t.Fatal("expected instance_stop without force to be refused on windows")
+		}
+		if len(gracefulResp.Content) == 0 || !strings.Contains(gracefulResp.Content[0].Text, "graceful stop is not supported") {
+			t.Fatalf("expected the graceful-stop refusal, got %#v", gracefulResp.Content)
+		}
+		stopArgs["force"] = true
+	}
+
+	stopResp := callTool(t, s, "instance_stop", stopArgs)
 	if stopResp.IsError {
 		t.Fatalf("unexpected instance_stop error: %s", stopResp.Content[0].Text)
 	}
@@ -235,6 +248,14 @@ admin_api { listen %q }
 	}
 	if stopped, _ := stopOut["stopped"].(bool); !stopped {
 		t.Fatalf("expected stopped=true")
+	}
+	// forced must describe what actually happened.
+	forced, _ := stopOut["forced"].(bool)
+	if runtime.GOOS == "windows" && !forced {
+		t.Fatal("a Windows stop is always a hard kill and must be reported as forced")
+	}
+	if runtime.GOOS != "windows" && forced {
+		t.Fatal("a process that exited on SIGTERM must not be reported as forced")
 	}
 }
 

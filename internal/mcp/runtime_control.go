@@ -503,9 +503,29 @@ func (s *Server) toolInstanceReload(args map[string]any) (any, error) {
 	}
 
 	healthURL, healthErr := waitForAdminHealth(compiled, timeout)
+	verificationNote := ""
+	if healthErr == nil {
+		// Liveness says the process answers, not which config it answers with:
+		// a reload that fails at apply time keeps the old config and healthz
+		// stays 200. Wait for the instance to report the fingerprint of the
+		// file on disk instead.
+		content, readErr := os.ReadFile(s.ConfigPath)
+		switch {
+		case readErr != nil:
+			verificationNote = readErr.Error()
+		default:
+			verifyErr := waitForRunningConfig(compiled, configFingerprint(content), timeout)
+			if errors.Is(verifyErr, errConfigDiagnosticsUnavailable) {
+				verificationNote = verifyErr.Error()
+			} else if verifyErr != nil {
+				healthErr = verifyErr
+			}
+		}
+	}
+
 	out := map[string]any{
 		"ok":         healthErr == nil,
-		"reloaded":   healthErr == nil,
+		"reloaded":   healthErr == nil && verificationNote == "",
 		"signaled":   true,
 		"pid":        pid,
 		"pid_file":   pidFile,
@@ -516,6 +536,9 @@ func (s *Server) toolInstanceReload(args map[string]any) (any, error) {
 	}
 	if healthErr != nil {
 		out["errors"] = []string{healthErr.Error()}
+	}
+	if verificationNote != "" {
+		out["reload_verification"] = verificationNote
 	}
 	return out, nil
 }
@@ -614,19 +637,40 @@ func signalPID(pid int, sig syscall.Signal) error {
 	return nil
 }
 
+// stopPID asks the process to stop, escalating to a hard kill only when force
+// is set -- and it reports which of the two actually happened.
+//
+// On Windows there is no graceful signal to send: os.Process.Signal maps
+// everything to TerminateProcess. The platform layer therefore refuses SIGTERM
+// there rather than silently performing a hard kill, which used to be reported
+// as `forced: false` in both the tool output and the audit event -- an
+// operator calling instance_stop without force killed the queue server outright
+// with no drain and no shutdown hooks, and the record said it had stopped
+// gracefully.
 func stopPID(pid int, timeout time.Duration, force bool) (stopped bool, forced bool, err error) {
 	if !isPIDRunning(pid) {
 		return true, false, nil
 	}
-	if err := signalPID(pid, syscall.SIGTERM); err != nil {
-		return false, false, err
+
+	termErr := signalPID(pid, syscall.SIGTERM)
+	switch {
+	case termErr == nil:
+		if waitForPIDExit(pid, timeout) {
+			return true, false, nil
+		}
+		if !force {
+			return false, false, nil
+		}
+	case errors.Is(termErr, errGracefulStopUnsupported):
+		// Without force there is nothing honest left to do: say so instead of
+		// terminating and calling it graceful.
+		if !force {
+			return false, false, termErr
+		}
+	default:
+		return false, false, termErr
 	}
-	if waitForPIDExit(pid, timeout) {
-		return true, false, nil
-	}
-	if !force {
-		return false, false, nil
-	}
+
 	if err := signalPID(pid, syscall.SIGKILL); err != nil {
 		return false, false, err
 	}

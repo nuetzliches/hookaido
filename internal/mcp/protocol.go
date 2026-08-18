@@ -1954,7 +1954,13 @@ func (s *Server) openQueueStore() (closableStore, error) {
 	if !ok {
 		return nil, errors.New("sqlite queue backend is not available (not compiled in)")
 	}
-	raw, _, err := b.OpenStore(hookaido.QueueBackendConfig{DSN: p})
+	// A read-only tool set must not write to the database it inspects. Opening
+	// read-write ran migrations against the running server's database on every
+	// tool request -- so a newer binary's `mcp serve --db` migrated an older
+	// server's schema forward under it, and the older server then refused to
+	// start at its next restart -- and it contended for the single write lock
+	// with the live server each time.
+	raw, _, err := b.OpenStore(hookaido.QueueBackendConfig{DSN: p, ReadOnly: !s.MutationsEnabled})
 	if err != nil {
 		return nil, err
 	}

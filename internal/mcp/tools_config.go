@@ -371,8 +371,10 @@ func (s *Server) toolConfigApply(args map[string]any) (any, error) {
 	applied := false
 	reloaded := false
 	rolledBack := false
+	reloadSignaled := false
 	healthURL := ""
 	reloadErr := ""
+	verificationNote := ""
 
 	if mode == "write_only" {
 		if err := writeFileAtomic(p, []byte(content)); err != nil {
@@ -391,17 +393,44 @@ func (s *Server) toolConfigApply(args map[string]any) (any, error) {
 			return nil, err
 		}
 
+		// The instance is signalled where possible instead of hoping --watch is
+		// on: `hookaido run` defaults to --watch=false, so writing the file
+		// triggered nothing at all in the default setup.
+		signaled, signalErr := s.signalReloadBestEffort(args)
+
 		healthURL, err = waitForAdminHealth(compiled, reloadTimeout)
-		if err != nil {
+		if err == nil {
+			// Liveness only says the process answers. Wait for it to report the
+			// fingerprint of the bytes just written -- that is the difference
+			// between "the instance is up" and "the instance is running this
+			// config".
+			err = waitForRunningConfig(compiled, configFingerprint([]byte(content)), reloadTimeout)
+			if errors.Is(err, errConfigDiagnosticsUnavailable) {
+				// An instance too old to report its config identity: fall back
+				// to the liveness check it was verified with before, and say so
+				// rather than claiming a verified reload.
+				verificationNote = err.Error()
+				err = nil
+				reloaded = false
+				applied = true
+			}
+		}
+
+		switch {
+		case err != nil:
 			reloadErr = err.Error()
+			if signalErr != "" {
+				reloadErr = fmt.Sprintf("%s (reload signal: %s)", reloadErr, signalErr)
+			}
 			if rbErr := rollbackConfigFile(p, existed, previous); rbErr != nil {
 				return nil, fmt.Errorf("reload verification failed (%v), rollback failed: %w", err, rbErr)
 			}
 			rolledBack = true
-		} else {
+		case verificationNote == "":
 			applied = true
 			reloaded = true
 		}
+		reloadSignaled = signaled
 	}
 
 	out := map[string]any{
@@ -422,7 +451,11 @@ func (s *Server) toolConfigApply(args map[string]any) (any, error) {
 		out["reload_timeout"] = reloadTimeout.String()
 		out["health_url"] = healthURL
 		out["reloaded"] = reloaded
+		out["reload_signaled"] = reloadSignaled
 		out["rolled_back"] = rolledBack
+		if verificationNote != "" {
+			out["reload_verification"] = verificationNote
+		}
 		out["reload_error"] = reloadErr
 		if reloadErr != "" {
 			out["errors"] = []string{reloadErr}

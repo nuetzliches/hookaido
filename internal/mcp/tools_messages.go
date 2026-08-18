@@ -379,24 +379,66 @@ func (s *Server) toolMessagesPublish(args map[string]any) (any, error) {
 		return nil, fmt.Errorf("items[%d].id %q already exists", dupIdx, dupID)
 	}
 
-	published := 0
-	for i, env := range prepared {
-		if err := store.Enqueue(env); err != nil {
-			switch {
-			case errors.Is(err, queue.ErrEnvelopeExists):
-				return nil, fmt.Errorf("items[%d].id %q already exists", i, env.ID)
-			case errors.Is(err, queue.ErrQueueFull):
-				return nil, fmt.Errorf("items[%d]: queue full", i)
-			default:
-				return nil, fmt.Errorf("items[%d]: %w", i, err)
-			}
-		}
-		published++
+	// Atomicity is the contract this tool's admin-proxy variant already keeps
+	// (it rolls back committed IDs on failure). The direct path enqueued item
+	// by item, so a mid-batch ErrQueueFull left items [0,k) queued while the
+	// tool reported only an error -- and retrying the same batch then failed at
+	// item 0 with "already exists", leaving the operation permanently
+	// half-applied and un-retryable without manual cleanup.
+	published, err := publishAllOrNothing(store, prepared)
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"published": published,
 		"audit":     mutationAuditMap(audit, s.auditPrincipal()),
 	}, nil
+}
+
+// publishAllOrNothing enqueues every item or none. It uses the store's batch
+// enqueue when the backend offers one (sqlite does, transactionally); without
+// it there is nothing to roll back to, so the loop is the honest fallback and
+// its partial state is reported in the error.
+func publishAllOrNothing(store closableStore, prepared []queue.Envelope) (int, error) {
+	if batcher, ok := any(store).(queue.BatchEnqueuer); ok {
+		n, err := batcher.EnqueueBatch(prepared)
+		if err != nil {
+			return 0, publishEnqueueError(err, prepared, n)
+		}
+		return n, nil
+	}
+
+	return publishSequentially(store, prepared)
+}
+
+// publishSequentially is the fallback for a backend without atomic batch
+// enqueue. There is nothing to roll back to there, so the partial state goes
+// into the error rather than being hidden.
+func publishSequentially(store closableStore, prepared []queue.Envelope) (int, error) {
+	published := 0
+	for i, env := range prepared {
+		if err := store.Enqueue(env); err != nil {
+			return published, fmt.Errorf("items[%d] (%d of %d already published, batch enqueue unsupported by this backend): %w",
+				i, published, len(prepared), publishEnqueueError(err, prepared, i))
+		}
+		published++
+	}
+	return published, nil
+}
+
+func publishEnqueueError(err error, prepared []queue.Envelope, idx int) error {
+	id := ""
+	if idx >= 0 && idx < len(prepared) {
+		id = prepared[idx].ID
+	}
+	switch {
+	case errors.Is(err, queue.ErrEnvelopeExists):
+		return fmt.Errorf("id %q already exists", id)
+	case errors.Is(err, queue.ErrQueueFull):
+		return errors.New("queue full")
+	default:
+		return err
+	}
 }
 
 type adminPublishBatch struct {

@@ -60,6 +60,11 @@ type QueueBackendConfig struct {
 	// Delivery-attempt history retention.
 	AttemptsRetentionMaxAge  time.Duration
 	AttemptsRetentionMaxRows int
+
+	// ReadOnly asks the backend to open the store without writing to it --
+	// no schema migrations, no background maintenance. Backends that cannot
+	// honour it may ignore it; callers that depend on it must not mutate.
+	ReadOnly bool
 }
 
 // TracingProvider sets up distributed tracing and provides HTTP instrumentation.

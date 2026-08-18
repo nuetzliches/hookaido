@@ -1340,6 +1340,16 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		workerByRoute[rt.Path] = workerapi.BearerTokenAuthorizer(routeTokens)
 	}
 
+	// Replay protection has to survive the reload that rebuilds these
+	// authorizers. A fresh HMACAuth starts with an empty nonce cache, so
+	// without carrying the previous one forward every reload forgot every
+	// nonce inside the tolerance window -- and since Admin API managed-endpoint
+	// mutations reload too, an attacker holding one captured signed request
+	// only had to wait for the next mutation on any unrelated route.
+	s.mu.RLock()
+	previousHMAC := s.hmacByRoute
+	s.mu.RUnlock()
+
 	hmacByRoute := make(map[string]*ingress.HMACAuth, len(compiled.Routes))
 	basicByRoute := make(map[string]*ingress.BasicAuth, len(compiled.Routes))
 	forwardByRoute := make(map[string]*ingress.ForwardAuth, len(compiled.Routes))
@@ -1396,6 +1406,10 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		}
 
 		auth := ingress.NewHMACAuth(secs)
+		// Same route path, same replay-protection state. Sharing the cache
+		// rather than copying it also means a reload that fails after this
+		// point leaves the still-live authorizer addressing the same cache.
+		auth.AdoptNonceCache(previousHMAC[rt.Path])
 		auth.Provider = rt.AuthHMACProvider
 		if strings.TrimSpace(rt.AuthHMACSignatureHeader) != "" {
 			auth.SignatureHeader = rt.AuthHMACSignatureHeader

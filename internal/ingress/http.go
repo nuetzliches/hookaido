@@ -188,13 +188,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		forwardCopied = copied
 	}
 
+	// The nonce claim taken by HMAC verification stays provisional until the
+	// request is durably enqueued. Releasing it on every path that does not
+	// reach the 202 is what keeps a 503 retryable: the sender's identical
+	// signed retry is the normal reaction to backpressure, and a burned nonce
+	// turned it into a 401 for the rest of the tolerance window.
+	var nonceClaim *NonceClaim
+	defer func() { nonceClaim.Release() }()
+
 	if a := snap.HMACAuth; a != nil {
-		if err := a.Verify(r, requestPath, body); err != nil {
+		claim, err := a.Verify(r, requestPath, body)
+		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			s.observe(false, 0)
 			s.observeReject(route, http.StatusUnauthorized, "auth")
 			return
 		}
+		nonceClaim = claim
 	}
 
 	env := queue.Envelope{
@@ -237,6 +247,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		enqueued++
 	}
+
+	// Every target is durably enqueued: the nonce claim becomes permanent, and
+	// any later replay of this exact request is rejected for the rest of the
+	// tolerance window.
+	nonceClaim.Commit()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)

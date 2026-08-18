@@ -66,7 +66,7 @@ func FuzzHMACAuthVerify(f *testing.F) {
 		}
 		req.Header.Set(auth.SignatureHeader, signature)
 
-		err := auth.Verify(req, requestPath, body)
+		_, err := auth.Verify(req, requestPath, body)
 		if err != nil && err != ErrUnauthorized {
 			t.Fatalf("unexpected verify error: %v", err)
 		}

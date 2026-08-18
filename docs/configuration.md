@@ -730,6 +730,7 @@ kill -HUP $(cat ./hookaido.pid)
 | Route-level `publish` / `publish.direct` / `publish.managed`   |                          |
 | Trend signals config                                           |                          |
 | Deliver targets, URLs, retry, timeout, concurrency, signing     | Dispatcher is restarted in place after a drain; in-flight deliveries finish first (see below) |
+| Deliver headers (`header ...`) and exec target `env` values     | Same dispatcher restart; a rotated bearer token in a `header` takes effect on reload |
 | Egress policy (`defaults.egress.*`)                            | Applied with the dispatcher restart above |
 
 ### Reload Atomicity
@@ -739,6 +740,8 @@ A reload either applies in full or changes nothing. Every secret reference in th
 ### Dispatcher Drain on Reload
 
 When delivery config changes, the running dispatcher is drained before its replacement starts. The drain budget is derived from the dispatcher's own configuration — the longer of its dequeue long-poll wait and the longest target `timeout`, plus headroom for the lease writes, clamped to between 15s and 60s — because that is how long a worker can legitimately need to notice the stop signal: one waiting for work returns from its dequeue, and one mid-delivery finishes the attempt in flight. Neither dequeues again once the stop signal is set.
+
+The dispatcher is reconciled by every path that advances the running config — a SIGHUP, a `--watch` pickup, and an Admin API managed-endpoint mutation. The last one matters because a mutation reloads the whole file: if the Hookaidofile already carries a `deliver` edit that has not been reloaded yet, the mutation applies it, dispatcher included.
 
 If the budget is exceeded, Hookaido logs `dispatcher_drain_incomplete` and starts the replacement anyway. The old workers are already terminal at that point and refusing would leave no dispatcher at all; each finishes at most the delivery already in flight, so the effect is that per-route concurrency is briefly above the configured value. Delivery is at-least-once regardless. A successful drain logs `dispatcher_stopped_for_reload` instead — that line means the old workers really have exited.
 

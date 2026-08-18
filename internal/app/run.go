@@ -221,19 +221,19 @@ func run() int {
 	var store queue.Store
 	var reloadMu sync.Mutex
 	var currentPush *dispatcher.PushDispatcher
-	reloadNow := func(trigger string) {
-		reloadMu.Lock()
-		defer reloadMu.Unlock()
-
-		prev := running
-		updated, ok := reloadConfig(*configPath, running, state, runtimeLogger, trigger)
-		if ok {
-			running = updated
-		}
-		if !ok {
-			return
-		}
-
+	// reconcileDispatcher swaps the push dispatcher when the delivery config
+	// changed between prev and updated. The caller must hold reloadMu.
+	//
+	// It is a named step rather than part of reloadNow because every path that
+	// advances `running` has to run it. The Admin API managed-endpoint
+	// mutations did not: they reload the config and assign `running` without
+	// touching the dispatcher, so if the on-disk file already carried a
+	// not-yet-reloaded deliver change, the mutation folded that change into
+	// `running` while the dispatcher kept the old routes. Every later reload
+	// then diffed against the already-updated `running`, found no difference,
+	// and never swapped -- deliveries went to the old targets until restart
+	// while every observability surface reported the new config.
+	reconcileDispatcher := func(prev, updated config.Compiled) {
 		// Hot-reload dispatcher when delivery config changed.
 		if !dispatcherConfigEqual(prev, updated) {
 			if currentPush != nil {
@@ -264,10 +264,24 @@ func run() int {
 		}
 	}
 
+	reloadNow := func(trigger string) {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+
+		prev := running
+		updated, ok := reloadConfig(*configPath, running, state, runtimeLogger, trigger)
+		if !ok {
+			return
+		}
+		running = updated
+		reconcileDispatcher(prev, updated)
+	}
+
 	upsertManagedEndpoint := func(req admin.ManagementEndpointUpsertRequest) (admin.ManagementEndpointMutationResult, error) {
 		reloadMu.Lock()
 		defer reloadMu.Unlock()
 
+		prev := running
 		result, updated, err := mutateManagedEndpointConfig(*configPath, running, state, runtimeLogger, func(cfg *config.Config, compiled config.Compiled) (admin.ManagementEndpointMutationResult, error) {
 			return applyManagedEndpointUpsert(cfg, compiled, req, store)
 		}, "admin_management_upsert")
@@ -275,6 +289,7 @@ func run() int {
 			return admin.ManagementEndpointMutationResult{}, err
 		}
 		running = updated
+		reconcileDispatcher(prev, updated)
 		return result, nil
 	}
 
@@ -282,6 +297,7 @@ func run() int {
 		reloadMu.Lock()
 		defer reloadMu.Unlock()
 
+		prev := running
 		result, updated, err := mutateManagedEndpointConfig(*configPath, running, state, runtimeLogger, func(cfg *config.Config, compiled config.Compiled) (admin.ManagementEndpointMutationResult, error) {
 			return applyManagedEndpointDelete(cfg, compiled, req, store)
 		}, "admin_management_delete")
@@ -289,6 +305,7 @@ func run() int {
 			return admin.ManagementEndpointMutationResult{}, err
 		}
 		running = updated
+		reconcileDispatcher(prev, updated)
 		return result, nil
 	}
 
@@ -309,16 +326,24 @@ func run() int {
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	defer signal.Stop(hupCh)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-hupCh:
-				reloadNow("signal_sighup")
-			}
-		}
-	}()
+	// startupDone gates reload *handling* -- not registration. Registration has
+	// to happen this early because SIGHUP's default disposition terminates the
+	// process, so a supervisor that writes the config and signals while the
+	// listeners are still coming up would kill the instance outright.
+	//
+	// Handling has to wait for the initial dispatcher assignment below. A
+	// reload landing before it started a dispatcher for the updated config, and
+	// then the main goroutine overwrote currentPush with one built from the
+	// startup config: the reload's dispatcher was leaked -- still running,
+	// never drainable, its workers still dequeuing -- two dispatchers delivered
+	// concurrently, and the reference that was kept ran the stale config while
+	// `running` claimed the new one. No later reload could correct it, because
+	// diffs are computed against `running`.
+	//
+	// hupCh is buffered, so a signal that arrives inside the window is not
+	// dropped: it is handled as soon as startup completes.
+	startupDone := make(chan struct{})
+	go runReloadSignalHandler(ctx, hupCh, startupDone, reloadNow)
 	runtimeLogger.Info("queue_backend_selected", slog.String("backend", queueBackend))
 	appMetrics.queueStore = store
 	if trendStore, ok := any(store).(queue.BacklogTrendStore); ok {
@@ -359,15 +384,22 @@ func run() int {
 		}
 	}()
 
-	if compiled.HasDeliverRoutes {
-		// Under reloadMu: the SIGHUP goroutine is already running and reads
-		// currentPush under the same lock.
-		reloadMu.Lock()
-		currentPush = startPushDispatcher(compiled, store, runtimeLogger, appMetrics)
+	// Under reloadMu. Built from `running` rather than the startup snapshot, and
+	// guarded by the nil check, so that this can never overwrite (and thereby
+	// leak) a dispatcher a reload installed first. startupDone already makes
+	// that ordering impossible; this is the local invariant stated where it
+	// matters, so a future caller of reloadNow cannot reintroduce the leak
+	// silently.
+	reloadMu.Lock()
+	if currentPush == nil && running.HasDeliverRoutes {
+		currentPush = startPushDispatcher(running, store, runtimeLogger, appMetrics)
 		routeCount := len(currentPush.Routes)
 		reloadMu.Unlock()
 		runtimeLogger.Info("dispatcher_started", slog.Int("routes", routeCount))
+	} else {
+		reloadMu.Unlock()
 	}
+	close(startupDone)
 	if *watch {
 		go watchConfig(ctx, *configPath, runtimeLogger, func() {
 			reloadNow("watch")
@@ -1692,6 +1724,33 @@ func reloadConfig(path string, running config.Compiled, state *runtimeState, log
 }
 
 type managedEndpointConfigMutation func(cfg *config.Config, compiled config.Compiled) (admin.ManagementEndpointMutationResult, error)
+
+// runReloadSignalHandler turns SIGHUP into reload calls, but not before startup
+// has finished installing the initial dispatcher.
+//
+// The gate is the point: registration of the signal has to happen early (SIGHUP
+// would otherwise terminate the process), while handling it must not overlap
+// the startup sequence. A reload that ran first started a dispatcher for the
+// updated config which the startup path then overwrote — leaking a running,
+// undrainable dispatcher and keeping the stale one.
+//
+// A signal that arrives inside the window is not lost: hup is buffered by the
+// caller, so it is handled as soon as startupDone closes.
+func runReloadSignalHandler(ctx context.Context, hup <-chan os.Signal, startupDone <-chan struct{}, reload func(trigger string)) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-startupDone:
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			reload("signal_sighup")
+		}
+	}
+}
 
 func mutateManagedEndpointConfig(
 	path string,
@@ -3237,7 +3296,7 @@ func dispatcherConfigEqual(a, b config.Compiled) bool {
 	if !egressPolicyEqual(a.Defaults.EgressPolicy, b.Defaults.EgressPolicy) {
 		return false
 	}
-	return dispatchRoutesEqual(buildDispatchRoutes(a), buildDispatchRoutes(b))
+	return dispatcher.RoutesEqual(buildDispatchRoutes(a), buildDispatchRoutes(b))
 }
 
 func egressPolicyEqual(a, b config.EgressPolicyConfig) bool {
@@ -3268,71 +3327,6 @@ func egressRulesEqual(a, b []config.EgressRule) bool {
 		}
 	}
 	return true
-}
-
-func dispatchRoutesEqual(a, b []dispatcher.RouteConfig) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Route != b[i].Route || a[i].Concurrency != b[i].Concurrency {
-			return false
-		}
-		if !dispatchTargetsEqual(a[i].Targets, b[i].Targets) {
-			return false
-		}
-	}
-	return true
-}
-
-func dispatchTargetsEqual(a, b []dispatcher.TargetConfig) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].URL != b[i].URL ||
-			a[i].Timeout != b[i].Timeout ||
-			!retryConfigEqual(a[i].Retry, b[i].Retry) ||
-			!hmacSigningConfigEqual(a[i].SignHMAC, b[i].SignHMAC) {
-			return false
-		}
-	}
-	return true
-}
-
-func hmacSigningConfigEqual(a, b *dispatcher.HMACSigningConfig) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.SecretRef == b.SecretRef &&
-		hmacSigningSecretVersionsEqual(a.SecretVersions, b.SecretVersions) &&
-		a.SecretSelection == b.SecretSelection &&
-		a.SignatureHeader == b.SignatureHeader &&
-		a.TimestampHeader == b.TimestampHeader
-}
-
-func hmacSigningSecretVersionsEqual(a, b []dispatcher.HMACSigningSecretVersion) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].ID != b[i].ID ||
-			a[i].Ref != b[i].Ref ||
-			!a[i].ValidFrom.Equal(b[i].ValidFrom) ||
-			!a[i].ValidUntil.Equal(b[i].ValidUntil) ||
-			a[i].HasUntil != b[i].HasUntil {
-			return false
-		}
-	}
-	return true
-}
-
-func retryConfigEqual(a, b dispatcher.RetryConfig) bool {
-	return a.Type == b.Type &&
-		a.Max == b.Max &&
-		a.Base == b.Base &&
-		a.Cap == b.Cap &&
-		a.Jitter == b.Jitter
 }
 
 func buildDispatchRoutes(compiled config.Compiled) []dispatcher.RouteConfig {

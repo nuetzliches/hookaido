@@ -1056,10 +1056,21 @@ func (s *Store) dequeueOnce(req queue.DequeueRequest, batch int, leaseTTL time.D
 		s.rollbackTx(ctx, conn, startedAt, sqliteTxClassDequeue)
 	}()
 
+	// The sweep below makes items ready for every waiter, not just this
+	// caller, and this dequeue takes at most `batch` of them. The signal is
+	// deferred because the transaction has several commit points.
+	var expired int64
+	defer func() {
+		if committed && expired > 0 {
+			s.signal()
+		}
+	}()
 	if s.shouldSweepExpiredLeases(now) {
-		if err := s.requeueExpiredLeases(ctx, conn, now); err != nil {
+		n, err := s.requeueExpiredLeases(ctx, conn, now)
+		if err != nil {
 			return queue.DequeueResponse{}, err
 		}
+		expired = n
 	}
 	if batch == 1 {
 		item, ok, err := s.dequeueCandidateSingleTx(ctx, conn, req, now, leaseUntil)
@@ -2906,8 +2917,11 @@ type leaseItem struct {
 	leaseUntil time.Time
 }
 
-func (s *Store) requeueExpiredLeases(ctx context.Context, conn *sql.Conn, now time.Time) error {
-	_, err := conn.ExecContext(ctx, `
+// requeueExpiredLeases returns how many leases it reclaimed, so the caller can
+// wake waiters once the transaction commits: a crashed consumer's items become
+// ready here, and nothing else announces them.
+func (s *Store) requeueExpiredLeases(ctx context.Context, conn *sql.Conn, now time.Time) (int64, error) {
+	res, err := conn.ExecContext(ctx, `
 UPDATE queue_items
 SET state = ?, lease_id = NULL, lease_until = NULL, next_run_at = ?, dead_reason = NULL
 WHERE state = ?
@@ -2919,7 +2933,14 @@ WHERE state = ?
 		string(queue.StateLeased),
 		now.UnixNano(),
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *Store) shouldSweepExpiredLeases(now time.Time) bool {

@@ -97,6 +97,26 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 			return
 		}
 
+		// Capture the readiness channel *before* the dequeue.
+		//
+		// The dequeue below is non-blocking (MaxWait 0), so it registers no
+		// waiter. Taking the channel afterwards left a window: MemoryStore
+		// closes and replaces its notify channel on every enqueue, so a message
+		// published between the empty dequeue and the call handed this stream
+		// the fresh channel -- which fires only on the *next* enqueue. A single
+		// message landing in that window sat queued and ready while the
+		// connected consumer blocked until the keepalive tick (15s by default,
+		// and sse_keepalive has no upper bound).
+		//
+		// Captured first, an enqueue is either visible to the dequeue or closes
+		// the channel already held. The store's own long-poll Dequeue avoids
+		// the same race the same way, capturing the channel under the lock that
+		// checks emptiness.
+		var ready <-chan struct{}
+		if notifyCh != nil {
+			ready = notifyCh()
+		}
+
 		// Non-blocking dequeue.
 		outcome, opErr := s.Dequeue(route, DequeueParams{
 			Batch:       batch,
@@ -144,10 +164,9 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 		}
 
 		// No items available — wait for notification, keepalive, or cancellation.
-		if notifyCh != nil {
-			ch := notifyCh()
+		if ready != nil {
 			select {
-			case <-ch:
+			case <-ready:
 				continue
 			case <-keepaliveTicker.C:
 				if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {

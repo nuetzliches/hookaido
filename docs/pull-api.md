@@ -314,7 +314,7 @@ data: {"id":"evt_1","lease_id":"lease_abc123","route":"/webhooks/github","receiv
 - Auth is identical to all other Pull API endpoints (bearer token).
 - Multiple concurrent SSE connections on the same route act as competing consumers — leases prevent double-delivery.
 - On reconnect, the consumer sends `Last-Event-ID`. Since leases were already created, reconnect simply resumes dequeuing new items.
-- The server sends keepalive comments at the interval configured by `sse_keepalive` (default 15s).
+- The server sends keepalive comments at the interval configured by `sse_keepalive` (default 15s). Keepalives are for proxies, not for delivery: a message becoming ready wakes the stream immediately, whether it was newly published, nacked for retry, requeued from the DLQ, resumed, or reclaimed from an expired lease. This holds on every backend.
 - Optionally, `sse_max_connection` limits the maximum connection duration for resource hygiene.
 
 **Error event:**

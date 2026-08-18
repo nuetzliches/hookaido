@@ -766,3 +766,104 @@ func TestStoreContract_RequeueResetsAttempt(t *testing.T) {
 		})
 	}
 }
+
+// Waiters -- the store's own long-poll Dequeue and any NotifyCh observer, such
+// as an SSE stream -- learn about ready items only through the notify channel.
+// Several transitions never fired it: the memory backend signalled on enqueue
+// and requeue but not on Nack or the expiry sweep, and Postgres signalled on
+// enqueue only, so a nacked or operator-requeued message sat ready for up to
+// the SSE keepalive (15s) or a poll interval with a consumer connected and
+// idle. No message was lost; the cost was latency, and documented backend
+// parity was broken.
+func TestStoreContract_ReadinessTransitionsNotifyWaiters(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			transitions := []struct {
+				name string
+				// run performs the transition on a store holding one message
+				// with ID "evt_1", already dequeued and leased.
+				run func(t *testing.T, store queue.Store, lease queue.Envelope, now *time.Time)
+			}{
+				{
+					name: "nack",
+					run: func(t *testing.T, store queue.Store, lease queue.Envelope, _ *time.Time) {
+						if err := store.Nack(lease.LeaseID, 0); err != nil {
+							t.Fatalf("nack: %v", err)
+						}
+					},
+				},
+				{
+					name: "requeue_dead",
+					run: func(t *testing.T, store queue.Store, lease queue.Envelope, _ *time.Time) {
+						if err := store.MarkDead(lease.LeaseID, "test"); err != nil {
+							t.Fatalf("mark dead: %v", err)
+						}
+						if _, err := store.RequeueDead(queue.DeadRequeueRequest{IDs: []string{"evt_1"}}); err != nil {
+							t.Fatalf("requeue dead: %v", err)
+						}
+					},
+				},
+				{
+					name: "resume",
+					run: func(t *testing.T, store queue.Store, lease queue.Envelope, _ *time.Time) {
+						if err := store.Nack(lease.LeaseID, 0); err != nil {
+							t.Fatalf("nack: %v", err)
+						}
+						if _, err := store.CancelMessages(queue.MessageCancelRequest{IDs: []string{"evt_1"}}); err != nil {
+							t.Fatalf("cancel: %v", err)
+						}
+						if _, err := store.ResumeMessages(queue.MessageResumeRequest{IDs: []string{"evt_1"}}); err != nil {
+							t.Fatalf("resume: %v", err)
+						}
+					},
+				},
+				{
+					name: "lease_expiry",
+					run: func(t *testing.T, store queue.Store, _ queue.Envelope, now *time.Time) {
+						// The sweep runs inside a dequeue. Another consumer's
+						// poll is what reclaims the lease, and the item it does
+						// not take has to wake everyone else.
+						*now = now.Add(time.Hour)
+						if _, err := store.Dequeue(queue.DequeueRequest{Route: "/other", Target: "pull", Batch: 1}); err != nil {
+							t.Fatalf("sweeping dequeue: %v", err)
+						}
+					},
+				},
+			}
+
+			for _, tc := range transitions {
+				t.Run(tc.name, func(t *testing.T) {
+					now := time.Date(2026, 2, 14, 21, 15, 0, 0, time.UTC)
+					store := factory.new(t, &now)
+
+					notifier, ok := store.(queue.StoreNotifier)
+					if !ok {
+						t.Skipf("%s does not implement StoreNotifier", factory.name)
+					}
+
+					if err := store.Enqueue(queue.Envelope{ID: "evt_1", Route: "/r", Target: "pull"}); err != nil {
+						t.Fatalf("enqueue: %v", err)
+					}
+					resp, err := store.Dequeue(queue.DequeueRequest{Route: "/r", Target: "pull", Batch: 1, LeaseTTL: time.Minute})
+					if err != nil {
+						t.Fatalf("dequeue: %v", err)
+					}
+					if len(resp.Items) != 1 {
+						t.Fatalf("dequeue items=%d, want 1", len(resp.Items))
+					}
+
+					// Captured after the setup, so only the transition itself
+					// can close it.
+					ch := notifier.NotifyCh()
+					tc.run(t, store, resp.Items[0], &now)
+
+					select {
+					case <-ch:
+					default:
+						t.Fatalf("%s made the message ready without waking waiters", tc.name)
+					}
+				})
+			}
+		})
+	}
+}

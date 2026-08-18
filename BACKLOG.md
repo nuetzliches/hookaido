@@ -4,24 +4,25 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-- [ ] **Test coverage ≥80%** — 76.9% as of v2.10.1, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — including it reads 75.9%, but 292 never-hand-tested statements say nothing about the code we write.
+- [ ] **Test coverage ≥80%** — 76.7% as of v2.11.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
+
+  Flat against v2.10.1's 76.9% despite a large new test surface: the #249–#258 fixes added roughly as many production statements as they added covered ones, so the ratio held while the absolute covered count grew.
 
   Ranked by uncovered statements, which is what actually moves the total — a package at 62% with 1,200 uncovered statements matters far more than one at 62% with 40:
 
   | Package | Uncovered | Total | % |
   | --- | ---: | ---: | ---: |
-  | `internal/config` | 1226 | 5480 | 77.6% |
-  | `internal/app` | 1204 | 3234 | 62.8% |
-  | `internal/mcp` | 897 | 4023 | 77.7% |
+  | `internal/config` | 1241 | 5720 | 78.3% |
+  | `internal/app` | 1219 | 3255 | 62.5% |
+  | `internal/mcp` | 932 | 4134 | 77.5% |
   | `internal/admin` | 543 | 2606 | 79.2% |
-  | `modules/sqlite` | 391 | 1622 | 75.9% |
-  | `modules/postgres` | 239 | 1197 | 80.0% |
-  | `internal/queue` | 202 | 1282 | 84.2% |
-  | `internal/pullapi` | 163 | 597 | 72.7% |
+  | `modules/sqlite` | 432 | 1693 | 74.5% |
+  | `modules/postgres` | 301 | 1293 | 76.7% |
+  | `internal/queue` | 213 | 1337 | 84.1% |
+  | `internal/pullapi` | 179 | 673 | 73.4% |
 
-  Reaching 80% needs roughly **700 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is the largest percentage gap but the hardest: its zero-coverage functions are 39 `run.go` startup paths that need a real server bring-up, which is where the last coverage pass deliberately stopped.
+  Reaching 80% needs roughly **760 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is the largest percentage gap but the hardest: its zero-coverage functions are `run.go` startup paths that need a real server bring-up, which is where the last coverage pass deliberately stopped.
 
-  Note on the previous numbers in this item: `internal/secrets` was listed at 70.8% and is now **82.4%**, already past target — the #227–#245 hardening PRs moved it. The stale figures are why `make cover` now exists instead of ad-hoc measurement.
 - [ ] **Publish a reachable coverage report** — awesome-go requires a Codecov or Coveralls link that resolves. CI computes a profile and uploads it, but only as a workflow artifact (`ci.yml`, `actions/upload-artifact` name `coverage`): that expires, needs a signed-in session, and is not a report — so there is no durable link to submit. Needs a coverage service wired into CI plus a README badge. Two things to fix while doing it: the `test` job does not set `HOOKAIDO_TEST_POSTGRES_DSN`, so the uploaded profile understates coverage the same way a local `make test-pg`-less run does, and it excludes nothing, so it counts generated protobuf. This is the one remaining awesome-go blocker fully in our control besides the 80% number itself.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
 - [ ] **awesome-go PR** — Submit to [avelino/awesome-go](https://github.com/avelino/awesome-go) under "Messaging" category. Status against its current `CONTRIBUTING.md`:

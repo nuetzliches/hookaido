@@ -7,27 +7,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-08-18
+
+A correctness release. It closes the ten umbrella issues from the second full
+code review ([#249](https://github.com/nuetzliches/hookaido/issues/249)–[#258](https://github.com/nuetzliches/hookaido/issues/258)),
+which covered config parsing, the reload lifecycle, ingress replay protection,
+the dispatcher, all three queue backends, the pull/worker transports and the MCP
+tools.
+
+The importable Go API is backward compatible — nothing exported by `modules/*`,
+`cmd/*` or the root package was removed or changed — so this stays on the `/v2`
+module path. What does change is runtime behaviour, in the places listed below;
+`attempts_retention` is the only new configuration surface, and the only entry
+that deletes data on upgrade.
+
 ### Added
 
 - **`GET /healthz?details=true` reports the running config's identity** under `diagnostics.config`: `fingerprint` (SHA-256 of the config file bytes as loaded), `generation` and `loaded_at`. Liveness alone cannot tell you which config a process is running, so this is what lets a deployment pipeline — or the MCP tools below — confirm that a config it wrote was actually adopted.
-
-### Fixed
-
-- **MCP `config_apply` no longer reports a reload that did not happen.** The "reload health check" polled `GET /healthz` for a 200 — the liveness endpoint a running instance answers regardless of which config it runs. With `hookaido run` started without `--watch` (the default) the file write triggered nothing at all, and the tool still returned `ok/applied/reloaded`: a token revoked through `config_apply` was reported applied while the old token kept authenticating. A reload that failed at apply time looked identical. Because the check could not fail for those reasons, the rollback path was effectively dead code. `config_apply` now signals the instance when a pid file is configured, then waits for it to report the fingerprint of the bytes just written, and rolls the file back when it does not. `instance_reload` verifies the same way. An instance too old to report its config identity yields `applied: true, reloaded: false` plus a `reload_verification` note rather than a false success.
-
-- **MCP `messages_publish` is atomic on the direct SQLite path.** A batch was enqueued item by item, so a mid-batch `ErrQueueFull` left items `[0,k)` queued while the tool returned only an error — and retrying the same batch then failed at item 0 with "already exists", leaving the operation permanently half-applied and un-retryable without manual cleanup. It now uses the backend's transactional batch enqueue, matching the contract the admin-proxy path already kept.
-
-- **MCP `instance_stop` on Windows no longer hard-kills while reporting a graceful stop.** Windows maps every signal to `TerminateProcess`, so the SIGTERM phase terminated the queue server with no drain and no shutdown hooks, and both the tool output (`forced: false`) and the audit event recorded it as graceful. An un-forced stop is now refused there with an explanation; `force` terminates and is reported as `forced: true`.
-
-- **MCP read-only tool sets open the database read-only.** Without `--enable-mutations`, `mcp serve --db` still called the full store constructor on every tool request: `BEGIN IMMEDIATE` migration transactions and `PRAGMA journal_mode=WAL` against the running server's database, plus a checkpoint loop. Pointing a newer binary's MCP server at an older still-running server migrated its schema forward, and the older server then failed its downgrade guard at the next restart; every call also contended for the write lock with the live server.
-
-- **A cancelled dequeue no longer parks a goroutine or leases into a dead connection.** `queue.Store.Dequeue` takes no context, so a gRPC worker whose own deadline fired left the handler blocked inside the store for the rest of `max_wait` — and any item that arrived meanwhile was leased into a stream gRPC had already discarded, invisible for the full lease TTL (30s by default) until the expiry sweep reclaimed it. Every client timeout thus became a lease-TTL delivery delay. All three backends now implement a context-aware dequeue, and the pull API passes the request context through from HTTP, SSE and gRPC: the long poll ends with its caller, and a caller that is already gone is never handed a lease.
-
-### Security
-
-- **Per-route pull tokens are now enforced on lease operations.** `ack`, `nack`, `dead` and `extend` passed only the lease ID to the store; the route resolved from the request path was used for metrics and nothing else. A client authorized for one endpoint could therefore settle another route's in-flight message if it learned that lease ID — from a shared dashboard, a log line, a support ticket. Exploiting it requires the random `lease_…` value, so severity is low, but the route-scoped credential model the config offers was not enforced where it mattered. A lease belonging to another route is now rejected with the same `409` as an unknown lease, so the response cannot be used to probe for lease IDs either. The check runs only when the config actually uses per-route pull tokens: with a single global token every client is authorized for every route anyway, and the ack path keeps its current cost.
-
-### Added
 
 - **`attempts_retention { max_age, max_rows }`** bounds delivery-attempt history, which was append-only in every backend — nothing anywhere deleted or capped it. A push deployment doing 10 attempts/s added ~860k records a day forever: the SQLite file and its indexes grew until the disk filled and enqueue started failing, and the memory backend grew until the process was OOM-killed, invisible to the memory-pressure guard because that counts only queued payloads. Defaults are deliberately finite (`max_age 7d`, `max_rows 200000`); set both `off` to restore the previous unbounded behaviour. Pruning uses the existing `queue_retention.prune_interval` cadence, and the memory backend enforces `max_rows` as it writes.
 
@@ -64,6 +60,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **Admin API managed-endpoint mutations no longer delete the comments in your Hookaidofile.** Every applied upsert or delete rewrote the file through the formatter, which regenerates it from a parse tree that keeps comments only above the first statement — one admin call erased every route annotation and rotation note in the file the project declares the source of truth. Mutations now splice just the `application`/`endpoint_name` directives into the existing file, leaving comments, blank lines and formatting untouched, and verify the spliced result against the canonical form before writing. `config fmt` still regenerates the file (documented under [Values, Quoting and Comments](docs/configuration.md#values-quoting-and-comments)).
 
 - **Parse errors in a value position report what actually went wrong.** An unterminated string or invalid UTF-8 was reported as `expected value` at position `0:0` — a position that cannot exist, since lines are 1-based — instead of `unterminated string at 12:18`.
+
+- **MCP `config_apply` no longer reports a reload that did not happen.** The "reload health check" polled `GET /healthz` for a 200 — the liveness endpoint a running instance answers regardless of which config it runs. With `hookaido run` started without `--watch` (the default) the file write triggered nothing at all, and the tool still returned `ok/applied/reloaded`: a token revoked through `config_apply` was reported applied while the old token kept authenticating. A reload that failed at apply time looked identical. Because the check could not fail for those reasons, the rollback path was effectively dead code. `config_apply` now signals the instance when a pid file is configured, then waits for it to report the fingerprint of the bytes just written, and rolls the file back when it does not. `instance_reload` verifies the same way. An instance too old to report its config identity yields `applied: true, reloaded: false` plus a `reload_verification` note rather than a false success.
+
+- **MCP `messages_publish` is atomic on the direct SQLite path.** A batch was enqueued item by item, so a mid-batch `ErrQueueFull` left items `[0,k)` queued while the tool returned only an error — and retrying the same batch then failed at item 0 with "already exists", leaving the operation permanently half-applied and un-retryable without manual cleanup. It now uses the backend's transactional batch enqueue, matching the contract the admin-proxy path already kept.
+
+- **MCP `instance_stop` on Windows no longer hard-kills while reporting a graceful stop.** Windows maps every signal to `TerminateProcess`, so the SIGTERM phase terminated the queue server with no drain and no shutdown hooks, and both the tool output (`forced: false`) and the audit event recorded it as graceful. An un-forced stop is now refused there with an explanation; `force` terminates and is reported as `forced: true`.
+
+- **MCP read-only tool sets open the database read-only.** Without `--enable-mutations`, `mcp serve --db` still called the full store constructor on every tool request: `BEGIN IMMEDIATE` migration transactions and `PRAGMA journal_mode=WAL` against the running server's database, plus a checkpoint loop. Pointing a newer binary's MCP server at an older still-running server migrated its schema forward, and the older server then failed its downgrade guard at the next restart; every call also contended for the write lock with the live server.
+
+- **A cancelled dequeue no longer parks a goroutine or leases into a dead connection.** `queue.Store.Dequeue` takes no context, so a gRPC worker whose own deadline fired left the handler blocked inside the store for the rest of `max_wait` — and any item that arrived meanwhile was leased into a stream gRPC had already discarded, invisible for the full lease TTL (30s by default) until the expiry sweep reclaimed it. Every client timeout thus became a lease-TTL delivery delay. All three backends now implement a context-aware dequeue, and the pull API passes the request context through from HTTP, SSE and gRPC: the long poll ends with its caller, and a caller that is already gone is never handed a lease.
+
+### Security
+
+- **Per-route pull tokens are now enforced on lease operations.** `ack`, `nack`, `dead` and `extend` passed only the lease ID to the store; the route resolved from the request path was used for metrics and nothing else. A client authorized for one endpoint could therefore settle another route's in-flight message if it learned that lease ID — from a shared dashboard, a log line, a support ticket. Exploiting it requires the random `lease_…` value, so severity is low, but the route-scoped credential model the config offers was not enforced where it mattered. A lease belonging to another route is now rejected with the same `409` as an unknown lease, so the response cannot be used to probe for lease IDs either. The check runs only when the config actually uses per-route pull tokens: with a single global token every client is authorized for every route anyway, and the ack path keeps its current cost.
 
 ## [2.10.1] - 2026-08-18
 
@@ -571,7 +581,8 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.10.1...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.11.0...HEAD
+[2.11.0]: https://github.com/nuetzliches/hookaido/compare/v2.10.1...v2.11.0
 [2.10.1]: https://github.com/nuetzliches/hookaido/compare/v2.10.0...v2.10.1
 [2.10.0]: https://github.com/nuetzliches/hookaido/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/nuetzliches/hookaido/compare/v2.8.1...v2.9.0

@@ -427,11 +427,18 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 	// legitimately carry several signatures, and one malformed value must not
 	// reject a request that another value signs correctly.
 	gotSigs := make([][]byte, 0, len(sigHexes))
-	for _, sigHex := range sigHexes {
+	for i, sigHex := range sigHexes {
 		sig, err := hex.DecodeString(sigHex)
 		if err != nil || len(sig) == 0 {
+			// Nothing from the header value itself is logged, not even a short
+			// prefix: it is attacker-controlled, and the position plus the
+			// length say everything an operator needs about a sender emitting a
+			// malformed signature. (The previous `sig_hex_prefix` field was the
+			// one place in this function that contradicted that rule, and
+			// CodeQL's clear-text-logging check flagged it.)
 			slog.Warn("hmac_stripe_failed", "reason", "sig_hex_decode_error",
-				"header", cfg.Header, "sig_hex_len", len(sigHex), "sig_hex_prefix", safePrefix(sigHex, 6))
+				"header", cfg.Header, "sig_tag", cfg.SigTag,
+				"sig_index", i, "sig_hex_len", len(sigHex))
 			continue
 		}
 		gotSigs = append(gotSigs, sig)
@@ -479,16 +486,6 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		"ts_len", len(tsStr), "body_len", len(body),
 		"got_prefix", hex.EncodeToString(first)[:min(8, 2*len(first))])
 	return ErrUnauthorized
-}
-
-// safePrefix returns the first n characters of s, or all of s if shorter.
-// Used for diagnostic logging where we want a fingerprint without leaking
-// the full value (e.g. signature prefix, not full signature).
-func safePrefix(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 const (

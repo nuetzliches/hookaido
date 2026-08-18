@@ -45,6 +45,25 @@ func NewHMACAuth(secrets [][]byte) *HMACAuth {
 	return a
 }
 
+// AdoptNonceCache makes a share prev's replay-protection state.
+//
+// A config reload rebuilds every route's HMACAuth from scratch, and a fresh
+// HMACAuth starts with an empty nonce cache -- so every reload used to forget
+// every nonce seen inside the tolerance window and reopen the replay window
+// for that long. Admin API managed-endpoint mutations reload too, so an
+// attacker holding one captured signed request only had to wait for the next
+// mutation, on any unrelated route, to replay it successfully.
+//
+// Sharing rather than copying is deliberate: if the reload fails after this
+// point, the still-live old authorizer and the discarded new one address the
+// same cache, so no claim is lost either way.
+func (a *HMACAuth) AdoptNonceCache(prev *HMACAuth) {
+	if a == nil || prev == nil || prev.nonce == nil {
+		return
+	}
+	a.nonce = prev.nonce
+}
+
 // Verify checks:
 // - timestamp header is present and within tolerance
 // - nonce header is present and not reused within tolerance window
@@ -53,15 +72,20 @@ func NewHMACAuth(secrets [][]byte) *HMACAuth {
 // String-to-sign:
 //
 //	ts + "\n" + method + "\n" + path + "\n" + hex(sha256(body))
-func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) error {
+//
+// On success it returns a *NonceClaim, which the caller must Commit once the
+// request is durably enqueued, or Release if it is not. The claim is nil for
+// provider modes and for routes without HMAC auth; both methods are nil-safe,
+// so `defer claim.Release()` is always valid.
+func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) (*NonceClaim, error) {
 	if a == nil {
-		return nil
+		return nil, nil
 	}
 	if a.Provider != "" {
-		return a.verifyProvider(r, body)
+		return nil, a.verifyProvider(r, body)
 	}
 	if len(a.Secrets) == 0 && a.SelectSecrets == nil {
-		return nil
+		return nil, nil
 	}
 
 	now := time.Now
@@ -73,18 +97,18 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) erro
 	tsStr := strings.TrimSpace(r.Header.Get(a.TimestampHeader))
 	nonce := strings.TrimSpace(r.Header.Get(a.NonceHeader))
 	if sigHex == "" || tsStr == "" || nonce == "" {
-		return ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
-		return ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	t := time.Unix(ts, 0).UTC()
 	if a.Tolerance > 0 {
 		d := now().UTC().Sub(t)
 		if d < -a.Tolerance || d > a.Tolerance {
-			return ErrUnauthorized
+			return nil, ErrUnauthorized
 		}
 	}
 
@@ -97,12 +121,12 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) erro
 	// route opted into replay protection, so a nonce we cannot track is not
 	// something to wave through.
 	if len(nonce) > nonceMaxLen {
-		return ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 
 	gotSig, err := hex.DecodeString(sigHex)
 	if err != nil || len(gotSig) == 0 {
-		return ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 
 	bodyHash := sha256.Sum256(body)
@@ -114,7 +138,7 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) erro
 		secrets = a.SelectSecrets(t)
 	}
 	if len(secrets) == 0 {
-		return ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 
 	for _, secret := range secrets {
@@ -129,14 +153,18 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) erro
 			// unauthenticated caller grow the cache, and let anyone who could
 			// observe or predict a nonce claim it first so that the genuine
 			// signed webhook carrying it was rejected as a replay.
-			if !a.nonce.recordIfAbsent(nonce, t.Add(a.Tolerance)) {
-				return ErrUnauthorized
+			//
+			// The claim is provisional: it blocks a concurrent replay
+			// immediately, but only Commit makes it survive. See NonceClaim.
+			seq, ok := a.nonce.claim(nonce, t.Add(a.Tolerance))
+			if !ok {
+				return nil, ErrUnauthorized
 			}
-			return nil
+			return &NonceClaim{cache: a.nonce, nonce: nonce, seq: seq}, nil
 		}
 	}
 
-	return ErrUnauthorized
+	return nil, ErrUnauthorized
 }
 
 func cloneByteSlices(in [][]byte) [][]byte {
@@ -307,7 +335,15 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		return ErrUnauthorized
 	}
 
-	var tsStr, sigHex string
+	// Every value carrying the configured tag is a candidate, not just the
+	// first. Stripe signs with *all* active secrets while an endpoint secret is
+	// rolled with an expiration window, emitting several `v1=` entries in one
+	// header, and its own libraries compare against each of them. Keeping only
+	// the first rejected validly signed webhooks with 401 for the whole roll
+	// window -- up to 24h -- whenever the signature matching the configured
+	// secret was not listed first.
+	var tsStr string
+	var sigHexes []string
 	pairs := 0
 	for _, part := range strings.Split(raw, ",") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
@@ -323,12 +359,12 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 				tsStr = val
 			}
 		case cfg.SigTag:
-			if sigHex == "" {
-				sigHex = val
+			if val != "" && len(sigHexes) < stripeMaxSignatures {
+				sigHexes = append(sigHexes, val)
 			}
 		}
 	}
-	if tsStr == "" || sigHex == "" {
+	if tsStr == "" || len(sigHexes) == 0 {
 		// Never log `raw` here: this path is reached with attacker-controlled
 		// input, and a header that is missing "t=" can still carry a full
 		// signature (and vice versa). `pairs_parsed` alongside the *configured*
@@ -337,7 +373,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		// material into the log.
 		slog.Warn("hmac_stripe_failed", "reason", "parse_incomplete",
 			"header", cfg.Header, "sig_tag", cfg.SigTag,
-			"ts_present", tsStr != "", "sig_present", sigHex != "",
+			"ts_present", tsStr != "", "sig_present", len(sigHexes) > 0,
 			"pairs_parsed", pairs, "header_value_len", len(raw))
 		return ErrUnauthorized
 	}
@@ -387,10 +423,20 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		return ErrUnauthorized
 	}
 
-	gotSig, err := hex.DecodeString(sigHex)
-	if err != nil || len(gotSig) == 0 {
-		slog.Warn("hmac_stripe_failed", "reason", "sig_hex_decode_error",
-			"header", cfg.Header, "sig_hex_len", len(sigHex), "sig_hex_prefix", safePrefix(sigHex, 6))
+	// An entry that is not hex is skipped rather than fatal: the header may
+	// legitimately carry several signatures, and one malformed value must not
+	// reject a request that another value signs correctly.
+	gotSigs := make([][]byte, 0, len(sigHexes))
+	for _, sigHex := range sigHexes {
+		sig, err := hex.DecodeString(sigHex)
+		if err != nil || len(sig) == 0 {
+			slog.Warn("hmac_stripe_failed", "reason", "sig_hex_decode_error",
+				"header", cfg.Header, "sig_hex_len", len(sigHex), "sig_hex_prefix", safePrefix(sigHex, 6))
+			continue
+		}
+		gotSigs = append(gotSigs, sig)
+	}
+	if len(gotSigs) == 0 {
 		return ErrUnauthorized
 	}
 
@@ -399,6 +445,9 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 	msg = append(msg, '.')
 	msg = append(msg, body...)
 
+	// One HMAC per secret, then a constant-time compare against each candidate
+	// signature: the cost stays linear in the number of secrets no matter how
+	// many signatures the header carries.
 	for _, secret := range secrets {
 		if len(secret) == 0 {
 			continue
@@ -406,8 +455,10 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		mac := hmac.New(sha256.New, secret)
 		_, _ = mac.Write(msg)
 		want := mac.Sum(nil)
-		if hmac.Equal(gotSig, want) {
-			return nil
+		for _, gotSig := range gotSigs {
+			if hmac.Equal(gotSig, want) {
+				return nil
+			}
 		}
 	}
 
@@ -421,11 +472,12 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 	// bits of the correct MAC for a message of the attacker's choosing, which
 	// materially assists offline brute force of a weak secret. A mismatch is
 	// diagnosable from secrets_tried, body_len and got_prefix without it.
+	first := gotSigs[0]
 	slog.Warn("hmac_stripe_failed", "reason", "no_secret_matched",
 		"header", cfg.Header, "sig_tag", cfg.SigTag,
-		"secrets_tried", len(secrets),
+		"secrets_tried", len(secrets), "signatures_tried", len(gotSigs),
 		"ts_len", len(tsStr), "body_len", len(body),
-		"got_prefix", hex.EncodeToString(gotSig)[:min(8, 2*len(gotSig))])
+		"got_prefix", hex.EncodeToString(first)[:min(8, 2*len(first))])
 	return ErrUnauthorized
 }
 
@@ -452,17 +504,75 @@ const (
 	// not the primary defence.
 	nonceMaxEntries = 100_000
 
+	// stripeMaxSignatures bounds how many signature candidates are taken from
+	// one header. A secret roll puts a handful there -- Stripe signs with every
+	// active secret -- so this is generous, while stopping a caller from
+	// pushing thousands of values into the compare loop.
+	stripeMaxSignatures = 16
+
 	// nonceSweepInterval bounds how often the expired-entry sweep runs. The
 	// sweep is O(entries) while holding the lock, so running it on every call
 	// made each request on the route pay for the whole cache.
 	nonceSweepInterval = 30 * time.Second
 )
 
+// NonceClaim is a replay-protection claim on the nonce of a request whose
+// signature has verified. It blocks a concurrent replay from the moment Verify
+// returns, but it is not permanent until Commit.
+//
+// The distinction matters because the ingress ACKs only after a durable
+// enqueue. A permanently burned nonce is a hidden ACK: when the enqueue then
+// failed and the server answered 503 -- explicitly inviting a retry -- the
+// sender's identical signed retry, which is exactly what webhook senders
+// replay, hit the claimed nonce and got 401 for the rest of the tolerance
+// window. Transient backpressure became permanent webhook loss, and the sender
+// saw "unauthorized", so it typically stopped retrying.
+//
+// Commit after the enqueue succeeds; Release on every other path. A released
+// nonce lets the retry through, which is the point: at-least-once delivery
+// makes a duplicate acceptable, a dropped webhook is not.
+//
+// A NonceClaim belongs to the goroutine handling the request and is not safe
+// for concurrent use. Both methods are nil-safe.
+type NonceClaim struct {
+	cache *nonceCache
+	nonce string
+	seq   uint64
+	done  bool
+}
+
+// Commit makes the claim permanent for the rest of the tolerance window.
+func (c *NonceClaim) Commit() {
+	if c == nil {
+		return
+	}
+	c.done = true
+}
+
+// Release drops the claim so an identical signed retry is accepted. It is a
+// no-op after Commit or a previous Release, so `defer claim.Release()` next to
+// Verify is always correct.
+func (c *NonceClaim) Release() {
+	if c == nil || c.done || c.cache == nil {
+		return
+	}
+	c.done = true
+	c.cache.release(c.nonce, c.seq)
+}
+
+type nonceEntry struct {
+	expiresAt time.Time
+	// seq identifies one claim. Release compares it so a claim released late
+	// cannot delete the entry of a later claim on the same nonce.
+	seq uint64
+}
+
 type nonceCache struct {
 	mu        sync.Mutex
 	now       func() time.Time
-	m         map[string]time.Time
+	m         map[string]nonceEntry
 	lastSweep time.Time
+	nextSeq   uint64
 }
 
 func newNonceCache(now func() time.Time) *nonceCache {
@@ -471,7 +581,7 @@ func newNonceCache(now func() time.Time) *nonceCache {
 	}
 	return &nonceCache{
 		now: now,
-		m:   make(map[string]time.Time),
+		m:   make(map[string]nonceEntry),
 	}
 }
 
@@ -484,17 +594,17 @@ func (c *nonceCache) setNow(now func() time.Time) {
 	c.mu.Unlock()
 }
 
-// recordIfAbsent claims nonce until expiresAt and reports whether it was
-// previously unclaimed.
+// claim takes nonce until expiresAt and reports whether it was previously
+// unclaimed, along with the sequence number identifying this claim.
 //
 // This is the authority on replay detection: call it only after the signature
 // has verified, and reject the request when it returns false. Claiming a nonce
 // before verification let any unauthenticated caller grow the cache, and let
 // anyone able to observe or predict a nonce claim it first so that the genuine
 // signed webhook carrying it was rejected as a replay.
-func (c *nonceCache) recordIfAbsent(nonce string, expiresAt time.Time) bool {
+func (c *nonceCache) claim(nonce string, expiresAt time.Time) (uint64, bool) {
 	if nonce == "" || len(nonce) > nonceMaxLen {
-		return false
+		return 0, false
 	}
 
 	c.mu.Lock()
@@ -503,8 +613,8 @@ func (c *nonceCache) recordIfAbsent(nonce string, expiresAt time.Time) bool {
 	now := c.now().UTC()
 	c.sweepLocked(now)
 
-	if exp, ok := c.m[nonce]; ok && now.Before(exp) {
-		return false
+	if e, ok := c.m[nonce]; ok && now.Before(e.expiresAt) {
+		return 0, false
 	}
 	if len(c.m) >= nonceMaxEntries {
 		// Still full after sweeping. Drop the entry closest to expiring: its
@@ -512,8 +622,21 @@ func (c *nonceCache) recordIfAbsent(nonce string, expiresAt time.Time) bool {
 		// request would turn a capacity problem into dropped webhooks.
 		c.evictEarliestLocked()
 	}
-	c.m[nonce] = expiresAt.UTC()
-	return true
+	c.nextSeq++
+	c.m[nonce] = nonceEntry{expiresAt: expiresAt.UTC(), seq: c.nextSeq}
+	return c.nextSeq, true
+}
+
+// release drops a claim that was never committed, so that an identical signed
+// retry is accepted. The seq check means a claim released after the same nonce
+// was legitimately claimed again cannot delete the newer entry.
+func (c *nonceCache) release(nonce string, seq uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if e, ok := c.m[nonce]; ok && e.seq == seq {
+		delete(c.m, nonce)
+	}
 }
 
 // sweepLocked removes expired entries, at most once per nonceSweepInterval.
@@ -525,8 +648,8 @@ func (c *nonceCache) sweepLocked(now time.Time) {
 		return
 	}
 	c.lastSweep = now
-	for k, exp := range c.m {
-		if !now.Before(exp) {
+	for k, e := range c.m {
+		if !now.Before(e.expiresAt) {
 			delete(c.m, k)
 		}
 	}
@@ -537,9 +660,9 @@ func (c *nonceCache) evictEarliestLocked() {
 		earliestKey string
 		earliestExp time.Time
 	)
-	for k, exp := range c.m {
-		if earliestKey == "" || exp.Before(earliestExp) {
-			earliestKey, earliestExp = k, exp
+	for k, e := range c.m {
+		if earliestKey == "" || e.expiresAt.Before(earliestExp) {
+			earliestKey, earliestExp = k, e.expiresAt
 		}
 	}
 	if earliestKey != "" {

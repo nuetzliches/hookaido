@@ -30,6 +30,15 @@ Full control via block form:
 
 **Replay protection:** The timestamp header is checked against the tolerance window. The nonce header (when configured) provides additional replay defense.
 
+A nonce is claimed when the signature verifies and becomes permanent once the
+request is durably enqueued. If the queue rejects the message (503) or the
+request is refused after verification, the claim is released, so the sender's
+identical signed retry — the normal reaction to backpressure — is accepted
+rather than answered with 401 for the rest of the tolerance window. A replay
+arriving while the first request is still in flight is rejected either way.
+Claims survive config reloads, including those triggered by Admin API
+managed-endpoint mutations.
+
 **Secret rotation:** With `secret_ref`, verification tries all secrets valid at the request timestamp (from the signed timestamp header), allowing overlapping key rotation with zero downtime.
 
 #### Providers
@@ -66,6 +75,11 @@ Provider mode is mutually exclusive with `signature_header`, `timestamp_header`,
 ```hcl
 auth basic "webhook-user" "{env.WEBHOOK_PASSWORD}"
 ```
+
+Credentials are held as SHA-256 digests and compared in constant time, and an
+unknown username runs the same comparison against a decoy digest — so neither
+which usernames exist nor how long the configured password is can be read off
+response timing.
 
 Basic-auth credentials are compared literally — the `env:` / `file:` / `vault:` /
 `raw:` reference syntax used by `auth token`, `auth hmac` and `secret` blocks is

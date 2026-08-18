@@ -121,6 +121,8 @@ String-to-sign: `METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + hex(sha256(bod
 
 Verification tries all secrets valid at the request timestamp (from the timestamp header), not just wall-clock time. This allows safe key rotation with overlapping validity windows.
 
+A nonce is claimed when the signature verifies and becomes permanent once the request is durably enqueued. A request that is refused after verification — a 503 from queue backpressure, a 413 from oversized headers — releases the claim, so the sender's identical signed retry is accepted instead of being rejected as a replay for the rest of the tolerance window. A replay arriving while the first request is still in flight is rejected either way, and claims survive config reloads.
+
 **Provider mode** (GitHub, Gitea/Forgejo, Stripe, Cituro):
 
 For webhook providers with their own signature format, use provider mode. This verifies the provider's native signature:

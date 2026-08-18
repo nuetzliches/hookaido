@@ -145,6 +145,7 @@ pull_api {
   auth token env:HOOKAIDO_PULL_TOKEN
 
   max_batch 100              # max items per dequeue (default 100)
+  max_lease_batch 100        # max lease IDs per ack/nack/extend (default 100)
   default_lease_ttl 30s      # default lease duration (default 30s)
   max_lease_ttl 5m           # optional upper bound for lease TTL
   default_max_wait 0         # default long-poll wait (default 0 = no wait)
@@ -163,6 +164,7 @@ pull_api {
 | `prefix`             | —            | URL path prefix for all pull endpoints     |
 | `auth token`         | **required** | Bearer token allowlist (`env:`/`file:`/`vault:`/`raw:` ref) |
 | `max_batch`          | `100`        | Max items per dequeue request              |
+| `max_lease_batch`    | `100`        | Max lease IDs per ack/nack/extend request   |
 | `default_lease_ttl`  | `30s`        | Lease TTL when client omits it             |
 | `max_lease_ttl`      | off          | Optional upper cap for effective lease TTL |
 | `default_max_wait`   | `0`          | Long-poll wait when client omits it        |
@@ -172,6 +174,8 @@ pull_api {
 | `tls`                | —            | TLS and optional mTLS configuration        |
 
 > Pull API auth is required when pull routes are present. Deliver-only configs can omit it entirely — the Pull API server is skipped in that case.
+>
+> `max_batch` and `max_lease_batch` bound different calls: the first caps how many items one dequeue returns, the second how many lease IDs one ack/nack/extend may carry. Both apply identically to the HTTP and gRPC transports. Changing either requires a restart.
 >
 > `grpc_listen` is optional and only valid when at least one pull route exists. It must use a dedicated listener address (it cannot share with ingress/pull/admin/metrics listeners).
 
@@ -659,6 +663,7 @@ Placeholders resolve within a single value (no cross-token expansion).
 | `defaults.adaptive_backpressure.oldest_queued_age` | `60s`                     |
 | `defaults.adaptive_backpressure.sustained_growth` | `true`                      |
 | `pull_api.max_batch`             | `100`                                         |
+| `pull_api.max_lease_batch`       | `100`                                         |
 | `pull_api.default_lease_ttl`     | `30s`                                         |
 
 ## Config Management
@@ -715,7 +720,7 @@ If any of these change, Hookaido rejects the reload and requires a process resta
 | Listener TLS (`tls { ... }` on any listener)                                 | TLS config baked at startup             |
 | API prefixes (`pull_api.prefix`, `admin_api.prefix`)                         | HTTP mux topology                       |
 | Shared listener mode toggle                                                  | Server topology                         |
-| Pull API limits (`max_batch`, `*_lease_ttl`, `*_max_wait`)                   | Set on server struct at startup         |
+| Pull API limits (`max_batch`, `max_lease_batch`, `*_lease_ttl`, `*_max_wait`) | Set on server struct at startup         |
 | `defaults.max_body` / `defaults.max_headers` (global defaults)               | Set on ingress/admin servers at startup |
 | `defaults.publish_policy.*` (all publish policy fields)                      | Set on admin server at startup          |
 | Queue backend type (`sqlite`/`memory`/`postgres`)                            | No migration path                       |

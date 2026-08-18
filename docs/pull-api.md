@@ -133,7 +133,7 @@ Batch form (single HTTP roundtrip for multiple leases):
 ```
 
 - Use either `lease_id` or `lease_ids`, not both.
-- `lease_ids` is deduplicated server-side and bounded to 100 items per request.
+- `lease_ids` is deduplicated server-side and bounded by `pull_api.max_lease_batch` (default 100). The same bound applies over gRPC.
 
 **Responses:**
 
@@ -196,7 +196,7 @@ Batch form:
 ```
 
 - Use either `lease_id` or `lease_ids`, not both.
-- `lease_ids` is deduplicated server-side and bounded to 100 items per request.
+- `lease_ids` is deduplicated server-side and bounded by `pull_api.max_lease_batch` (default 100). The same bound applies over gRPC.
 - `dead: true` works with batch form as well.
 
 **Responses:**
@@ -334,7 +334,8 @@ Fine-tune Pull API behavior in the config:
 pull_api {
   auth token env:HOOKAIDO_PULL_TOKEN
 
-  max_batch 100           # cap per-request batch size (default 100)
+  max_batch 100           # cap per-request dequeue size (default 100)
+  max_lease_batch 100     # cap lease IDs per ack/nack/extend (default 100)
   default_lease_ttl 30s   # when client omits lease_ttl (default 30s)
   max_lease_ttl 5m        # hard upper bound for lease TTL
   default_max_wait 0      # when client omits max_wait (default 0 = no wait)

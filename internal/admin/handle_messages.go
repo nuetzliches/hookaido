@@ -224,7 +224,7 @@ func (s *Server) handleDLQRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids, ok := parseManageIDs(r)
+	ids, ok := parseManageIDs(r, s.adminMaxBodyBytes())
 	if !ok {
 		writeManagementError(w, http.StatusBadRequest, publishCodeInvalidBody, fmt.Sprintf("ids must contain between 1 and %d non-empty entries", backlog.MaxListLimit))
 		return
@@ -282,7 +282,7 @@ func (s *Server) handleDLQDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids, ok := parseManageIDs(r)
+	ids, ok := parseManageIDs(r, s.adminMaxBodyBytes())
 	if !ok {
 		writeManagementError(w, http.StatusBadRequest, publishCodeInvalidBody, fmt.Sprintf("ids must contain between 1 and %d non-empty entries", backlog.MaxListLimit))
 		return
@@ -465,7 +465,7 @@ func (s *Server) handleMessagesPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, parseErr := parsePublishItems(r)
+	items, parseErr := parsePublishItems(r, s.adminMaxBodyBytes())
 	if parseErr != nil {
 		s.writePublishError(w, http.StatusBadRequest, parseErr.Code, parseErr.Detail, parseErr.ItemIndex, false)
 		return
@@ -709,7 +709,7 @@ func (s *Server) handleMessagesCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids, ok := parseManageIDs(r)
+	ids, ok := parseManageIDs(r, s.adminMaxBodyBytes())
 	if !ok {
 		writeManagementError(w, http.StatusBadRequest, publishCodeInvalidBody, fmt.Sprintf("ids must contain between 1 and %d non-empty entries", backlog.MaxListLimit))
 		return
@@ -769,7 +769,7 @@ func (s *Server) handleMessagesRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids, ok := parseManageIDs(r)
+	ids, ok := parseManageIDs(r, s.adminMaxBodyBytes())
 	if !ok {
 		writeManagementError(w, http.StatusBadRequest, publishCodeInvalidBody, fmt.Sprintf("ids must contain between 1 and %d non-empty entries", backlog.MaxListLimit))
 		return
@@ -828,7 +828,7 @@ func (s *Server) handleMessagesResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids, ok := parseManageIDs(r)
+	ids, ok := parseManageIDs(r, s.adminMaxBodyBytes())
 	if !ok {
 		writeManagementError(w, http.StatusBadRequest, publishCodeInvalidBody, fmt.Sprintf("ids must contain between 1 and %d non-empty entries", backlog.MaxListLimit))
 		return
@@ -881,7 +881,7 @@ func (s *Server) handleMessagesCancelByFilter(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	req, application, endpointName, ok := parseMessageManageFilter(r, map[queue.State]struct{}{
+	req, application, endpointName, ok := parseMessageManageFilter(r, s.adminMaxBodyBytes(), map[queue.State]struct{}{
 		queue.StateQueued: {},
 		queue.StateLeased: {},
 		queue.StateDead:   {},
@@ -984,7 +984,7 @@ func (s *Server) handleMessagesRequeueByFilter(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	req, application, endpointName, ok := parseMessageManageFilter(r, map[queue.State]struct{}{
+	req, application, endpointName, ok := parseMessageManageFilter(r, s.adminMaxBodyBytes(), map[queue.State]struct{}{
 		queue.StateDead:     {},
 		queue.StateCanceled: {},
 	})
@@ -1086,7 +1086,7 @@ func (s *Server) handleMessagesResumeByFilter(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	req, application, endpointName, ok := parseMessageManageFilter(r, map[queue.State]struct{}{
+	req, application, endpointName, ok := parseMessageManageFilter(r, s.adminMaxBodyBytes(), map[queue.State]struct{}{
 		queue.StateCanceled: {},
 	})
 	if !ok {

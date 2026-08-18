@@ -326,26 +326,28 @@ func (s *Server) emitSecretAudit(evt SecretMutationAuditEvent) {
 	s.AuditSecretMutation(evt)
 }
 
+// parseSecretUpsertBody decodes a runtime secret rotation body.
+//
+// It used to use a plain json.Unmarshal, so unknown fields were silently
+// dropped and trailing documents accepted, while every other admin body went
+// through decodeJSONBodyStrict. A camelCase typo — `{"value":"…","notAfter":"…"}`
+// — therefore returned 201 with `not_after` zero: the secret was created with no
+// expiry instead of the intended time-boxed window, and both the response and
+// the audit event reported the empty window, so the mistake was easy to miss.
 func parseSecretUpsertBody(r *http.Request, maxBodyBytes int64) (secretUpsertRequest, string, bool) {
-	if r.Body == nil {
-		return secretUpsertRequest{}, "request body is empty", false
-	}
-	body := r.Body
-	if maxBodyBytes > 0 {
-		body = http.MaxBytesReader(nil, r.Body, maxBodyBytes)
-	}
-	defer body.Close()
-
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return secretUpsertRequest{}, "request body read error", false
-	}
-	if len(data) == 0 {
+	if r == nil || r.Body == nil {
 		return secretUpsertRequest{}, "request body is empty", false
 	}
 	var req secretUpsertRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return secretUpsertRequest{}, "request body is not valid JSON", false
+	if err := decodeJSONBodyStrict(r, &req, maxBodyBytes); err != nil {
+		switch {
+		case errors.Is(err, errRequestBodyTooLarge):
+			return secretUpsertRequest{}, fmt.Sprintf("request body exceeds %d bytes", effectiveMaxBodyBytes(maxBodyBytes)), false
+		case errors.Is(err, io.EOF):
+			return secretUpsertRequest{}, "request body is empty", false
+		default:
+			return secretUpsertRequest{}, "request body is not valid JSON", false
+		}
 	}
 	return req, "", true
 }

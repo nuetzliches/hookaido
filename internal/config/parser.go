@@ -944,6 +944,20 @@ func (p *parser) parseAPIBlock(name string) (*APIBlock, error) {
 			out.MaxBatch = v
 			out.MaxBatchQuoted = quoted
 			out.MaxBatchSet = true
+		case "max_lease_batch":
+			if name != "pull_api" {
+				return nil, p.errAt(dirTok.pos, "unknown %s directive %q", name, dirTok.text)
+			}
+			if out.MaxLeaseBatchSet {
+				return nil, p.errAt(dirTok.pos, "duplicate %s max_lease_batch", name)
+			}
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.MaxLeaseBatch = v
+			out.MaxLeaseBatchQuoted = quoted
+			out.MaxLeaseBatchSet = true
 		case "grpc_listen":
 			if name != "pull_api" {
 				return nil, p.errAt(dirTok.pos, "unknown %s directive %q", name, dirTok.text)

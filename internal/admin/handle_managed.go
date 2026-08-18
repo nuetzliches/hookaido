@@ -258,7 +258,7 @@ func (s *Server) handleApplicationEndpointUpsert(w http.ResponseWriter, r *http.
 		return
 	}
 
-	route, detail, ok := parseManagementEndpointUpsert(r)
+	route, detail, ok := parseManagementEndpointUpsert(r, s.adminMaxBodyBytes())
 	if !ok {
 		if strings.TrimSpace(detail) == "" {
 			detail = "request body must be valid JSON with route"
@@ -573,7 +573,7 @@ func (s *Server) handleApplicationEndpointPublish(w http.ResponseWriter, r *http
 		return
 	}
 
-	items, parseErr := parseScopedPublishItems(r)
+	items, parseErr := parseScopedPublishItems(r, s.adminMaxBodyBytes())
 	if parseErr != nil {
 		s.writePublishError(w, http.StatusBadRequest, parseErr.Code, parseErr.Detail, parseErr.ItemIndex, true)
 		return
@@ -746,7 +746,7 @@ func (s *Server) handleApplicationEndpointCancelByFilter(w http.ResponseWriter, 
 		return
 	}
 
-	req, app, ep, ok := parseMessageManageFilter(r, map[queue.State]struct{}{
+	req, app, ep, ok := parseMessageManageFilter(r, s.adminMaxBodyBytes(), map[queue.State]struct{}{
 		queue.StateQueued: {},
 		queue.StateLeased: {},
 		queue.StateDead:   {},
@@ -826,7 +826,7 @@ func (s *Server) handleApplicationEndpointRequeueByFilter(w http.ResponseWriter,
 		return
 	}
 
-	req, app, ep, ok := parseMessageManageFilter(r, map[queue.State]struct{}{
+	req, app, ep, ok := parseMessageManageFilter(r, s.adminMaxBodyBytes(), map[queue.State]struct{}{
 		queue.StateDead:     {},
 		queue.StateCanceled: {},
 	})
@@ -905,7 +905,7 @@ func (s *Server) handleApplicationEndpointResumeByFilter(w http.ResponseWriter, 
 		return
 	}
 
-	req, app, ep, ok := parseMessageManageFilter(r, map[queue.State]struct{}{
+	req, app, ep, ok := parseMessageManageFilter(r, s.adminMaxBodyBytes(), map[queue.State]struct{}{
 		queue.StateCanceled: {},
 	})
 	if !ok {

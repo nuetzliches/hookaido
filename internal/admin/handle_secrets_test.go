@@ -423,3 +423,50 @@ func TestMapSecretAddError(t *testing.T) {
 		t.Fatalf("default mapping wrong: %d %q", status, code)
 	}
 }
+
+func TestHandleSecretAdd_RejectsUnknownField(t *testing.T) {
+	// parseSecretUpsertBody used plain json.Unmarshal, so a camelCase typo was
+	// silently dropped: `notAfter` returned 201 with not_after zero, creating the
+	// secret with no expiry instead of the intended time-boxed window, and both
+	// the response and the audit event reported the empty window.
+	fx := newSecretTestFixture(t, true)
+	body := []byte(`{"value":"whs_secret","notAfter":"2026-12-01T00:00:00Z"}`)
+	req := secretPostRequest(t, "/secrets/cituro", body, "rotate-test")
+	rr := httptest.NewRecorder()
+	fx.server.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected an unknown field to be rejected, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if len(fx.persisted) != 0 {
+		t.Fatalf("expected nothing persisted, got %d", len(fx.persisted))
+	}
+}
+
+func TestHandleSecretAdd_RejectsTrailingDocument(t *testing.T) {
+	fx := newSecretTestFixture(t, true)
+	body := []byte(`{"value":"whs_secret"}{"value":"second"}`)
+	req := secretPostRequest(t, "/secrets/cituro", body, "rotate-test")
+	rr := httptest.NewRecorder()
+	fx.server.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected a trailing document to be rejected, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleSecretAdd_AcceptsDeclaredNotAfter(t *testing.T) {
+	fx := newSecretTestFixture(t, true)
+	body := []byte(`{"value":"whs_secret","not_after":"2026-12-01T00:00:00Z"}`)
+	req := secretPostRequest(t, "/secrets/cituro", body, "rotate-test")
+	rr := httptest.NewRecorder()
+	fx.server.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	meta := fx.pool.ListMetadata()
+	if len(meta) != 1 || meta[0].NotAfter.IsZero() {
+		t.Fatalf("expected the declared expiry to be applied, got %+v", meta)
+	}
+}

@@ -25,6 +25,7 @@ const (
 	defaultIngressListen                  = ":8080"
 	defaultPullListen                     = ":9443"
 	defaultPullAPIMaxBatch                = 100
+	defaultPullAPIMaxLeaseBatch           = 100
 	defaultPullAPIDefaultLeaseTTL         = 30 * time.Second
 	defaultAdminListen                    = "127.0.0.1:2019"
 	defaultMetricsListen                  = "127.0.0.1:9900"
@@ -194,7 +195,12 @@ type APIConfig struct {
 
 	AuthTokens []string
 
-	MaxBatch         int
+	MaxBatch int
+	// MaxLeaseBatch caps how many lease IDs one ack/nack/extend call may carry.
+	// It is separate from MaxBatch, which caps a dequeue: the two used to share
+	// a value, so raising the dequeue cap silently raised the lease cap on gRPC
+	// while the HTTP transport kept its own default and rejected the same call.
+	MaxLeaseBatch    int
 	DefaultLeaseTTL  time.Duration
 	MaxLeaseTTL      time.Duration
 	DefaultMaxWait   time.Duration
@@ -2780,6 +2786,7 @@ func compileAPI(name string, in *APIBlock, defaultListen string) (APIConfig, Val
 	}
 	if name == "pull_api" {
 		out.MaxBatch = defaultPullAPIMaxBatch
+		out.MaxLeaseBatch = defaultPullAPIMaxLeaseBatch
 		out.DefaultLeaseTTL = defaultPullAPIDefaultLeaseTTL
 	}
 
@@ -2834,6 +2841,19 @@ func compileAPI(name string, in *APIBlock, defaultListen string) (APIConfig, Val
 					res.Errors = append(res.Errors, "pull_api.max_batch must be a positive integer")
 				} else {
 					out.MaxBatch = v
+				}
+			}
+		}
+		if in.MaxLeaseBatchSet {
+			raw := strings.TrimSpace(resolveValue(in.MaxLeaseBatch, "pull_api.max_lease_batch", &res))
+			if raw == "" {
+				res.Errors = append(res.Errors, "pull_api.max_lease_batch must not be empty")
+			} else {
+				v, err := strconv.Atoi(raw)
+				if err != nil || v <= 0 {
+					res.Errors = append(res.Errors, "pull_api.max_lease_batch must be a positive integer")
+				} else {
+					out.MaxLeaseBatch = v
 				}
 			}
 		}

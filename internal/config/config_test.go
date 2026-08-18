@@ -9382,3 +9382,118 @@ pull_api { grpc_listen ":9943" auth token "raw:t" }
 		t.Fatalf("expected grpc_listen conflict error, got %#v", res.Errors)
 	}
 }
+
+func TestCompile_PullAPIMaxLeaseBatch(t *testing.T) {
+	// max_batch caps a dequeue, max_lease_batch caps an ack/nack/extend. They
+	// used to share a value, so raising the dequeue cap silently raised the
+	// lease cap on gRPC while HTTP kept its own default.
+	in := []byte(`
+pull_api { auth token "raw:t" max_batch 1000 max_lease_batch 250 }
+
+"/x" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+	if compiled.PullAPI.MaxBatch != 1000 {
+		t.Fatalf("max_batch: got %d, want 1000", compiled.PullAPI.MaxBatch)
+	}
+	if compiled.PullAPI.MaxLeaseBatch != 250 {
+		t.Fatalf("max_lease_batch: got %d, want 250", compiled.PullAPI.MaxLeaseBatch)
+	}
+}
+
+func TestCompile_PullAPIMaxLeaseBatchDefaultsIndependentlyOfMaxBatch(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" max_batch 1000 }
+
+"/x" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	compiled, res := Compile(cfg)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+	if compiled.PullAPI.MaxLeaseBatch != 100 {
+		t.Fatalf("max_lease_batch: got %d, want the default 100", compiled.PullAPI.MaxLeaseBatch)
+	}
+}
+
+func TestCompile_PullAPIMaxLeaseBatchRejectsNonPositive(t *testing.T) {
+	in := []byte(`
+pull_api { auth token "raw:t" max_lease_batch 0 }
+
+"/x" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, res := Compile(cfg)
+	if !compileErrorsContain(res.Errors, "pull_api.max_lease_batch must be a positive integer") {
+		t.Fatalf("expected max_lease_batch error, got %#v", res.Errors)
+	}
+}
+
+func TestFormat_PullAPIMaxLeaseBatchRoundTrip(t *testing.T) {
+	in := []byte(`
+pull_api {
+  auth token "raw:t"
+  max_lease_batch 250
+}
+
+"/x" {
+  pull { path "/e" }
+}
+`)
+	cfg, err := Parse(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	formatted, err := Format(cfg)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	if !strings.Contains(string(formatted), "max_lease_batch 250") {
+		t.Fatalf("expected max_lease_batch in formatted output, got:\n%s", formatted)
+	}
+	reparsed, err := Parse(formatted)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	compiled, res := Compile(reparsed)
+	if !res.OK {
+		t.Fatalf("expected ok, got errors: %#v", res.Errors)
+	}
+	if compiled.PullAPI.MaxLeaseBatch != 250 {
+		t.Fatalf("max_lease_batch after round trip: got %d, want 250", compiled.PullAPI.MaxLeaseBatch)
+	}
+}
+
+func TestParse_PullAPIRejectsDuplicateMaxLeaseBatch(t *testing.T) {
+	_, err := Parse([]byte(`pull_api { auth token "raw:t" max_lease_batch 100 max_lease_batch 200 }`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate pull_api max_lease_batch") {
+		t.Fatalf("expected duplicate max_lease_batch error, got %v", err)
+	}
+}
+
+func TestParse_AdminAPIRejectsMaxLeaseBatch(t *testing.T) {
+	_, err := Parse([]byte(`admin_api { max_lease_batch 100 }`))
+	if err == nil || !strings.Contains(err.Error(), "unknown admin_api directive") {
+		t.Fatalf("expected admin_api to reject max_lease_batch, got %v", err)
+	}
+}

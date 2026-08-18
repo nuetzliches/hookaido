@@ -908,7 +908,13 @@ func (s *Store) maybePrune(now time.Time) error {
 		return nil
 	}
 
-	s.pruneMu.Lock()
+	// TryLock, not Lock: the retention pass is opportunistic, so an operation
+	// that arrives while one is already running proceeds immediately instead of
+	// queueing behind the DELETEs. Blocking here would reintroduce the ingest
+	// stall from the other side of the same mutex.
+	if !s.pruneMu.TryLock() {
+		return nil
+	}
 	defer s.pruneMu.Unlock()
 
 	if !s.lastPrune.IsZero() && now.Sub(s.lastPrune) < s.pruneInterval {

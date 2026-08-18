@@ -244,6 +244,15 @@ queue_limits {
 }
 ```
 
+Depth is `queued + leased` on every backend. The memory and SQLite backends
+enforce the limit exactly. On Postgres, batch enqueues are serialized through an
+advisory lock and are exact, while single-item enqueues take a lock-free fast
+path close to the limit — with concurrent ingress across connections, depth can
+therefore exceed `max_depth` by a handful of items (at most one per pooled
+connection), and `drop_oldest` can under-drop by the same amount. Locking every
+single enqueue would cost roughly four times the ingress throughput, which is
+not a trade worth making for that margin.
+
 ### `queue_retention`
 
 ```hcl

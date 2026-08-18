@@ -24,14 +24,23 @@ type Option func(*Store)
 type Store struct {
 	db *sql.DB
 
-	mu                       sync.Mutex
-	nowFn                    func() time.Time
-	notify                   chan struct{}
-	pollInterval             time.Duration
-	maxDepth                 int
-	dropPolicy               string
-	retentionMaxAge          time.Duration
-	pruneInterval            time.Duration
+	mu              sync.Mutex
+	nowFn           func() time.Time
+	notify          chan struct{}
+	pollInterval    time.Duration
+	maxDepth        int
+	dropPolicy      string
+	retentionMaxAge time.Duration
+	pruneInterval   time.Duration
+
+	// pruneMu guards the retention pass. It is deliberately not s.mu: that
+	// mutex also guards now(), signal() and waitCh(), and every store
+	// operation starts with s.now(), so holding it across the retention
+	// DELETEs stalled all ingress, dequeues, SSE notify registrations and
+	// long-poll wakeups for the duration of the delete -- a whole-process
+	// ingest stall triggered by routine retention. The SQLite backend has
+	// avoided exactly this with its own pruneMu since the beginning.
+	pruneMu                  sync.Mutex
 	lastPrune                time.Time
 	deliveredRetentionMaxAge time.Duration
 	dlqRetentionMaxAge       time.Duration
@@ -358,15 +367,31 @@ func (s *Store) prepareEnqueue(env queue.Envelope, now time.Time) (preparedEnque
 // only once the queue is close enough to the limit that a concurrent enqueue
 // could cross it.
 //
-// The margin has to bound how much other in-flight enqueues can add between this
-// count and this insert. At most postgresMaxOpenConns transactions can be
-// executing at once, and each may be inserting a batch; assuming every one of
-// them is as large as this call is the conservative reading. So the lock-free
-// path requires room for want plus postgresMaxOpenConns further batches of the
-// same size. For single-item enqueues that is nine slots, so with the default
-// max_depth of 10000 the lock only engages above depth 9991; a 1000-item batch
-// engages it much earlier, which is fine because batches are rare and already
-// pay for a transaction.
+// Only single-item enqueues may skip the lock, and only with room to spare for
+// every other connection to do the same: postgresMaxOpenConns slots.
+//
+// The margin used to be derived from the caller's own size -- want*(1+conns) --
+// which is safe only while every concurrent enqueue is the same size. Mixed
+// sizes broke it, and by much more than one item: a 1000-item batch needs
+// 9000 free slots to skip the lock, so with max_depth 10000 and an empty queue
+// seven such batches could each pass the check against the same committed
+// count and insert 7000 rows over the limit. The single-item case in the issue
+// (#257) was the small end of the same hole.
+//
+// Restricting the lock-free path to single items removes that entirely: a
+// batch always serializes, which costs it one advisory lock it was already
+// paying for in every realistic configuration, and batches are rare. The hot
+// path is unaffected -- with the default max_depth of 10000 a single-item
+// enqueue still skips the lock below depth 9991, exactly as before.
+//
+// What remains is bounded and stated rather than promised away: at most
+// postgresMaxOpenConns-1 single-item enqueues can be in flight, uncommitted and
+// therefore invisible, while a locked transaction fills the queue to the limit.
+// So depth can exceed max_depth by up to that many items -- 7 with the current
+// pool size -- and with drop_oldest the mirror image under-drops by the same
+// amount. Closing it completely would mean taking the advisory lock on every
+// enqueue, which measured roughly a fourfold throughput loss on the ingress hot
+// path; that trade is not worth seven items.
 func (s *Store) enforceDepthLimitTx(ctx context.Context, tx *sql.Tx, want int) error {
 	if s.maxDepth <= 0 || want <= 0 {
 		return nil
@@ -376,8 +401,9 @@ func (s *Store) enforceDepthLimitTx(ctx context.Context, tx *sql.Tx, want int) e
 	if err != nil {
 		return err
 	}
-	if active+want*(1+postgresMaxOpenConns) <= s.maxDepth {
-		// Far enough from the limit that no interleaving can cross it.
+	if want == 1 && active+want+postgresMaxOpenConns <= s.maxDepth {
+		// Far enough from the limit that the other connections cannot cross it
+		// even if every one of them is enqueueing at the same moment.
 		return nil
 	}
 
@@ -2380,15 +2406,22 @@ WHERE id = $3
 }
 
 func (s *Store) maybePrune(now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.retentionMaxAge <= 0 && s.deliveredRetentionMaxAge <= 0 && s.dlqRetentionMaxAge <= 0 && s.dlqMaxDepth <= 0 {
 		return nil
 	}
 	if s.pruneInterval <= 0 {
 		return nil
 	}
+
+	// TryLock, not Lock: the retention pass is opportunistic, so an operation
+	// that arrives while one is already running proceeds immediately instead of
+	// queueing behind the DELETEs. Blocking here would reintroduce the ingest
+	// stall from the other side of the same mutex.
+	if !s.pruneMu.TryLock() {
+		return nil
+	}
+	defer s.pruneMu.Unlock()
+
 	if !s.lastPrune.IsZero() && now.Before(s.lastPrune.Add(s.pruneInterval)) {
 		return nil
 	}
@@ -2396,9 +2429,8 @@ func (s *Store) maybePrune(now time.Time) error {
 	ctx := context.Background()
 	if s.retentionMaxAge > 0 {
 		cutoff := now.Add(-s.retentionMaxAge).UTC()
-		if _, err := s.db.ExecContext(ctx, `
-DELETE FROM queue_items
-WHERE state = $1
+		if err := s.pruneBatched(ctx, `
+state = $1
   AND received_at <= $2
 `,
 			string(queue.StateQueued),
@@ -2417,9 +2449,8 @@ WHERE state = $1
 		// was delivered, so a slow route lost its delivery history immediately
 		// while a fast route kept the configured window. SQLite already keys
 		// this predicate on next_run_at.
-		if _, err := s.db.ExecContext(ctx, `
-DELETE FROM queue_items
-WHERE state = $1
+		if err := s.pruneBatched(ctx, `
+state = $1
   AND next_run_at <= $2
 `,
 			string(queue.StateDelivered),
@@ -2430,9 +2461,8 @@ WHERE state = $1
 	}
 	if s.dlqRetentionMaxAge > 0 {
 		cutoff := now.Add(-s.dlqRetentionMaxAge).UTC()
-		if _, err := s.db.ExecContext(ctx, `
-DELETE FROM queue_items
-WHERE state = $1
+		if err := s.pruneBatched(ctx, `
+state = $1
   AND received_at <= $2
 `,
 			string(queue.StateDead),
@@ -2442,7 +2472,8 @@ WHERE state = $1
 		}
 	}
 	if s.dlqMaxDepth > 0 {
-		if _, err := s.db.ExecContext(ctx, `
+		for {
+			res, err := s.db.ExecContext(ctx, `
 DELETE FROM queue_items
 WHERE id IN (
   SELECT id
@@ -2450,16 +2481,61 @@ WHERE id IN (
   WHERE state = $1
   ORDER BY received_at DESC, id DESC
   OFFSET $2
+  LIMIT $3
 )
 `,
-			string(queue.StateDead),
-			s.dlqMaxDepth,
-		); err != nil {
-			return err
+				string(queue.StateDead),
+				s.dlqMaxDepth,
+				postgresPruneBatch,
+			)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n < postgresPruneBatch {
+				break
+			}
 		}
 	}
 	s.lastPrune = now
 	return nil
+}
+
+// postgresPruneBatch bounds one retention DELETE. A single unbounded statement
+// over millions of eligible rows holds its row locks and its transaction for
+// the whole duration; deleting in bounded chunks lets concurrent enqueues and
+// dequeues interleave with retention instead of queueing behind it.
+const postgresPruneBatch = 5000
+
+// pruneBatched deletes every queue_items row matching where, in chunks of
+// postgresPruneBatch. where uses the same placeholders as args.
+func (s *Store) pruneBatched(ctx context.Context, where string, args ...any) error {
+	query := fmt.Sprintf(`
+DELETE FROM queue_items
+WHERE ctid IN (
+  SELECT ctid
+  FROM queue_items
+  WHERE %s
+  LIMIT %d
+)
+`, strings.TrimSpace(where), postgresPruneBatch)
+
+	for {
+		res, err := s.db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n < postgresPruneBatch {
+			return nil
+		}
+	}
 }
 
 func (s *Store) now() time.Time {

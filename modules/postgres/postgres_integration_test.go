@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -1358,5 +1359,152 @@ func TestStore_EnqueueBatchRejectsWhenItDoesNotFit(t *testing.T) {
 	}
 	if stats.Total != maxDepth-2 {
 		t.Fatalf("depth = %d, want the untouched %d", stats.Total, maxDepth-2)
+	}
+}
+
+// --- Retention prune (#257) ---
+
+// The retention pass used to run under s.mu, which also guards now(), signal()
+// and waitCh() -- and every store operation starts with s.now(). A prune with
+// millions of eligible rows therefore stalled all ingress, dequeues and SSE
+// notify registrations for the duration of the DELETE.
+func TestIntegration_PruneDoesNotBlockStoreOperations(t *testing.T) {
+	now := time.Now().UTC()
+	store := freshIntegrationStore(t,
+		WithNowFunc(func() time.Time { return now }),
+		WithRetention(time.Hour, time.Nanosecond),
+	)
+
+	for i := 0; i < 50; i++ {
+		enqueueTest(t, store, fmt.Sprintf("prune_%d", i), "/r", "pull")
+	}
+	now = now.Add(2 * time.Hour)
+
+	// Hold pruneMu the way a long-running retention DELETE would, then check
+	// that the hot path is still usable. Under the old locking this deadlocked
+	// on s.mu instead.
+	store.pruneMu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.Stats()
+		if err == nil {
+			err = store.Enqueue(queue.Envelope{ID: "during_prune", Route: "/r2", Target: "pull", Payload: []byte("{}")})
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("store operation during prune: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		store.pruneMu.Unlock()
+		t.Fatal("store operations block while a retention pass is running")
+	}
+	store.pruneMu.Unlock()
+}
+
+// The prune itself must still remove everything it is meant to, across more
+// rows than one batch holds.
+func TestIntegration_PruneDeletesEveryEligibleRowInBatches(t *testing.T) {
+	now := time.Now().UTC()
+	store := freshIntegrationStore(t,
+		WithNowFunc(func() time.Time { return now }),
+		WithRetention(time.Hour, time.Nanosecond),
+	)
+
+	const rows = 25
+	for i := 0; i < rows; i++ {
+		enqueueTest(t, store, fmt.Sprintf("old_%d", i), "/r", "pull")
+	}
+	now = now.Add(2 * time.Hour)
+
+	if err := store.maybePrune(now); err != nil {
+		t.Fatalf("maybePrune: %v", err)
+	}
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.ByState[queue.StateQueued] != 0 {
+		t.Fatalf("queued after prune = %d, want 0", stats.ByState[queue.StateQueued])
+	}
+}
+
+// A batch must never take the lock-free path: the margin was derived from the
+// caller's own size, which only holds while every concurrent enqueue is the
+// same size. With max_depth 10000 a 1000-item batch passed the check with an
+// empty queue, so several of them could each measure the same committed depth
+// and insert far past the limit.
+func TestIntegration_BatchEnqueueNeverSkipsTheDepthLock(t *testing.T) {
+	store := freshIntegrationStore(t, WithQueueLimits(10000, "reject"))
+
+	ctx := context.Background()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Hold the advisory lock in a separate session. enforceDepthLimitTx must
+	// block on it for a batch, and must not for a single item.
+	blocker, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, enqueueDepthLockKey); err != nil {
+		t.Fatalf("take advisory lock: %v", err)
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		if _, err := blocker.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, enqueueDepthLockKey); err != nil {
+			t.Errorf("release advisory lock: %v", err)
+		}
+	}
+	defer release()
+
+	single := make(chan error, 1)
+	go func() { single <- store.enforceDepthLimitTx(ctx, tx, 1) }()
+	select {
+	case err := <-single:
+		if err != nil {
+			t.Fatalf("single-item enqueue: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a single-item enqueue far from the limit must not wait for the advisory lock")
+	}
+
+	batchTx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin batch tx: %v", err)
+	}
+	defer func() { _ = batchTx.Rollback() }()
+
+	batch := make(chan error, 1)
+	go func() { batch <- store.enforceDepthLimitTx(ctx, batchTx, 1000) }()
+	select {
+	case err := <-batch:
+		t.Fatalf("a batch skipped the advisory lock (err=%v)", err)
+	case <-time.After(500 * time.Millisecond):
+		// Still blocked on the lock, which is the point.
+	}
+
+	// Release so the blocked statement finishes; otherwise the deferred
+	// rollback of batchTx waits on a query that never returns.
+	release()
+	select {
+	case err := <-batch:
+		if err != nil {
+			t.Fatalf("batch enqueue after acquiring the lock: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("batch never completed after the advisory lock was released")
 	}
 }

@@ -1814,3 +1814,217 @@ secrets {
 		t.Fatalf("expected a sealer to be installed after loadAuth: %v", err)
 	}
 }
+
+// A reload that fails must leave no part of the new config in force. loadAuth
+// used to Replace static pool versions before the per-route loops that can still
+// fail, so a config rotating a secret and adding a broken route applied the
+// rotation, reported failure, and left inbound webhooks verified against a
+// secret the senders had not adopted.
+func TestLoadAuth_FailedReloadDoesNotRotateSecrets(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "shared.key")
+	if err := os.WriteFile(keyPath, []byte("old-secret"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	good := fmt.Sprintf(`
+secrets {
+  secret "s1" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+}
+
+"/a" {
+  auth hmac secret_ref "s1"
+  deliver "https://a.example.com/x" { }
+}
+`, filepath.ToSlash(keyPath))
+
+	// Same rotation, plus a route whose inline secret file does not exist. The
+	// route loop runs after the pool planning, so this is the failure that used
+	// to arrive too late.
+	broken := fmt.Sprintf(`
+secrets {
+  secret "s1" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+}
+
+"/a" {
+  auth hmac secret_ref "s1"
+  deliver "https://a.example.com/x" { }
+}
+
+"/b" {
+  auth hmac "file:%s"
+  deliver "https://b.example.com/x" { }
+}
+`, filepath.ToSlash(keyPath), filepath.ToSlash(filepath.Join(dir, "missing.key")))
+
+	compiled := compileForReloadTest(t, good)
+	state := newRuntimeState(compiled)
+	if err := state.loadAuth(compiled); err != nil {
+		t.Fatalf("initial loadAuth: %v", err)
+	}
+
+	poolValue := func() string {
+		pool, ok := state.secretRegistry.Pool("s1")
+		if !ok {
+			t.Fatalf("expected pool s1 to be registered")
+		}
+		versions := pool.ValidAt(time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC))
+		if len(versions) != 1 {
+			t.Fatalf("expected exactly one valid version, got %d", len(versions))
+		}
+		return string(versions[0].Value)
+	}
+
+	if got := poolValue(); got != "old-secret" {
+		t.Fatalf("initial pool value = %q, want %q", got, "old-secret")
+	}
+
+	// Rotate the underlying file, then attempt the failing reload.
+	if err := os.WriteFile(keyPath, []byte("new-secret"), 0o600); err != nil {
+		t.Fatalf("rotate key: %v", err)
+	}
+	if err := state.loadAuth(compileForReloadTest(t, broken)); err == nil {
+		t.Fatalf("expected loadAuth to fail on the missing key file")
+	}
+
+	if got := poolValue(); got != "old-secret" {
+		t.Fatalf("failed reload rotated the live pool to %q; it must still hold %q", got, "old-secret")
+	}
+}
+
+func TestLoadAuth_FailedReloadDoesNotUnregisterDroppedPools(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "shared.key")
+	if err := os.WriteFile(keyPath, []byte("value"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	ref := filepath.ToSlash(keyPath)
+
+	good := fmt.Sprintf(`
+secrets {
+  secret "keep" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+  secret "drop" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+}
+
+"/a" {
+  auth hmac secret_ref "keep"
+  deliver "https://a.example.com/x" { }
+}
+`, ref, ref)
+
+	// "drop" is gone and a broken route is added, so the Unregister is planned
+	// but the reload fails.
+	broken := fmt.Sprintf(`
+secrets {
+  secret "keep" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+}
+
+"/a" {
+  auth hmac secret_ref "keep"
+  deliver "https://a.example.com/x" { }
+}
+
+"/b" {
+  auth hmac "file:%s"
+  deliver "https://b.example.com/x" { }
+}
+`, ref, filepath.ToSlash(filepath.Join(dir, "missing.key")))
+
+	compiled := compileForReloadTest(t, good)
+	state := newRuntimeState(compiled)
+	if err := state.loadAuth(compiled); err != nil {
+		t.Fatalf("initial loadAuth: %v", err)
+	}
+	if _, ok := state.secretRegistry.Pool("drop"); !ok {
+		t.Fatalf("expected pool drop to start registered")
+	}
+
+	if err := state.loadAuth(compileForReloadTest(t, broken)); err == nil {
+		t.Fatalf("expected loadAuth to fail on the missing key file")
+	}
+
+	if _, ok := state.secretRegistry.Pool("drop"); !ok {
+		t.Fatalf("failed reload unregistered pool drop; it must still be registered")
+	}
+}
+
+func TestLoadAuth_SucceedingReloadRotatesAndDropsPools(t *testing.T) {
+	// The counterpart: when nothing fails, the plan is applied in full.
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "shared.key")
+	if err := os.WriteFile(keyPath, []byte("old-secret"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	ref := filepath.ToSlash(keyPath)
+
+	before := fmt.Sprintf(`
+secrets {
+  secret "s1" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+  secret "drop" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+}
+
+"/a" {
+  auth hmac secret_ref "s1"
+  deliver "https://a.example.com/x" { }
+}
+`, ref, ref)
+	after := fmt.Sprintf(`
+secrets {
+  secret "s1" {
+    value "file:%s"
+    valid_from "2026-01-01T00:00:00Z"
+  }
+}
+
+"/a" {
+  auth hmac secret_ref "s1"
+  deliver "https://a.example.com/x" { }
+}
+`, ref)
+
+	compiled := compileForReloadTest(t, before)
+	state := newRuntimeState(compiled)
+	if err := state.loadAuth(compiled); err != nil {
+		t.Fatalf("initial loadAuth: %v", err)
+	}
+
+	if err := os.WriteFile(keyPath, []byte("new-secret"), 0o600); err != nil {
+		t.Fatalf("rotate key: %v", err)
+	}
+	if err := state.loadAuth(compileForReloadTest(t, after)); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	pool, ok := state.secretRegistry.Pool("s1")
+	if !ok {
+		t.Fatalf("expected pool s1 to stay registered")
+	}
+	versions := pool.ValidAt(time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC))
+	if len(versions) != 1 || string(versions[0].Value) != "new-secret" {
+		t.Fatalf("expected the rotation to be applied, got %#v", versions)
+	}
+	if _, ok := state.secretRegistry.Pool("drop"); ok {
+		t.Fatalf("expected pool drop to be unregistered")
+	}
+}

@@ -237,12 +237,25 @@ func run() int {
 		// Hot-reload dispatcher when delivery config changed.
 		if !dispatcherConfigEqual(prev, updated) {
 			if currentPush != nil {
-				const drainTimeout = 15 * time.Second
-				if drained := currentPush.Drain(drainTimeout); !drained {
-					runtimeLogger.Warn("dispatcher_drain_timeout_reload", slog.Duration("timeout", drainTimeout))
+				budget := currentPush.DrainBudget()
+				if currentPush.Drain(budget) {
+					runtimeLogger.Info("dispatcher_stopped_for_reload")
+				} else {
+					// Drain closed stopCh, and sync.Once makes that
+					// irreversible, so the old dispatcher is terminal whatever we
+					// do next: keeping it is not available, and refusing the swap
+					// would leave no dispatcher at all until the next reload or
+					// restart. Proceed -- but do not claim it stopped, which is
+					// what this branch used to log. Its workers no longer dequeue;
+					// each finishes at most the delivery already in flight, so the
+					// overlap is bounded by that and by per-route concurrency
+					// briefly exceeding the configured value.
+					runtimeLogger.Warn("dispatcher_drain_incomplete",
+						slog.Duration("budget", budget),
+						slog.String("effect", "old route workers are still finishing in-flight deliveries; per-route concurrency is briefly above the configured value"),
+					)
 				}
 				currentPush = nil
-				runtimeLogger.Info("dispatcher_stopped_for_reload")
 			}
 			if updated.HasDeliverRoutes {
 				currentPush = startPushDispatcher(updated, store, runtimeLogger, appMetrics)
@@ -336,11 +349,11 @@ func run() int {
 		if p == nil {
 			return
 		}
-		// Drain in-flight deliveries before exit. The timeout should
-		// cover the longest possible delivery (timeout + retry delay).
-		const drainTimeout = 15 * time.Second
-		if ok := p.Drain(drainTimeout); !ok {
-			runtimeLogger.Warn("dispatcher_drain_timeout", slog.Duration("timeout", drainTimeout))
+		// Drain in-flight deliveries before exit, on the same
+		// configuration-derived budget the reload path uses.
+		budget := p.DrainBudget()
+		if ok := p.Drain(budget); !ok {
+			runtimeLogger.Warn("dispatcher_drain_timeout", slog.Duration("budget", budget))
 		} else {
 			runtimeLogger.Info("dispatcher_drained")
 		}
@@ -1169,27 +1182,64 @@ func queueTrendSignalConfigFromCompiled(in config.TrendSignalsConfig) queue.Back
 	}
 }
 
+// pendingSecretPool is one planned mutation to the live secret registry, held
+// until every part of the reload has validated.
+type pendingSecretPool struct {
+	pool *secrets.Pool
+	// register is true when pool is not in the registry yet. Otherwise pool is
+	// already live and seed replaces its versions in place.
+	register bool
+	seed     []secrets.Version
+}
+
+// loadAuthTokens resolves a list of token refs, naming the block in any error.
+func loadAuthTokens(refs []string, label string) ([][]byte, error) {
+	out := make([][]byte, 0, len(refs))
+	for _, ref := range refs {
+		b, err := secrets.LoadRef(ref)
+		if err != nil {
+			return nil, fmt.Errorf("%s %q: %w", label, ref, err)
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// loadAuth resolves every secret the compiled config references and installs the
+// resulting authorizers.
+//
+// It is strictly two-phase, and that is load-bearing. It used to Replace static
+// pool versions and Unregister dropped pools *before* the per-route token and
+// HMAC loops, which can still fail — so a failed reload left part of the new
+// config in force while reloadConfig logged config_reload_failed and reported
+// that nothing had changed. secrets.Pool.Replace swaps the version slice under
+// the pool's own lock, and route HMAC closures hold *secrets.Pool pointers, so
+// the swap was live immediately.
+//
+// Concretely: an edit that both rotated an existing secret and added a route
+// whose key file was not yet deployed applied the rotation, failed on the new
+// route, and reported failure — while inbound webhooks were already being
+// verified against a secret the senders had not adopted. Every request answered
+// 401 with nothing in the log to explain it.
+//
+// So everything is resolved and validated into locals first, and only then
+// applied. The apply phase performs nothing that plan-phase validation has not
+// already shown can succeed.
 func (s *runtimeState) loadAuth(compiled config.Compiled) error {
-	tokens := make([][]byte, 0, len(compiled.PullAPI.AuthTokens))
-	for _, ref := range compiled.PullAPI.AuthTokens {
-		b, err := secrets.LoadRef(ref)
-		if err != nil {
-			return fmt.Errorf("pull_api auth token %q: %w", ref, err)
-		}
-		tokens = append(tokens, b)
+	// ---- Plan. Nothing below this line mutates live state. ----
+
+	tokens, err := loadAuthTokens(compiled.PullAPI.AuthTokens, "pull_api auth token")
+	if err != nil {
+		return err
+	}
+	adminTokens, err := loadAuthTokens(compiled.AdminAPI.AuthTokens, "admin_api auth token")
+	if err != nil {
+		return err
 	}
 
-	adminTokens := make([][]byte, 0, len(compiled.AdminAPI.AuthTokens))
-	for _, ref := range compiled.AdminAPI.AuthTokens {
-		b, err := secrets.LoadRef(ref)
-		if err != nil {
-			return fmt.Errorf("admin_api auth token %q: %w", ref, err)
-		}
-		adminTokens = append(adminTokens, b)
-	}
-
-	// Ensure a sealer exists if any secret is runtime=true. We attempt this before
-	// touching any pool so failures surface with a clear message.
+	// A sealer is required as soon as any secret is runtime=true. It is resolved
+	// here so a missing or malformed key fails the reload before anything is
+	// applied; installing it is deferred to the apply phase with everything else.
 	anyRuntime := false
 	for _, sc := range compiled.Secrets {
 		if sc.Runtime {
@@ -1197,13 +1247,10 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			break
 		}
 	}
-	// The sealer is read under s.mu by hydrateRuntimeSecrets and
-	// sealSecretValue, so both the check and the write take the lock. loadAuth
-	// runs on reload while the Admin API is already serving, so an unsynchronized
-	// write here raced every secret-persisting request.
 	s.mu.RLock()
 	haveSealer := s.sealer != nil
 	s.mu.RUnlock()
+	var pendingSealer *secrets.Sealer
 	if anyRuntime && !haveSealer {
 		keyRef := strings.TrimSpace(os.Getenv("HOOKAIDO_SECRET_ENCRYPTION_KEY"))
 		if keyRef == "" {
@@ -1213,37 +1260,36 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		if err != nil {
 			return fmt.Errorf("HOOKAIDO_SECRET_ENCRYPTION_KEY: %w", err)
 		}
-		s.mu.Lock()
-		// Re-check: another loadAuth may have installed one between the read
-		// above and this write.
-		if s.sealer == nil {
-			s.sealer = sealer
-		}
-		s.mu.Unlock()
+		pendingSealer = sealer
 	}
 
-	// Build per-name pools. For runtime=true pools, preserve any existing *Pool
-	// pointer across reload so in-flight route closures see live mutations.
+	// Plan the pool mutations, and build the pointer view that route HMAC
+	// closures will capture. A runtime pool that already exists keeps its
+	// pointer, so in-flight closures keep observing admin-API mutations; a static
+	// pool that already exists also keeps its pointer, so the Replace planned for
+	// it becomes visible to those closures once applied.
+	pools := make(map[string]*secrets.Pool, len(compiled.Secrets))
+	pending := make([]pendingSecretPool, 0, len(compiled.Secrets))
 	nextRuntimePools := make(map[string]struct{})
 	for id, sc := range compiled.Secrets {
 		if sc.Runtime {
 			nextRuntimePools[id] = struct{}{}
-			if _, ok := s.secretRegistry.Pool(id); ok {
-				// Already registered from a previous loadAuth call; versions are managed
-				// via admin API + hydrateRuntimeSecrets. Do not replace.
+			if existing, ok := s.secretRegistry.Pool(id); ok {
+				// Registered by an earlier loadAuth; versions are owned by the
+				// admin API plus hydrateRuntimeSecrets. Do not replace them.
+				pools[id] = existing
 				continue
 			}
 			pool, err := secrets.NewPool(id, true, sc.MaxVersions, nil)
 			if err != nil {
 				return fmt.Errorf("secret %q: %w", id, err)
 			}
-			if err := s.secretRegistry.Register(pool); err != nil {
-				return fmt.Errorf("register runtime pool %q: %w", id, err)
-			}
+			pools[id] = pool
+			pending = append(pending, pendingSecretPool{pool: pool, register: true})
 			continue
 		}
 
-		// Non-runtime (static) pool: single seed version from ValueRef.
+		// Non-runtime (static) pool: a single seed version from ValueRef.
 		b, err := secrets.LoadRef(sc.ValueRef)
 		if err != nil {
 			return fmt.Errorf("secret %q value %q: %w", id, sc.ValueRef, err)
@@ -1254,27 +1300,29 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			ValidFrom:  sc.ValidFrom,
 			ValidUntil: sc.ValidUntil,
 		}}
-		if existing, ok := s.secretRegistry.Pool(id); ok {
-			if err := existing.Replace(seed); err != nil {
-				return fmt.Errorf("replace static pool %q: %w", id, err)
-			}
-		} else {
-			pool, err := secrets.NewPool(id, false, 0, seed)
-			if err != nil {
-				return fmt.Errorf("secret %q: %w", id, err)
-			}
-			if err := s.secretRegistry.Register(pool); err != nil {
-				return fmt.Errorf("register static pool %q: %w", id, err)
-			}
+		// NewPool is Replace on a fresh pool, so constructing one here validates
+		// the seed against exactly the checks Replace applies. A single version
+		// cannot exceed any version cap, so the Replace planned below cannot fail.
+		pool, err := secrets.NewPool(id, false, 0, seed)
+		if err != nil {
+			return fmt.Errorf("secret %q: %w", id, err)
 		}
+		if existing, ok := s.secretRegistry.Pool(id); ok {
+			pools[id] = existing
+			pending = append(pending, pendingSecretPool{pool: existing, seed: seed})
+			continue
+		}
+		pools[id] = pool
+		pending = append(pending, pendingSecretPool{pool: pool, register: true})
 	}
 
-	// Remove pools that are no longer declared in config. Runtime pools may
-	// still be referenced by captured closures, but if the config no longer
-	// lists them they should not be mutable from admin API anymore.
+	// Pools no longer declared in config. Runtime pools may still be referenced
+	// by captured closures, but once the config drops them they must not stay
+	// mutable from the admin API.
+	var dropped []string
 	for _, name := range s.secretRegistry.Names() {
 		if _, ok := compiled.Secrets[name]; !ok {
-			s.secretRegistry.Unregister(name)
+			dropped = append(dropped, name)
 		}
 	}
 
@@ -1284,13 +1332,9 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		if rt.Pull == nil || len(rt.Pull.AuthTokens) == 0 {
 			continue
 		}
-		routeTokens := make([][]byte, 0, len(rt.Pull.AuthTokens))
-		for _, ref := range rt.Pull.AuthTokens {
-			b, err := secrets.LoadRef(ref)
-			if err != nil {
-				return fmt.Errorf("route %q pull auth token %q: %w", rt.Path, ref, err)
-			}
-			routeTokens = append(routeTokens, b)
+		routeTokens, err := loadAuthTokens(rt.Pull.AuthTokens, fmt.Sprintf("route %q pull auth token", rt.Path))
+		if err != nil {
+			return err
 		}
 		pullByRoute[rt.Path] = pullapi.BearerTokenAuthorizer(routeTokens)
 		workerByRoute[rt.Path] = workerapi.BearerTokenAuthorizer(routeTokens)
@@ -1334,18 +1378,21 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			secs = append(secs, b)
 		}
 
-		var pools []*secrets.Pool
+		var routePools []*secrets.Pool
 		seenRefs := make(map[string]struct{})
 		for _, ref := range rt.AuthHMACSecretRefs {
 			if _, ok := seenRefs[ref]; ok {
 				continue
 			}
 			seenRefs[ref] = struct{}{}
-			pool, ok := s.secretRegistry.Pool(ref)
+			// Resolved against the planned view rather than the registry, so a
+			// ref to a pool this reload introduces resolves without having to
+			// register it first. A ref to an undeclared secret still fails.
+			pool, ok := pools[ref]
 			if !ok {
 				return fmt.Errorf("route %q auth hmac secret_ref %q not found", rt.Path, ref)
 			}
-			pools = append(pools, pool)
+			routePools = append(routePools, pool)
 		}
 
 		auth := ingress.NewHMACAuth(secs)
@@ -1362,8 +1409,8 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		if rt.AuthHMACTolerance > 0 {
 			auth.Tolerance = rt.AuthHMACTolerance
 		}
-		if len(pools) > 0 {
-			capturedPools := pools
+		if len(routePools) > 0 {
+			capturedPools := routePools
 			capturedSecs := secs
 			auth.SelectSecrets = func(at time.Time) [][]byte {
 				out := make([][]byte, 0, 4)
@@ -1381,11 +1428,41 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 		hmacByRoute[rt.Path] = auth
 	}
 
-	s.mu.Lock()
-	s.runtimePools = nextRuntimePools
-	s.mu.Unlock()
+	// ---- Apply. Every step below was shown above to succeed. ----
+
+	if pendingSealer != nil {
+		s.mu.Lock()
+		// Re-check: another loadAuth may have installed one meanwhile. Two
+		// callers must not install different sealers, or a value sealed by one
+		// would not open with the other.
+		if s.sealer == nil {
+			s.sealer = pendingSealer
+		}
+		s.mu.Unlock()
+	}
+
+	for _, p := range pending {
+		if p.register {
+			if err := s.secretRegistry.Register(p.pool); err != nil {
+				// Unreachable: only pools absent from the registry are planned
+				// for registration, and loadAuth runs under reloadMu while
+				// nothing else registers pools.
+				return fmt.Errorf("register pool %q: %w", p.pool.Name(), err)
+			}
+			continue
+		}
+		if err := p.pool.Replace(p.seed); err != nil {
+			// Unreachable: the seed already passed the same validation through
+			// NewPool, and one version cannot exceed any cap.
+			return fmt.Errorf("replace static pool %q: %w", p.pool.Name(), err)
+		}
+	}
+	for _, name := range dropped {
+		s.secretRegistry.Unregister(name)
+	}
 
 	s.mu.Lock()
+	s.runtimePools = nextRuntimePools
 	s.pullAuthorize = pullapi.BearerTokenAuthorizer(tokens)
 	s.workerAuthorize = workerapi.BearerTokenAuthorizer(tokens)
 	s.adminAuthorize = admin.BearerTokenAuthorizer(adminTokens)

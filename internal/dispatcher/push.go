@@ -85,7 +85,7 @@ func (d *PushDispatcher) Start() {
 	rand.Seed(time.Now().UnixNano())
 	maxWait := d.MaxWait
 	if maxWait <= 0 {
-		maxWait = 2 * time.Second
+		maxWait = defaultDispatcherMaxWait
 	}
 	leaseSlack := d.LeaseSlack
 	if leaseSlack <= 0 {
@@ -130,7 +130,7 @@ func routeLeaseTTL(targets []TargetConfig, leaseSlack time.Duration, dequeueBatc
 	for _, target := range targets {
 		timeout := target.Timeout
 		if timeout <= 0 {
-			timeout = 10 * time.Second
+			timeout = defaultTargetTimeout
 		}
 		if timeout > maxTimeout {
 			maxTimeout = timeout
@@ -324,6 +324,70 @@ func (d *PushDispatcher) requeueLeases(logger *slog.Logger, items []queue.Envelo
 // Drain signals all goroutines to stop accepting new work and waits for
 // in-flight deliveries to complete. Returns true if all goroutines finished
 // before the timeout, false if the timeout expired.
+const (
+	// defaultDispatcherMaxWait is the dequeue long-poll used when MaxWait is
+	// unset, and therefore the longest an idle worker takes to notice stopCh.
+	defaultDispatcherMaxWait = 2 * time.Second
+	// defaultTargetTimeout is the per-attempt timeout used when a target sets
+	// none, and therefore the longest a busy worker takes to notice stopCh.
+	defaultTargetTimeout = 10 * time.Second
+
+	// drainBudgetFloor keeps the previously hardcoded 15s as a minimum. Waiting
+	// longer costs nothing when the workers finish earlier, because Drain returns
+	// as soon as they do.
+	drainBudgetFloor = 15 * time.Second
+	// drainBudgetCeiling bounds how long a reload may wait. The caller holds
+	// reloadMu throughout, which also blocks Admin API managed-endpoint
+	// mutations, and neither Store.Dequeue nor the lease mutations take a
+	// context -- so a wedged queue backend would otherwise wait forever.
+	drainBudgetCeiling = 60 * time.Second
+	// drainMutationSlack covers the lease mutations that follow the last
+	// delivery of a batch.
+	drainMutationSlack = 5 * time.Second
+)
+
+// DrainBudget is how long Drain should be given before the wait is treated as
+// pathological rather than merely slow.
+//
+// Once stopCh closes, a route worker leaves at the next boundary: one blocked in
+// Dequeue returns within MaxWait and then requeues its batch untouched, and one
+// already mid-batch finishes the delivery in flight -- bounded by that target's
+// timeout -- before requeueing the tail. Neither dequeues again. So the honest
+// bound is the larger of those two waits plus room for the lease mutations.
+//
+// Deriving it from the dispatcher's own configuration matters in both
+// directions: a fixed 15s was too short for a route with `timeout 60s`, where a
+// perfectly legitimate in-flight delivery looked like a stuck worker, and longer
+// than needed for a route with short timeouts.
+func (d *PushDispatcher) DrainBudget() time.Duration {
+	if d == nil {
+		return drainBudgetFloor
+	}
+	longest := d.MaxWait
+	if longest <= 0 {
+		longest = defaultDispatcherMaxWait
+	}
+	for _, rt := range d.Routes {
+		for _, target := range rt.Targets {
+			timeout := target.Timeout
+			if timeout <= 0 {
+				timeout = defaultTargetTimeout
+			}
+			if timeout > longest {
+				longest = timeout
+			}
+		}
+	}
+	budget := longest + drainMutationSlack
+	if budget < drainBudgetFloor {
+		return drainBudgetFloor
+	}
+	if budget > drainBudgetCeiling {
+		return drainBudgetCeiling
+	}
+	return budget
+}
+
 func (d *PushDispatcher) Drain(timeout time.Duration) bool {
 	if d.stopCh == nil {
 		return true
@@ -378,7 +442,7 @@ func (d *PushDispatcher) classifyDelivery(logger *slog.Logger, env queue.Envelop
 
 	timeout := target.Timeout
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = defaultTargetTimeout
 	}
 	reqCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	res := d.Deliverer.Deliver(reqCtx, delivery)

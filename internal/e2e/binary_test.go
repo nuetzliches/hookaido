@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -502,4 +503,152 @@ func TestBinaryE2E_RejectInvalidConfig(t *testing.T) {
 	if exitErr.ExitCode() == 0 {
 		t.Fatal("expected non-zero exit code for invalid config")
 	}
+}
+
+// The push dispatcher is drained on SIGTERM rather than killed mid-delivery.
+//
+// The drain defer used to be registered inside `if compiled.HasDeliverRoutes`,
+// so it existed only for a dispatcher the initial config asked for. It is now
+// registered unconditionally; this pins that the ordinary case still drains, and
+// that it still runs before closeStore (LIFO on the defer stack), so no route
+// goroutine is left calling Dequeue/Ack against a closed store.
+func TestBinaryE2E_DispatcherIsDrainedOnShutdown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGTERM is not supported on Windows")
+	}
+	bin := ensureBinary(t)
+
+	ingressPort := freePort(t)
+	adminPort := freePort(t)
+	cfg := fmt.Sprintf(`
+ingress { listen "127.0.0.1:%d" }
+admin_api { listen "127.0.0.1:%d" }
+
+"/hooks" {
+  deliver "https://ci.internal.example/deploy" { timeout 2s }
+}
+`, ingressPort, adminPort)
+
+	cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	logs, cmd := startBinaryCapturingLogs(t, bin, cfgPath, adminPort)
+	waitForLogLine(t, logs, "dispatcher_started", 10*time.Second)
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+	_ = cmd.Wait()
+
+	out := logs.String()
+	if !strings.Contains(out, "dispatcher_drained") {
+		t.Fatalf("expected the dispatcher to be drained on shutdown, got logs:\n%s", out)
+	}
+}
+
+// Toggling HasDeliverRoutes is refused as restart-required, which is what makes
+// a reload unable to create the process's first dispatcher. The shutdown drain
+// no longer depends on that invariant, but the invariant is load-bearing for the
+// reload contract itself, so it is pinned here rather than left implicit.
+func TestBinaryE2E_AddingDeliverRoutesRequiresRestart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGHUP is not supported on Windows")
+	}
+	bin := ensureBinary(t)
+
+	ingressPort := freePort(t)
+	pullPort := freePort(t)
+	adminPort := freePort(t)
+
+	pullOnly := fmt.Sprintf(`
+ingress { listen "127.0.0.1:%d" }
+pull_api {
+  listen "127.0.0.1:%d"
+  auth token "raw:%s"
+}
+admin_api { listen "127.0.0.1:%d" }
+
+"/hooks" {
+  pull { path "/e" }
+}
+`, ingressPort, pullPort, binaryTestPullToken, adminPort)
+
+	withDeliver := pullOnly + `
+outbound "/jobs/deploy" {
+  deliver "https://ci.internal.example/deploy" { timeout 2s }
+}
+`
+
+	cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(pullOnly), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	logs, cmd := startBinaryCapturingLogs(t, bin, cfgPath, adminPort)
+
+	if err := os.WriteFile(cfgPath, []byte(withDeliver), 0o644); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatalf("send SIGHUP: %v", err)
+	}
+	waitForLogLine(t, logs, "config_reloaded_restart_required", 10*time.Second)
+
+	if strings.Contains(logs.String(), "dispatcher_reloaded") {
+		t.Fatalf("expected no dispatcher to be created by the refused reload, got logs:\n%s", logs.String())
+	}
+}
+
+// startBinaryCapturingLogs runs the binary against cfgPath, waits for its admin
+// health endpoint, and returns a buffer the test can read while it is running.
+func startBinaryCapturingLogs(t *testing.T, bin, cfgPath string, adminPort int) (*syncBuffer, *exec.Cmd) {
+	t.Helper()
+	logs := &syncBuffer{}
+	cmd := exec.Command(bin, "run", "--config", cfgPath)
+	cmd.Stdout = logs
+	cmd.Stderr = logs
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start hookaido: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+	waitForHealth(t, fmt.Sprintf("http://127.0.0.1:%d/healthz", adminPort), 10*time.Second)
+	return logs, cmd
+}
+
+// syncBuffer collects the subprocess's stdout and stderr, which are written from
+// separate goroutines while the test reads the accumulated output.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func waitForLogLine(t *testing.T, logs *syncBuffer, needle string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logs.String(), needle) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("log line %q not seen within %v, got:\n%s", needle, timeout, logs.String())
 }

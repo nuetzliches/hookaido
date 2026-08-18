@@ -291,6 +291,26 @@ dlq_retention {
 }
 ```
 
+### `attempts_retention`
+
+```hcl
+attempts_retention {
+  max_age 7d        # prune delivery attempts older than this
+  max_rows 200000   # cap the attempt history
+}
+```
+
+Every delivery attempt is recorded (see [Delivery → Delivery Attempts](delivery.md#delivery-attempts)).
+That history is append-only, so both limits default to finite values rather than
+unbounded growth: without them a push deployment doing 10 attempts/s adds ~860k
+records a day forever — the SQLite file grows until the disk fills, and the
+memory backend grows until the process is killed, invisible to the
+memory-pressure guard, which counts only queued payloads.
+
+Pruning uses the same `queue_retention.prune_interval` cadence; the memory
+backend additionally enforces `max_rows` as it writes. Set `max_age off` and
+`max_rows off` to keep attempts forever, which is what earlier versions did.
+
 ### `secrets`
 
 Define named secrets with validity windows for key rotation:
@@ -687,6 +707,8 @@ Placeholders resolve within a single value (no cross-token expansion).
 | `queue_retention.prune_interval` | `5m`                                          |
 | `dlq_retention.max_age`          | `30d`                                         |
 | `dlq_retention.max_depth`        | `10000`                                       |
+| `attempts_retention.max_age`     | `7d`                                          |
+| `attempts_retention.max_rows`    | `200000`                                      |
 | `deliver.retry`                  | `exponential max 8 base 2s cap 2m jitter 0.2` |
 | `deliver.timeout`                | `10s`                                         |
 | `deliver.concurrency`            | `20`                                          |

@@ -71,6 +71,8 @@ const (
 	defaultDeliveredRetentionMaxAge       = 0
 	defaultDLQRetentionMaxAge             = 30 * 24 * time.Hour
 	defaultDLQRetentionMaxDepth           = 10000
+	defaultAttemptsRetentionMaxAge        = 7 * 24 * time.Hour
+	defaultAttemptsRetentionMaxRows       = 200000
 	defaultEgressHTTPSOnly                = true
 	defaultEgressRedirects                = false
 	defaultEgressDNSRebindProtection      = true
@@ -112,6 +114,7 @@ type Compiled struct {
 	QueueRetention     QueueRetentionConfig
 	DeliveredRetention DeliveredRetentionConfig
 	DLQRetention       DLQRetentionConfig
+	AttemptsRetention  AttemptsRetentionConfig
 	QueueLimits        QueueLimitsConfig
 	// SharedListener is set when pull_api and admin_api co-listen on the same
 	// address (prefix-muxed). Kept for backward-compatible semantics.
@@ -462,6 +465,15 @@ type DLQRetentionConfig struct {
 	Enabled  bool
 }
 
+// AttemptsRetentionConfig bounds delivery-attempt history. Attempts are written
+// once per delivery attempt and were previously never removed by any backend,
+// so the defaults are deliberately finite.
+type AttemptsRetentionConfig struct {
+	MaxAge  time.Duration
+	MaxRows int
+	Enabled bool
+}
+
 // Compile validates the config and returns a runtime-ready, normalized version
 // with defaults applied.
 func Compile(cfg *Config) (Compiled, ValidationResult) {
@@ -516,6 +528,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 	qr, qrRes := compileQueueRetention(cfg.QueueRetention)
 	dr, drRes := compileDeliveredRetention(cfg.DeliveredRetention)
 	dlq, dlqRes := compileDLQRetention(cfg.DLQRetention)
+	attempts, attemptsRes := compileAttemptsRetention(cfg.AttemptsRetention)
 	ql, qlRes := compileQueueLimits(cfg.QueueLimits)
 	res.Errors = append(res.Errors, ingRes.Errors...)
 	res.Errors = append(res.Errors, defsRes.Errors...)
@@ -526,6 +539,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 	res.Errors = append(res.Errors, qrRes.Errors...)
 	res.Errors = append(res.Errors, drRes.Errors...)
 	res.Errors = append(res.Errors, dlqRes.Errors...)
+	res.Errors = append(res.Errors, attemptsRes.Errors...)
 	res.Errors = append(res.Errors, qlRes.Errors...)
 	res.Warnings = append(res.Warnings, ingRes.Warnings...)
 	res.Warnings = append(res.Warnings, defsRes.Warnings...)
@@ -536,6 +550,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 	res.Warnings = append(res.Warnings, qrRes.Warnings...)
 	res.Warnings = append(res.Warnings, drRes.Warnings...)
 	res.Warnings = append(res.Warnings, dlqRes.Warnings...)
+	res.Warnings = append(res.Warnings, attemptsRes.Warnings...)
 	res.Warnings = append(res.Warnings, qlRes.Warnings...)
 
 	compiled := Compiled{
@@ -549,6 +564,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 		QueueRetention:     qr,
 		DeliveredRetention: dr,
 		DLQRetention:       dlq,
+		AttemptsRetention:  attempts,
 		QueueLimits:        ql,
 	}
 
@@ -1404,7 +1420,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 		}
 	}
 
-	if compiled.QueueRetention.PruneInterval <= 0 && (compiled.QueueRetention.Enabled || compiled.DeliveredRetention.Enabled || compiled.DLQRetention.Enabled) {
+	if compiled.QueueRetention.PruneInterval <= 0 && (compiled.QueueRetention.Enabled || compiled.DeliveredRetention.Enabled || compiled.DLQRetention.Enabled || compiled.AttemptsRetention.Enabled) {
 		res.Errors = append(res.Errors, "queue_retention.prune_interval must be a positive duration when retention is enabled")
 	}
 
@@ -2569,6 +2585,52 @@ func compileDLQRetention(in *DLQRetentionBlock) (DLQRetentionConfig, ValidationR
 	}
 
 	out.Enabled = out.MaxAge > 0 || out.MaxDepth > 0
+	return out, res
+}
+
+// compileAttemptsRetention mirrors compileDLQRetention: `off` (or 0) disables a
+// dimension, and the block as a whole is disabled only when both are off.
+func compileAttemptsRetention(in *AttemptsRetentionBlock) (AttemptsRetentionConfig, ValidationResult) {
+	var res ValidationResult
+	out := AttemptsRetentionConfig{
+		MaxAge:  defaultAttemptsRetentionMaxAge,
+		MaxRows: defaultAttemptsRetentionMaxRows,
+		Enabled: true,
+	}
+
+	if in == nil {
+		return out, res
+	}
+
+	if in.MaxAgeSet {
+		raw := strings.TrimSpace(resolveValue(in.MaxAge, "attempts_retention.max_age", &res))
+		d, off, err := parseDurationValue(raw)
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("attempts_retention.max_age %s", err.Error()))
+		} else if off || d == 0 {
+			out.MaxAge = 0
+		} else {
+			out.MaxAge = d
+		}
+	}
+
+	if in.MaxRowsSet {
+		raw := strings.TrimSpace(resolveValue(in.MaxRows, "attempts_retention.max_rows", &res))
+		if raw == "" {
+			res.Errors = append(res.Errors, "attempts_retention.max_rows must not be empty")
+		} else if strings.EqualFold(raw, "off") {
+			out.MaxRows = 0
+		} else {
+			v, err := strconv.Atoi(raw)
+			if err != nil || v < 0 {
+				res.Errors = append(res.Errors, "attempts_retention.max_rows must be a non-negative integer")
+			} else {
+				out.MaxRows = v
+			}
+		}
+	}
+
+	out.Enabled = out.MaxAge > 0 || out.MaxRows > 0
 	return out, res
 }
 

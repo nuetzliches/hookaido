@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- **`attempts_retention { max_age, max_rows }`** bounds delivery-attempt history, which was append-only in every backend — nothing anywhere deleted or capped it. A push deployment doing 10 attempts/s added ~860k records a day forever: the SQLite file and its indexes grew until the disk filled and enqueue started failing, and the memory backend grew until the process was OOM-killed, invisible to the memory-pressure guard because that counts only queued payloads. Defaults are deliberately finite (`max_age 7d`, `max_rows 200000`); set both `off` to restore the previous unbounded behaviour. Pruning uses the existing `queue_retention.prune_interval` cadence, and the memory backend enforces `max_rows` as it writes.
+
 ### Fixed
 
 - **Postgres: routine retention no longer stalls ingest.** `maybePrune` held the store mutex — which also guards `now()`, the notify channel and every store operation's first step — across up to four unbounded `DELETE` statements. A retention pass with millions of eligible rows blocked all enqueues, dequeues, SSE notify registrations and long-poll wakeups for the duration of the delete. Pruning now runs under its own mutex, as it does on SQLite, and deletes in bounded chunks. On both backends a store operation that arrives while a prune is running now proceeds instead of queueing behind it.

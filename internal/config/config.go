@@ -28,6 +28,7 @@ type Config struct {
 	QueueRetention     *QueueRetentionBlock
 	DeliveredRetention *DeliveredRetentionBlock
 	DLQRetention       *DLQRetentionBlock
+	AttemptsRetention  *AttemptsRetentionBlock
 	QueueLimits        *QueueLimitsBlock
 
 	NamedMatchers []NamedMatcher
@@ -306,6 +307,16 @@ type DeliveredRetentionBlock struct {
 	MaxAge       string
 	MaxAgeQuoted bool
 	MaxAgeSet    bool
+}
+
+// AttemptsRetentionBlock configures how long delivery-attempt history is kept.
+type AttemptsRetentionBlock struct {
+	MaxAge        string
+	MaxAgeQuoted  bool
+	MaxAgeSet     bool
+	MaxRows       string
+	MaxRowsQuoted bool
+	MaxRowsSet    bool
 }
 
 type DLQRetentionBlock struct {

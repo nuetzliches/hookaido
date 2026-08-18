@@ -5,7 +5,7 @@
 # Supported top-level blocks:
 #   ingress, pull_api, admin_api, vars, secrets, defaults,
 #   observability, queue_limits, queue_retention, delivered_retention,
-#   dlq_retention, named matchers (@name { ... })
+#   dlq_retention, attempts_retention, named matchers (@name { ... })
 #
 # Route directives:
 #   match, rate_limit, auth (basic | hmac | forward), queue,
@@ -77,6 +77,12 @@ pull_api {
 # dlq_retention {
 #   max_age 30d
 #   max_depth 10000
+# }
+
+# Delivery-attempt history retention (optional; defaults shown)
+# attempts_retention {
+#   max_age 7d
+#   max_rows 200000
 # }
 
 # Queue limits (optional; defaults shown)

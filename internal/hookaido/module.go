@@ -56,6 +56,10 @@ type QueueBackendConfig struct {
 	// DLQ retention.
 	DLQRetentionMaxAge   time.Duration
 	DLQRetentionMaxDepth int
+
+	// Delivery-attempt history retention.
+	AttemptsRetentionMaxAge  time.Duration
+	AttemptsRetentionMaxRows int
 }
 
 // TracingProvider sets up distributed tracing and provides HTTP instrumentation.

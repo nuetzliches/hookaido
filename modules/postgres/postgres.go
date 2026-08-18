@@ -45,6 +45,8 @@ type Store struct {
 	deliveredRetentionMaxAge time.Duration
 	dlqRetentionMaxAge       time.Duration
 	dlqMaxDepth              int
+	attemptsRetentionMaxAge  time.Duration
+	attemptsMaxRows          int
 
 	metrics *postgresRuntimeMetrics
 }
@@ -202,6 +204,23 @@ func WithDeliveredRetention(maxAge time.Duration) Option {
 			s.deliveredRetentionMaxAge = maxAge
 		} else {
 			s.deliveredRetentionMaxAge = 0
+		}
+	}
+}
+
+// WithAttemptsRetention bounds delivery-attempt history by age and by row
+// count. Both dimensions are optional; zero disables that half.
+func WithAttemptsRetention(maxAge time.Duration, maxRows int) Option {
+	return func(s *Store) {
+		if maxAge > 0 {
+			s.attemptsRetentionMaxAge = maxAge
+		} else {
+			s.attemptsRetentionMaxAge = 0
+		}
+		if maxRows > 0 {
+			s.attemptsMaxRows = maxRows
+		} else {
+			s.attemptsMaxRows = 0
 		}
 	}
 }
@@ -2406,7 +2425,8 @@ WHERE id = $3
 }
 
 func (s *Store) maybePrune(now time.Time) error {
-	if s.retentionMaxAge <= 0 && s.deliveredRetentionMaxAge <= 0 && s.dlqRetentionMaxAge <= 0 && s.dlqMaxDepth <= 0 {
+	if s.retentionMaxAge <= 0 && s.deliveredRetentionMaxAge <= 0 && s.dlqRetentionMaxAge <= 0 && s.dlqMaxDepth <= 0 &&
+		s.attemptsRetentionMaxAge <= 0 && s.attemptsMaxRows <= 0 {
 		return nil
 	}
 	if s.pruneInterval <= 0 {
@@ -2500,6 +2520,41 @@ WHERE id IN (
 			}
 		}
 	}
+	// Delivery-attempt history was append-only: nothing in any backend ever
+	// deleted from delivery_attempts, so a push deployment doing 10 attempts/s
+	// added ~860k rows a day forever.
+	if s.attemptsRetentionMaxAge > 0 {
+		cutoff := now.Add(-s.attemptsRetentionMaxAge).UTC()
+		if err := s.pruneAttemptsBatched(ctx, `created_at <= $1`, cutoff); err != nil {
+			return err
+		}
+	}
+
+	if s.attemptsMaxRows > 0 {
+		for {
+			res, err := s.db.ExecContext(ctx, `
+DELETE FROM delivery_attempts
+WHERE ctid IN (
+  SELECT ctid
+  FROM delivery_attempts
+  ORDER BY created_at DESC, id DESC
+  OFFSET $1
+  LIMIT $2
+)
+`, s.attemptsMaxRows, postgresPruneBatch)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n < postgresPruneBatch {
+				break
+			}
+		}
+	}
+
 	s.lastPrune = now
 	return nil
 }
@@ -2518,6 +2573,33 @@ DELETE FROM queue_items
 WHERE ctid IN (
   SELECT ctid
   FROM queue_items
+  WHERE %s
+  LIMIT %d
+)
+`, strings.TrimSpace(where), postgresPruneBatch)
+
+	for {
+		res, err := s.db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n < postgresPruneBatch {
+			return nil
+		}
+	}
+}
+
+// pruneAttemptsBatched is pruneBatched for the delivery_attempts table.
+func (s *Store) pruneAttemptsBatched(ctx context.Context, where string, args ...any) error {
+	query := fmt.Sprintf(`
+DELETE FROM delivery_attempts
+WHERE ctid IN (
+  SELECT ctid
+  FROM delivery_attempts
   WHERE %s
   LIMIT %d
 )
@@ -2751,6 +2833,7 @@ func (backend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() error, er
 		WithRetention(cfg.RetentionMaxAge, cfg.RetentionPruneInterval),
 		WithDeliveredRetention(cfg.DeliveredRetentionMaxAge),
 		WithDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
+		WithAttemptsRetention(cfg.AttemptsRetentionMaxAge, cfg.AttemptsRetentionMaxRows),
 	)
 	if err != nil {
 		return nil, nil, err

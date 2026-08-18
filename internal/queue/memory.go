@@ -45,6 +45,8 @@ type MemoryStore struct {
 	deliveredRetentionMaxAge time.Duration
 	dlqRetentionMaxAge       time.Duration
 	dlqMaxDepth              int
+	attemptsRetentionMaxAge  time.Duration
+	attemptsMaxRows          int
 	evictionsTotalByReason   map[string]int64
 	memoryPressureRejects    int64
 	memoryPressureItemLimit  int
@@ -180,6 +182,26 @@ func WithDLQRetention(maxAge time.Duration, maxDepth int) MemoryOption {
 			s.dlqMaxDepth = maxDepth
 		} else {
 			s.dlqMaxDepth = 0
+		}
+	}
+}
+
+// WithAttemptsRetention bounds the delivery-attempt history. Attempts were
+// previously appended forever with no cap and no retention: a long-running
+// instance delivering millions of webhooks accumulated millions of records --
+// hundreds of MB -- and the memory-pressure guard counts only envelope bytes,
+// so the growth was invisible to the very mechanism meant to bound memory.
+func WithAttemptsRetention(maxAge time.Duration, maxRows int) MemoryOption {
+	return func(s *MemoryStore) {
+		if maxAge > 0 {
+			s.attemptsRetentionMaxAge = maxAge
+		} else {
+			s.attemptsRetentionMaxAge = 0
+		}
+		if maxRows > 0 {
+			s.attemptsMaxRows = maxRows
+		} else {
+			s.attemptsMaxRows = 0
 		}
 	}
 }
@@ -625,7 +647,7 @@ func (s *MemoryStore) maybePruneLocked(now time.Time) {
 	if s.pruneInterval <= 0 {
 		return
 	}
-	if s.retentionMaxAge <= 0 && s.deliveredRetentionMaxAge <= 0 && s.dlqRetentionMaxAge <= 0 && s.dlqMaxDepth <= 0 {
+	if s.retentionMaxAge <= 0 && s.deliveredRetentionMaxAge <= 0 && s.dlqRetentionMaxAge <= 0 && s.dlqMaxDepth <= 0 && s.attemptsRetentionMaxAge <= 0 {
 		return
 	}
 	if !s.lastPrune.IsZero() && now.Sub(s.lastPrune) < s.pruneInterval {
@@ -704,6 +726,19 @@ func (s *MemoryStore) maybePruneLocked(now time.Time) {
 			for i := 0; i < excess; i++ {
 				s.evictLocked(items[i].id, memoryEvictionReasonDeadRetentionDepth)
 			}
+		}
+	}
+
+	if s.attemptsRetentionMaxAge > 0 && len(s.attempts) > 0 {
+		cutoff := now.Add(-s.attemptsRetentionMaxAge)
+		// Attempts are appended in time order, so the first one still inside
+		// the window marks the whole surviving tail.
+		keep := 0
+		for keep < len(s.attempts) && !s.attempts[keep].CreatedAt.After(cutoff) {
+			keep++
+		}
+		if keep > 0 {
+			s.attempts = append([]DeliveryAttempt(nil), s.attempts[keep:]...)
 		}
 	}
 	s.lastPrune = now
@@ -1903,7 +1938,19 @@ func (s *MemoryStore) RecordAttempt(attempt DeliveryAttempt) error {
 	}
 
 	s.attempts = append(s.attempts, attempt)
+	s.trimAttemptsLocked()
 	return nil
+}
+
+// trimAttemptsLocked enforces the row cap. It runs on every write, like the
+// backlog-trend cap it mirrors, so the slice can never grow past the bound
+// between prune passes; the age-based half runs with the other retention in
+// maybePruneLocked.
+func (s *MemoryStore) trimAttemptsLocked() {
+	if s.attemptsMaxRows <= 0 || len(s.attempts) <= s.attemptsMaxRows {
+		return
+	}
+	s.attempts = append([]DeliveryAttempt(nil), s.attempts[len(s.attempts)-s.attemptsMaxRows:]...)
 }
 
 func (s *MemoryStore) ListAttempts(req AttemptListRequest) (AttemptListResponse, error) {
@@ -2072,6 +2119,7 @@ func (memoryBackend) OpenStore(cfg hookaido.QueueBackendConfig) (any, func() err
 		WithQueueRetention(cfg.RetentionMaxAge, cfg.RetentionPruneInterval),
 		WithDeliveredRetention(cfg.DeliveredRetentionMaxAge),
 		WithDLQRetention(cfg.DLQRetentionMaxAge, cfg.DLQRetentionMaxDepth),
+		WithAttemptsRetention(cfg.AttemptsRetentionMaxAge, cfg.AttemptsRetentionMaxRows),
 	)
 	return store, func() error { return nil }, nil
 }

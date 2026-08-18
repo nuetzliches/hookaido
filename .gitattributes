@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts must keep LF even on Windows checkouts. docker-entrypoint.sh is
+# the container image ENTRYPOINT; with CRLF its shebang keeps a trailing
+# carriage return, the kernel looks for an interpreter that does not exist, and
+# the image fails to start with a misleading "no such file or directory". CI
+# checks out on Linux and never saw this, but a local docker build on Windows
+# produced a broken image.
+*.sh text eol=lf

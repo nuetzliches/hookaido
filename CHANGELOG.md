@@ -7,6 +7,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-08-18
+
+Publishes the container images for the 2.10.0 release. 2.10.0 itself is complete
+on GitHub Releases — archives, checksums, signature, SBOM and attestations all
+published — but the GHCR image build failed, so `ghcr.io/nuetzliches/hookaido`
+still points at 2.9.0. Upgrade notes for the actual changes are under
+[2.10.0](#2100---2026-08-18).
+
+### Fixed
+
+- **The container image builds again.** The Dockerfile pinned a `golang:1.26-alpine` digest shipping Go 1.26.5 by content, while 2.10.0 bumped `go.mod` to require `go >= 1.26.6` (a `govulncheck` remediation). With `GOTOOLCHAIN=local` in that image, `go mod download` refused with `go.mod requires go >= 1.26.6 (running go 1.26.5)` and the multi-arch build failed. The pin is bumped to a digest shipping 1.26.6. Nothing caught this before the tag because the image was only ever built by the tag-triggered `container` workflow — v2.9.0 published fine, since `go.mod` still asked for 1.26.4 then.
+
+- **CI now builds the container image and smoke-tests it on every pull request** (`container-build`), so toolchain drift between `go.mod` and the Dockerfile fails a PR instead of a release. Build only, never push — publishing stays tag-driven. It runs `linux/amd64` only, since what it guards against is architecture-independent and a QEMU multi-arch build would cost minutes per PR for no added signal, and it runs `hookaido version --long` inside the image afterwards: building is not enough to prove an image can start.
+
+- **`*.sh` is pinned to LF in `.gitattributes`.** `docker-entrypoint.sh` is the image `ENTRYPOINT`; on a Windows checkout `* text=auto` gave it CRLF, so its shebang kept a trailing carriage return and the locally built image died with `exec /usr/local/bin/docker-entrypoint.sh: no such file or directory`. CI checks out on Linux and never saw it, so published images were always fine — but a local `docker build` on Windows produced a broken one, which is also what blocked verifying the fix above.
+
 ## [2.10.0] - 2026-08-18
 
 A hardening release. It closes the six umbrella issues from a full code and
@@ -497,7 +513,8 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.10.0...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.10.1...HEAD
+[2.10.1]: https://github.com/nuetzliches/hookaido/compare/v2.10.0...v2.10.1
 [2.10.0]: https://github.com/nuetzliches/hookaido/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/nuetzliches/hookaido/compare/v2.8.1...v2.9.0
 [2.8.1]: https://github.com/nuetzliches/hookaido/compare/v2.8.0...v2.8.1

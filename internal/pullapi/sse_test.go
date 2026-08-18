@@ -532,3 +532,82 @@ func TestSSE_WriteFailureEndsTheStream(t *testing.T) {
 		t.Fatal("handler never returned: the per-item write error was discarded, so a dropped peer went unnoticed")
 	}
 }
+
+// lateEnqueueStore publishes a message while the SSE handler is inside its
+// non-blocking dequeue, which is the window the lost-wakeup race lives in: the
+// notify channel used to be taken *after* this call returned, so the handler
+// received the channel the enqueue had already replaced and slept until the
+// keepalive tick instead of delivering the ready message.
+type lateEnqueueStore struct {
+	*queue.MemoryStore
+	once sync.Once
+	t    *testing.T
+}
+
+func (s *lateEnqueueStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	resp, err := s.MemoryStore.Dequeue(req)
+	if err != nil || len(resp.Items) > 0 {
+		return resp, err
+	}
+	s.once.Do(func() {
+		enqueueTestMsg(s.t, s.MemoryStore, "evt_late")
+	})
+	return resp, err
+}
+
+func TestSSE_MessageEnqueuedDuringDequeueIsNotMissed(t *testing.T) {
+	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	inner := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return now }))
+	store := &lateEnqueueStore{MemoryStore: inner, t: t}
+
+	srv := NewServer(store)
+	// Long enough that a missed wakeup cannot be rescued by a keepalive within
+	// the test's own deadline.
+	srv.SSEKeepalive = 30 * time.Second
+	srv.ResolveRoute = func(endpoint string) (string, bool) {
+		if endpoint == "/pull/github" {
+			return "/webhooks/github", true
+		}
+		return "", false
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/pull/github/stream", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	received := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for {
+			lines, isComment, eof := readSSEEvent(scanner)
+			if eof {
+				return
+			}
+			if isComment {
+				continue
+			}
+			received <- strings.Join(lines, "\n")
+			return
+		}
+	}()
+
+	select {
+	case event := <-received:
+		if !strings.Contains(event, "evt_late") {
+			t.Fatalf("unexpected event: %s", event)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the message published during the dequeue was never delivered: the stream is waiting on a notify channel that already fired")
+	}
+}

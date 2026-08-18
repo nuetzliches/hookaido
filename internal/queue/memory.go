@@ -105,6 +105,21 @@ func (s *MemoryStore) NotifyCh() <-chan struct{} {
 	return s.notify
 }
 
+// notifyReadyLocked wakes everything parked on the readiness channel: the
+// store's own long-poll Dequeue and any NotifyCh observer, such as an SSE
+// stream.
+//
+// It must be called for every transition that makes an item ready, not just
+// enqueue. A Nack with delay 0 and the expiry sweep requeueing a crashed
+// consumer's lease both produce a ready item, and neither used to wake anyone:
+// a pull client blocked in Dequeue with max_wait 30s, or an SSE stream parked
+// on NotifyCh, slept through the readiness and only noticed at its own timeout
+// or at the next keepalive.
+func (s *MemoryStore) notifyReadyLocked() {
+	close(s.notify)
+	s.notify = make(chan struct{})
+}
+
 // WithMemoryPressureLimits overrides memory pressure limits for the in-memory
 // backend. Positive values enable explicit thresholds.
 func WithMemoryPressureLimits(retainedItems int, retainedBytes int64) MemoryOption {
@@ -243,8 +258,7 @@ func (s *MemoryStore) Enqueue(env Envelope) error {
 	committed = true
 
 	// Wake up any long-polling Dequeue calls.
-	close(s.notify)
-	s.notify = make(chan struct{})
+	s.notifyReadyLocked()
 
 	return nil
 }
@@ -352,8 +366,7 @@ func (s *MemoryStore) EnqueueBatch(items []Envelope) (int, error) {
 	}
 	committed = true
 
-	close(s.notify)
-	s.notify = make(chan struct{})
+	s.notifyReadyLocked()
 
 	return len(prepared), nil
 }
@@ -918,6 +931,11 @@ func (s *MemoryStore) Nack(leaseID string, delay time.Duration) error {
 		delay = 0
 	}
 	env.NextRunAt = now.Add(delay)
+	// Waiters are woken whatever the delay. A short delay would otherwise be
+	// invisible until the waiter's own timeout, and nothing fires at
+	// NextRunAt; a wakeup that finds nothing costs one extra loop, since both
+	// the long-poll Dequeue and the SSE stream re-check and re-park.
+	s.notifyReadyLocked()
 	return nil
 }
 
@@ -970,6 +988,11 @@ func (s *MemoryStore) NackBatch(leaseIDs []string, delay time.Duration) (LeaseBa
 		env.DeadReason = ""
 		env.NextRunAt = now.Add(delay)
 		res.Succeeded++
+	}
+
+	// As in Nack: waiters are woken whatever the delay.
+	if res.Succeeded > 0 {
+		s.notifyReadyLocked()
 	}
 
 	return res, nil
@@ -1188,8 +1211,7 @@ func (s *MemoryStore) RequeueDead(req DeadRequeueRequest) (DeadRequeueResponse, 
 	}
 
 	if requeued > 0 {
-		close(s.notify)
-		s.notify = make(chan struct{})
+		s.notifyReadyLocked()
 	}
 
 	return DeadRequeueResponse{Requeued: requeued}, nil
@@ -1410,8 +1432,7 @@ func (s *MemoryStore) RequeueMessages(req MessageRequeueRequest) (MessageRequeue
 	}
 
 	if requeued > 0 {
-		close(s.notify)
-		s.notify = make(chan struct{})
+		s.notifyReadyLocked()
 	}
 
 	return MessageRequeueResponse{Requeued: requeued, Matched: requeued}, nil
@@ -1445,8 +1466,7 @@ func (s *MemoryStore) ResumeMessages(req MessageResumeRequest) (MessageResumeRes
 	}
 
 	if resumed > 0 {
-		close(s.notify)
-		s.notify = make(chan struct{})
+		s.notifyReadyLocked()
 	}
 
 	return MessageResumeResponse{Resumed: resumed, Matched: resumed}, nil
@@ -1509,8 +1529,7 @@ func (s *MemoryStore) RequeueMessagesByFilter(req MessageManageFilterRequest) (M
 	}
 
 	if requeued > 0 {
-		close(s.notify)
-		s.notify = make(chan struct{})
+		s.notifyReadyLocked()
 	}
 
 	return MessageRequeueResponse{Requeued: requeued, Matched: len(items)}, nil
@@ -1541,8 +1560,7 @@ func (s *MemoryStore) ResumeMessagesByFilter(req MessageManageFilterRequest) (Me
 	}
 
 	if resumed > 0 {
-		close(s.notify)
-		s.notify = make(chan struct{})
+		s.notifyReadyLocked()
 	}
 
 	return MessageResumeResponse{Resumed: resumed, Matched: len(items)}, nil
@@ -2001,6 +2019,9 @@ func (s *MemoryStore) requeueExpiredLeasesLocked(now time.Time) {
 	}
 }
 
+// requeueLocked makes a leased item ready again -- the expiry sweep, and any
+// operation that finds the lease it was handed already expired. The item is
+// ready immediately, so waiters are woken here rather than at each call site.
 func (s *MemoryStore) requeueLocked(now time.Time, env *Envelope) {
 	delete(s.leases, env.LeaseID)
 	env.State = StateQueued
@@ -2008,6 +2029,7 @@ func (s *MemoryStore) requeueLocked(now time.Time, env *Envelope) {
 	env.LeaseUntil = time.Time{}
 	env.NextRunAt = now
 	env.DeadReason = ""
+	s.notifyReadyLocked()
 }
 
 func (s *MemoryStore) compactOrderLocked() {

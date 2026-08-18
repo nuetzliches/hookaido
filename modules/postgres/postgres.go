@@ -655,7 +655,8 @@ func (s *Store) dequeueOnce(req queue.DequeueRequest, batch int, leaseTTL time.D
 		_ = tx.Rollback()
 	}()
 
-	if err := s.requeueExpiredLeasesTx(ctx, tx, now); err != nil {
+	expired, err := s.requeueExpiredLeasesTx(ctx, tx, now)
+	if err != nil {
 		return queue.DequeueResponse{}, err
 	}
 
@@ -735,6 +736,11 @@ FOR UPDATE SKIP LOCKED
 			return queue.DequeueResponse{}, err
 		}
 		committed = true
+		// This caller found nothing -- it may be polling a different route --
+		// but the sweep above still made another route's items ready.
+		if expired > 0 {
+			s.signal()
+		}
 		return queue.DequeueResponse{}, nil
 	}
 
@@ -767,6 +773,12 @@ WHERE id = $4
 		return queue.DequeueResponse{}, err
 	}
 	committed = true
+	// The sweep above reclaimed leases from consumers that never came back.
+	// Those items are ready now, and this dequeue takes at most `batch` of
+	// them, so anything left has to wake the other waiters.
+	if expired > 0 {
+		s.signal()
+	}
 	return queue.DequeueResponse{Items: items}, nil
 }
 
@@ -1021,7 +1033,7 @@ func (s *Store) NackBatch(leaseIDs []string, delay time.Duration) (queue.LeaseBa
 		delay = 0
 	}
 	return runPostgresStoreOperationResult(s, "nack_batch", func() (queue.LeaseBatchResult, error) {
-		return s.withLeaseBatch(leaseIDs, func(ctx context.Context, tx *sql.Tx, now time.Time, itemIDs []string) error {
+		res, err := s.withLeaseBatch(leaseIDs, func(ctx context.Context, tx *sql.Tx, now time.Time, itemIDs []string) error {
 			_, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
@@ -1035,6 +1047,10 @@ WHERE id = ANY($3)
 			)
 			return err
 		})
+		if err == nil && res.Succeeded > 0 {
+			s.signal()
+		}
+		return res, err
 	})
 }
 
@@ -1064,7 +1080,7 @@ func (s *Store) Nack(leaseID string, delay time.Duration) error {
 			delay = 0
 		}
 		now := s.now().UTC()
-		return s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
+		err := s.withLease(leaseID, now, func(ctx context.Context, tx *sql.Tx, itemID string, _ time.Time) error {
 			_, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
@@ -1078,6 +1094,10 @@ WHERE id = $3
 			)
 			return err
 		})
+		if err == nil {
+			s.signal()
+		}
+		return err
 	})
 }
 
@@ -1238,6 +1258,9 @@ WHERE id = $3
 			return queue.DeadRequeueResponse{}, err
 		}
 		committed = true
+		if requeued > 0 {
+			s.signal()
+		}
 		return queue.DeadRequeueResponse{Requeued: requeued}, nil
 	})
 }
@@ -1473,6 +1496,9 @@ WHERE state = ANY($3)
 		if err != nil {
 			return queue.MessageRequeueResponse{}, err
 		}
+		if n > 0 {
+			s.signal()
+		}
 		return queue.MessageRequeueResponse{Requeued: int(n), Matched: int(n)}, nil
 	})
 }
@@ -1501,6 +1527,9 @@ WHERE state = $3
 		n, err := res.RowsAffected()
 		if err != nil {
 			return queue.MessageResumeResponse{}, err
+		}
+		if n > 0 {
+			s.signal()
 		}
 		return queue.MessageResumeResponse{Resumed: int(n), Matched: int(n)}, nil
 	})
@@ -2312,8 +2341,11 @@ WHERE 1 = 1
 	return ids, nil
 }
 
-func (s *Store) requeueExpiredLeasesTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
-	_, err := tx.ExecContext(ctx, `
+// requeueExpiredLeasesTx returns how many leases it reclaimed, so the caller
+// can wake waiters after the transaction commits: a crashed consumer's items
+// become ready here, and nothing else announces them.
+func (s *Store) requeueExpiredLeasesTx(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error) {
+	res, err := tx.ExecContext(ctx, `
 UPDATE queue_items
 SET state = $1, lease_id = NULL, lease_until = NULL, next_run_at = $2, dead_reason = NULL
 WHERE state = $3
@@ -2324,7 +2356,14 @@ WHERE state = $3
 		now.UTC(),
 		string(queue.StateLeased),
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *Store) requeueLeaseTx(ctx context.Context, tx *sql.Tx, itemID string, now time.Time) error {

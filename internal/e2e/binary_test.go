@@ -652,3 +652,70 @@ func waitForLogLine(t *testing.T, logs *syncBuffer, needle string, timeout time.
 	}
 	t.Fatalf("log line %q not seen within %v, got:\n%s", needle, timeout, logs.String())
 }
+
+// An Admin API managed-endpoint mutation reloads the config and advances
+// `running`. It used to do that without touching the push dispatcher, so a
+// deliver change already written to the file but not yet reloaded was folded
+// into `running` while the dispatcher kept the old routes -- and because every
+// later reload diffs against `running`, no reload could ever correct it.
+// Deliveries went to the old targets until restart while the Admin API,
+// /runtime and the logs all reported the new config.
+func TestBinaryE2E_AdminMutationReconcilesDispatcher(t *testing.T) {
+	bin := ensureBinary(t)
+
+	ingressPort := freePort(t)
+	adminPort := freePort(t)
+	const adminToken = "test-e2e-admin-token"
+
+	cfgFor := func(target string) string {
+		return fmt.Sprintf(`
+ingress { listen "127.0.0.1:%d" }
+admin_api {
+  listen "127.0.0.1:%d"
+  auth token "raw:%s"
+}
+
+"/hooks" {
+  publish { managed on }
+  deliver "%s" { timeout 2s }
+}
+`, ingressPort, adminPort, adminToken, target)
+	}
+
+	cfgPath := filepath.Join(t.TempDir(), "Hookaidofile")
+	if err := os.WriteFile(cfgPath, []byte(cfgFor("https://ci.internal.example/one")), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	logs, _ := startBinaryCapturingLogs(t, bin, cfgPath, adminPort)
+	waitForLogLine(t, logs, "dispatcher_started", 10*time.Second)
+
+	// The operator edits the deliver target and has not signalled a reload yet.
+	if err := os.WriteFile(cfgPath, []byte(cfgFor("https://ci.internal.example/two")), 0o644); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+
+	body := strings.NewReader(`{"route":"/hooks"}`)
+	req, err := http.NewRequest(http.MethodPut,
+		fmt.Sprintf("http://127.0.0.1:%d/applications/billing/endpoints/invoice.created", adminPort), body)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-Hookaido-Audit-Reason", "e2e dispatcher reconciliation")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("managed endpoint upsert: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("managed endpoint upsert: status %d, body %s", resp.StatusCode, payload)
+	}
+
+	// The mutation folded the pending deliver change into the running config, so
+	// it must also have swapped the dispatcher.
+	waitForLogLine(t, logs, "dispatcher_reloaded", 10*time.Second)
+}

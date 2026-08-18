@@ -437,8 +437,18 @@ func (s *runtimeState) configureIngressRateLimits(compiled config.Compiled) {
 		now = s.now()
 	}
 
+	// A limiter whose limits did not change is carried over rather than
+	// replaced. Every new tokenBucketLimiter starts seeded with tokens = burst,
+	// and this ran on every successful reload with nothing comparing old against
+	// new — so any reload refilled every bucket. That includes reloads an
+	// operator would not think of as reloads: mutateManagedEndpointConfig calls
+	// reloadConfig on each applied Admin API managed-endpoint upsert or delete,
+	// and --watch triggers one per config write. Repeated at reload frequency the
+	// effective rate limit was unbounded, which defeats the control entirely.
 	if compiled.Ingress.RateLimit.Enabled {
-		s.ingressGlobalLimit = newTokenBucketLimiter(compiled.Ingress.RateLimit.RPS, compiled.Ingress.RateLimit.Burst, now)
+		if !s.ingressGlobalLimit.matches(compiled.Ingress.RateLimit.RPS, compiled.Ingress.RateLimit.Burst) {
+			s.ingressGlobalLimit = newTokenBucketLimiter(compiled.Ingress.RateLimit.RPS, compiled.Ingress.RateLimit.Burst, now)
+		}
 	} else {
 		s.ingressGlobalLimit = nil
 	}
@@ -446,6 +456,13 @@ func (s *runtimeState) configureIngressRateLimits(compiled config.Compiled) {
 	routeLimits := make(map[string]*tokenBucketLimiter)
 	for _, rt := range compiled.Routes {
 		if !rt.RateLimit.Enabled {
+			continue
+		}
+		// A route that keeps its limits keeps its bucket, including its current
+		// token balance; a route whose limits changed, or that is new, gets a
+		// fresh one. A route that disappears drops out with the old map.
+		if existing := s.ingressRouteLimits[rt.Path]; existing.matches(rt.RateLimit.RPS, rt.RateLimit.Burst) {
+			routeLimits[rt.Path] = existing
 			continue
 		}
 		routeLimits[rt.Path] = newTokenBucketLimiter(rt.RateLimit.RPS, rt.RateLimit.Burst, now)

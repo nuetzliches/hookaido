@@ -42,6 +42,6 @@ Current weighted implementation grade: **~95%**.
 ## What's Missing (MVP Core)
 
 - Runtime reload intentionally keeps restart-required edges for topology/startup-bound changes (listeners, API prefixes, dispatcher-affecting settings).
-- Test coverage is 75.9% against the 80% target tracked in `BACKLOG.md`; `internal/secrets`, `internal/pullapi`, `internal/config` and `internal/mcp` are the gaps.
+- Test coverage is 76.9% against the 80% target tracked in `BACKLOG.md` (`make cover`, generated protobuf excluded). Ranked by uncovered statements, the gaps are `internal/config`, `internal/app`, `internal/mcp` and `internal/admin`; `internal/app` is the largest percentage gap and the hardest, since what is left are `run.go` startup paths needing a real server bring-up.
 
 See `BACKLOG.md` for prioritized next steps.

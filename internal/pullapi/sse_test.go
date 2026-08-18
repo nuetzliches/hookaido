@@ -545,7 +545,14 @@ type lateEnqueueStore struct {
 }
 
 func (s *lateEnqueueStore) Dequeue(req queue.DequeueRequest) (queue.DequeueResponse, error) {
-	resp, err := s.MemoryStore.Dequeue(req)
+	return s.DequeueContext(context.Background(), req)
+}
+
+// DequeueContext has to be overridden too: pullapi prefers it when the store
+// implements queue.ContextDequeuer, and the embedded MemoryStore provides it,
+// so without this the wrapper would be bypassed entirely.
+func (s *lateEnqueueStore) DequeueContext(ctx context.Context, req queue.DequeueRequest) (queue.DequeueResponse, error) {
+	resp, err := s.MemoryStore.DequeueContext(ctx, req)
 	if err != nil || len(resp.Items) > 0 {
 		return resp, err
 	}

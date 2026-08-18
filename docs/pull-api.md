@@ -63,6 +63,13 @@ pull_api {
 
 Per-route tokens replace (not extend) the global allowlist for that route.
 
+When any route defines its own token, lease operations are scoped to their route
+as well: `ack`, `nack`, `dead` and `extend` reject a lease that belongs to a
+different route with the same `409` conflict as an unknown lease, so a token for
+one endpoint cannot settle another endpoint's in-flight message. With a single
+global token the check is skipped — every client is authorized for every route
+anyway — so it costs nothing in that setup.
+
 ## Endpoints
 
 ### `POST {endpoint}/dequeue`

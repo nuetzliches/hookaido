@@ -885,6 +885,16 @@ func (s *runtimeState) resolvePull(endpoint string) (string, bool) {
 	return route, ok
 }
 
+// hasRouteScopedPullAuth reports whether any route carries its own pull
+// credentials. Lease operations are checked against their route only then: with
+// a single global token every client is authorized for every route, so there is
+// nothing to enforce and no reason to pay for the lookup.
+func (s *runtimeState) hasRouteScopedPullAuth() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.pullByRoute) > 0
+}
+
 func (s *runtimeState) authorizePull(r *http.Request) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2438,6 +2448,9 @@ func startServers(
 	pullHandler := pullapi.NewServer(store)
 	pullHandler.ResolveRoute = state.resolvePull
 	pullHandler.Authorize = state.authorizePull
+	// Read through the runtime state rather than captured once: a reload can
+	// add or remove per-route pull tokens.
+	pullHandler.LeaseRouteScoped = state.hasRouteScopedPullAuth
 	if compiled.PullAPI.MaxBatch > 0 {
 		pullHandler.MaxBatch = compiled.PullAPI.MaxBatch
 	}

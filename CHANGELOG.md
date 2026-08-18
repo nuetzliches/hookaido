@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cancelled dequeue no longer parks a goroutine or leases into a dead connection.** `queue.Store.Dequeue` takes no context, so a gRPC worker whose own deadline fired left the handler blocked inside the store for the rest of `max_wait` — and any item that arrived meanwhile was leased into a stream gRPC had already discarded, invisible for the full lease TTL (30s by default) until the expiry sweep reclaimed it. Every client timeout thus became a lease-TTL delivery delay. All three backends now implement a context-aware dequeue, and the pull API passes the request context through from HTTP, SSE and gRPC: the long poll ends with its caller, and a caller that is already gone is never handed a lease.
+
+### Security
+
+- **Per-route pull tokens are now enforced on lease operations.** `ack`, `nack`, `dead` and `extend` passed only the lease ID to the store; the route resolved from the request path was used for metrics and nothing else. A client authorized for one endpoint could therefore settle another route's in-flight message if it learned that lease ID — from a shared dashboard, a log line, a support ticket. Exploiting it requires the random `lease_…` value, so severity is low, but the route-scoped credential model the config offers was not enforced where it mattered. A lease belonging to another route is now rejected with the same `409` as an unknown lease, so the response cannot be used to probe for lease IDs either. The check runs only when the config actually uses per-route pull tokens: with a single global token every client is authorized for every route anyway, and the ack path keeps its current cost.
+
 ### Added
 
 - **`attempts_retention { max_age, max_rows }`** bounds delivery-attempt history, which was append-only in every backend — nothing anywhere deleted or capped it. A push deployment doing 10 attempts/s added ~860k records a day forever: the SQLite file and its indexes grew until the disk filled and enqueue started failing, and the memory backend grew until the process was OOM-killed, invisible to the memory-pressure guard because that counts only queued payloads. Defaults are deliberately finite (`max_age 7d`, `max_rows 200000`); set both `off` to restore the previous unbounded behaviour. Pruning uses the existing `queue_retention.prune_interval` cadence, and the memory backend enforces `max_rows` as it writes.

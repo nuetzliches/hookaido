@@ -44,6 +44,8 @@ Behavior parity includes:
   - global allowlist from `pull_api { auth token ... }`
   - per-route override from `pull { auth token ... }` (replaces global list for that route)
 - `endpoint` in gRPC requests uses the configured pull endpoint path (same path workers use for HTTP Pull routes).
+- Lease operations are scoped to their route whenever per-route tokens are in use, exactly as for HTTP Pull.
+- A `Dequeue` whose RPC is cancelled — the client's own deadline, a dropped connection — ends the long poll instead of running it out, and no message is leased to a caller that is already gone.
 
 ## Listener Guardrails
 

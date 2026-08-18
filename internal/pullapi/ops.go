@@ -1,6 +1,7 @@
 package pullapi
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -42,7 +43,12 @@ type LeaseBatchResult struct {
 	Conflicts []queue.LeaseBatchConflict
 }
 
-func (s *Server) Dequeue(route string, params DequeueParams) (DequeueResult, *OpError) {
+// Dequeue takes ctx so a long poll ends when the caller does. Without it a
+// worker that timed out left the handler blocked inside the store for the rest
+// of max_wait, and items arriving meanwhile were leased into a connection that
+// no longer existed -- invisible for the whole lease TTL, until the expiry
+// sweep reclaimed them.
+func (s *Server) Dequeue(ctx context.Context, route string, params DequeueParams) (DequeueResult, *OpError) {
 	batch := params.Batch
 	if batch <= 0 {
 		batch = 1
@@ -69,14 +75,30 @@ func (s *Server) Dequeue(route string, params DequeueParams) (DequeueResult, *Op
 		leaseTTL = s.MaxLeaseTTL
 	}
 
-	resp, err := s.Store.Dequeue(queue.DequeueRequest{
+	req := queue.DequeueRequest{
 		Route:    route,
 		Target:   s.Target,
 		Batch:    batch,
 		MaxWait:  maxWait,
 		LeaseTTL: leaseTTL,
-	})
+	}
+
+	var (
+		resp queue.DequeueResponse
+		err  error
+	)
+	if ctxStore, ok := s.Store.(queue.ContextDequeuer); ok {
+		resp, err = ctxStore.DequeueContext(ctx, req)
+	} else {
+		resp, err = s.Store.Dequeue(req)
+	}
 	if err != nil {
+		// The caller is gone by definition on this path, so there is nothing
+		// to report to and nothing to count: treating a client disconnect as a
+		// store outage would page someone for a worker's own timeout.
+		if ctx.Err() != nil {
+			return DequeueResult{}, nil
+		}
 		s.observeDequeue(route, 503, nil)
 		return DequeueResult{}, &OpError{
 			StatusCode: 503,
@@ -103,6 +125,14 @@ func (s *Server) AckSingle(route string, leaseID string) *OpError {
 	if s.isRecentlyCompletedLease(leaseID, recentLeaseOpAck) {
 		s.observeAck(route, 204, leaseID, false)
 		return nil
+	}
+
+	if ok, err := s.leaseInRoute(route, leaseID); err != nil {
+		s.observeAck(route, 500, leaseID, false)
+		return leaseScopeUnavailable("ack failed")
+	} else if !ok {
+		s.observeAck(route, 409, leaseID, false)
+		return leaseScopeConflict()
 	}
 
 	if err := s.Store.Ack(leaseID); err != nil {
@@ -138,6 +168,16 @@ func (s *Server) AckBatch(route string, leaseIDs []string) (LeaseBatchResult, *O
 		return LeaseBatchResult{Succeeded: ackedFromCompleted}, nil
 	}
 
+	pendingLeaseIDs, foreignLeaseIDs, err := s.leasesInRoute(route, pendingLeaseIDs)
+	if err != nil {
+		s.observeAck(route, 500, "", false)
+		return LeaseBatchResult{}, leaseScopeUnavailable("ack failed")
+	}
+	scopeConflicts := s.observeForeignLeases(route, foreignLeaseIDs, s.observeAck)
+	if len(pendingLeaseIDs) == 0 {
+		return LeaseBatchResult{Succeeded: ackedFromCompleted, Conflicts: scopeConflicts}, nil
+	}
+
 	if batchStore, ok := s.Store.(queue.LeaseBatchStore); ok {
 		res, err := batchStore.AckBatch(pendingLeaseIDs)
 		if err != nil {
@@ -155,12 +195,12 @@ func (s *Server) AckBatch(route string, leaseIDs []string) (LeaseBatchResult, *O
 		}
 		return LeaseBatchResult{
 			Succeeded: ackedFromCompleted + res.Succeeded,
-			Conflicts: append([]queue.LeaseBatchConflict(nil), res.Conflicts...),
+			Conflicts: append(scopeConflicts, res.Conflicts...),
 		}, nil
 	}
 
 	acked := 0
-	conflicts := make([]queue.LeaseBatchConflict, 0)
+	conflicts := scopeConflicts
 
 	for _, leaseID := range pendingLeaseIDs {
 		err := s.Store.Ack(leaseID)
@@ -215,6 +255,18 @@ func (s *Server) NackSingle(route string, leaseID string, dead bool, reason stri
 	if s.isRecentlyCompletedLease(leaseID, recentLeaseOpNack) {
 		s.observeNack(route, 204, leaseID, false)
 		return nil
+	}
+
+	if ok, err := s.leaseInRoute(route, leaseID); err != nil {
+		s.observeNack(route, 500, leaseID, false)
+		detail := "nack failed"
+		if dead {
+			detail = "mark dead failed"
+		}
+		return leaseScopeUnavailable(detail)
+	} else if !ok {
+		s.observeNack(route, 409, leaseID, false)
+		return leaseScopeConflict()
 	}
 
 	if dead {
@@ -272,6 +324,20 @@ func (s *Server) NackBatch(route string, leaseIDs []string, dead bool, reason st
 		return LeaseBatchResult{Succeeded: succeededFromCompleted}, nil
 	}
 
+	pendingLeaseIDs, foreignLeaseIDs, scopeErr := s.leasesInRoute(route, pendingLeaseIDs)
+	if scopeErr != nil {
+		s.observeNack(route, 500, "", false)
+		detail := "nack failed"
+		if dead {
+			detail = "mark dead failed"
+		}
+		return LeaseBatchResult{}, leaseScopeUnavailable(detail)
+	}
+	scopeConflicts := s.observeForeignLeases(route, foreignLeaseIDs, s.observeNack)
+	if len(pendingLeaseIDs) == 0 {
+		return LeaseBatchResult{Succeeded: succeededFromCompleted, Conflicts: scopeConflicts}, nil
+	}
+
 	if batchStore, ok := s.Store.(queue.LeaseBatchStore); ok {
 		var (
 			res queue.LeaseBatchResult
@@ -301,12 +367,12 @@ func (s *Server) NackBatch(route string, leaseIDs []string, dead bool, reason st
 		}
 		return LeaseBatchResult{
 			Succeeded: succeededFromCompleted + res.Succeeded,
-			Conflicts: append([]queue.LeaseBatchConflict(nil), res.Conflicts...),
+			Conflicts: append(scopeConflicts, res.Conflicts...),
 		}, nil
 	}
 
 	succeeded := 0
-	conflicts := make([]queue.LeaseBatchConflict, 0)
+	conflicts := scopeConflicts
 
 	for _, leaseID := range pendingLeaseIDs {
 		var err error
@@ -366,6 +432,14 @@ func (s *Server) Extend(route string, leaseID string, extendBy time.Duration) *O
 			Detail:     "lease_id is required",
 		}
 	}
+	if ok, err := s.leaseInRoute(route, leaseID); err != nil {
+		s.observeExtend(route, 500, leaseID, extendBy, false)
+		return leaseScopeUnavailable("extend failed")
+	} else if !ok {
+		s.observeExtend(route, 409, leaseID, extendBy, false)
+		return leaseScopeConflict()
+	}
+
 	if err := s.Store.Extend(leaseID, extendBy); err != nil {
 		if errors.Is(err, queue.ErrLeaseNotFound) || errors.Is(err, queue.ErrLeaseExpired) {
 			s.observeExtend(route, 409, leaseID, extendBy, errors.Is(err, queue.ErrLeaseExpired))

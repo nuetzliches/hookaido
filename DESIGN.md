@@ -49,7 +49,7 @@ pull_api {
 The DSL supports these blocks with sane defaults:
 
 Global:
-- `ingress { listen, tls?, rate_limit? }`
+- `ingress { listen, tls?, rate_limit?, trusted_proxies? }`
 - `inbound { ... }` (optional channel wrapper; bare top-level routes are implicit inbound)
 - `outbound { ... }` (channel wrapper for API-to-queue-to-push flows; `deliver` required, no `auth`/`match`/`rate_limit`/`pull`)
 - `internal { ... }` (channel wrapper for internal job queues; `pull` required, no `auth`/`match`/`rate_limit`/`deliver`)
@@ -154,7 +154,8 @@ Compile constraints:
 - `match.header_exists` requires that the header is present (name is case-insensitive).
 - `match.query` matches exact query parameter values.
 - `match.query_exists` requires that the query parameter key is present.
-- `match.remote_ip` matches request source IP from connection `RemoteAddr`; accepts single IPs (`203.0.113.7`, `2001:db8::1`) or CIDRs (`203.0.113.0/24`, `2001:db8::/32`).
+- `match.remote_ip` matches the request client IP; accepts single IPs (`203.0.113.7`, `2001:db8::1`) or CIDRs (`203.0.113.0/24`, `2001:db8::/32`).
+- The client IP is the connection `RemoteAddr` unless `ingress.trusted_proxies` is set and the peer falls inside one of its prefixes; then it is the right-most `X-Forwarded-For` entry that is not itself trusted. `ingress.trusted_proxies` is empty by default, in which case `X-Forwarded-For` is never read. Ingress rate limiting is keyed per route and globally, never per client IP, so it is unaffected.
 - Ingress rate limiting is token-bucket based: global `ingress.rate_limit` applies to all matched routes unless a route defines its own `rate_limit` override; over-limit requests return `429`.
 - Named matchers: define `@name { ... }` at top-level, then attach with `match @name`.
 - `auth forward` performs pre-enqueue auth callouts: `2xx` allows, `401/403` denies, and transport/timeouts/other statuses fail closed with `503`.

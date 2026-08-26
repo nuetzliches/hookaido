@@ -254,6 +254,15 @@ func (p *parser) parseTopLevelBlock(cfg *Config) error {
 	}
 }
 
+func isIngressDirective(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "listen", "tls", "rate_limit", "trusted_proxies":
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *parser) parseIngressBlock() (*IngressBlock, error) {
 	if _, err := p.expect(tokLBrace, "expected '{' after ingress"); err != nil {
 		return nil, err
@@ -312,6 +321,26 @@ func (p *parser) parseIngressBlock() (*IngressBlock, error) {
 				return nil, err
 			}
 			out.RateLimit = rl
+		case "trusted_proxies":
+			for {
+				v, quoted, err := p.parseValue()
+				if err != nil {
+					return nil, err
+				}
+				out.TrustedProxies = append(out.TrustedProxies, v)
+				out.TrustedProxiesQuoted = append(out.TrustedProxiesQuoted, quoted)
+
+				next, err := p.peek()
+				if err != nil {
+					return nil, err
+				}
+				if next.kind == tokEOF || next.kind == tokRBrace || next.kind == tokComment {
+					break
+				}
+				if next.kind == tokIdent && isIngressDirective(next.text) {
+					break
+				}
+			}
 		default:
 			return nil, p.errAt(dirTok.pos, "unknown ingress directive %q", dirTok.text)
 		}

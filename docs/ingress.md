@@ -57,7 +57,37 @@ Matchers further narrow which requests a route accepts. All matchers within a ro
 | `header_exists` | Header must be present (any value)                                         |
 | `query`         | Exact query parameter value                                                |
 | `query_exists`  | Query parameter key must be present                                        |
-| `remote_ip`     | Source IP or CIDR (from `RemoteAddr`). IPv4 and IPv6 supported             |
+| `remote_ip`     | Client IP or CIDR. IPv4 and IPv6 supported                                 |
+
+#### `remote_ip` behind a reverse proxy
+
+`remote_ip` is compared against the **transport peer address** — what the socket
+reports. `X-Forwarded-For` is ignored unless `ingress.trusted_proxies` is set.
+
+That matters because Hookaido is very often deployed behind a TLS-terminating
+reverse proxy, including in the Docker examples in these docs. In that topology
+every request arrives with the *proxy's* address, so:
+
+```hcl
+match { remote_ip "203.0.113.0/24" }   # the source's published egress range
+```
+
+matches nothing and the route silently returns `404` for legitimate traffic.
+Widening the range to the proxy's subnet makes traffic flow again — and now
+matches every request the proxy forwards, from any origin. Both outcomes read
+like a working IP allowlist in the config file; the second one is not.
+
+Two ways out, in order of preference:
+
+1. **Put the IP restriction in the proxy.** It is the component that sees the real
+   client address, and it is where the restriction belongs if the proxy is not
+   yours to configure otherwise.
+2. **Set `ingress.trusted_proxies`** to the prefixes your proxy connects from.
+   Hookaido then takes the right-most `X-Forwarded-For` entry that is not itself
+   trusted as the client address for `remote_ip`. Requests from an untrusted peer
+   keep their peer address and the header is ignored, so a direct client cannot
+   spoof its way past the allowlist. See
+   [`ingress.trusted_proxies`](configuration.md#trusted_proxies).
 
 `header` and `query` compare their values in **constant time**. Matchers normally
 only select a route — `X-GitHub-Event: push` is not a secret — but for an event

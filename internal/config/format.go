@@ -178,6 +178,17 @@ func writeIngressBlock(b *bytes.Buffer, ing *IngressBlock) {
 	if ing.RateLimit != nil {
 		writeRateLimitBlock(b, "  ", ing.RateLimit)
 	}
+	if len(ing.TrustedProxies) > 0 {
+		b.WriteString("  trusted_proxies")
+		for i, proxy := range ing.TrustedProxies {
+			quoted := false
+			if i < len(ing.TrustedProxiesQuoted) {
+				quoted = ing.TrustedProxiesQuoted[i]
+			}
+			fmt.Fprintf(b, " %s", formatValue(proxy, quoted))
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString("}\n")
 }
 

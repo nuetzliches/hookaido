@@ -440,6 +440,7 @@ type runtimeState struct {
 	hmacByRoute          map[string]*ingress.HMACAuth
 	ingressGlobalLimit   *tokenBucketLimiter
 	ingressRouteLimits   map[string]*tokenBucketLimiter
+	trustedProxies       []netip.Prefix
 	adaptiveController   *adaptiveAdmissionController
 	now                  func() time.Time
 
@@ -461,6 +462,7 @@ func newRuntimeState(compiled config.Compiled) *runtimeState {
 		forwardByRoute:       make(map[string]*ingress.ForwardAuth),
 		hmacByRoute:          make(map[string]*ingress.HMACAuth),
 		ingressRouteLimits:   make(map[string]*tokenBucketLimiter),
+		trustedProxies:       compiled.Ingress.TrustedProxies,
 		now:                  time.Now,
 		secretRegistry:       secrets.NewRegistry(),
 		runtimePools:         make(map[string]struct{}),
@@ -507,6 +509,7 @@ func (s *runtimeState) updateAll(compiled config.Compiled) {
 	s.pathToRoute = compiled.PathToRoute
 	s.trendSignals = compiled.Defaults.TrendSignals
 	s.adaptiveBackpressure = compiled.Defaults.AdaptiveBackpressure
+	s.trustedProxies = compiled.Ingress.TrustedProxies
 	if s.adaptiveController != nil {
 		s.adaptiveController.updateConfig(compiled.Defaults.AdaptiveBackpressure, compiled.Defaults.TrendSignals)
 	}
@@ -840,7 +843,7 @@ func (s *runtimeState) resolveIngressLocked(r *http.Request, requestPath string)
 	var remoteIP netip.Addr
 	var remoteIPOK bool
 	if r != nil {
-		remoteIP, remoteIPOK = parseRemoteAddrIP(r.RemoteAddr)
+		remoteIP, remoteIPOK = resolveClientIP(r, s.trustedProxies)
 	}
 
 	for _, rt := range s.routes {
@@ -877,7 +880,7 @@ func (s *runtimeState) allowedMethodsFor(r *http.Request, requestPath string) []
 
 	reqHost := normalizeHost(r.Host)
 	queryValues := r.URL.Query()
-	remoteIP, remoteIPOK := parseRemoteAddrIP(r.RemoteAddr)
+	remoteIP, remoteIPOK := resolveClientIP(r, s.trustedProxies)
 
 	seen := make(map[string]struct{})
 	var out []string

@@ -789,6 +789,57 @@ hookaido run --config ./Hookaidofile --watch
 kill -HUP $(cat ./hookaido.pid)
 ```
 
+### `--watch` and Single-File Mounts
+
+`--watch` watches the **directory** containing the config and filters by
+basename. That is the right pattern for editors and for atomic
+replace-by-rename, and it has one consequence worth knowing before you rely on
+it in a container: **mount the directory, not the file.**
+
+```yaml
+# Works with --watch
+volumes:
+  - ./config-dir:/etc/hookaido:ro
+
+# Does NOT work with --watch
+volumes:
+  - ./Hookaidofile:/etc/hookaido/Hookaidofile:ro
+```
+
+With a single-file bind mount, `/etc/hookaido` inside the container is not the
+host directory — it is the container's own directory holding one bind-mounted
+entry. Replacing the file on the host (`rsync`, `scp` to a temp name plus `mv`,
+or any deploy tool that writes atomically) creates a **new inode**, and the
+existing mount still resolves to the old one. The container's directory
+genuinely did not change, so there is no event to receive. Kubernetes has the
+same failure mode with `subPath` ConfigMap mounts, which are documented not to
+receive updates — mount the ConfigMap as a volume instead.
+
+The symptom is silence: `watching_config` is logged, no reload happens, and a
+new route stays `404` while the config on disk says otherwise.
+
+Two things help when you cannot change the mount:
+
+- **`--watch-interval`** re-reads the config path on a fixed interval and reloads
+  when its **content hash** changes, through the same path as an fsnotify event.
+  Off by default; minimum `1s`; requires `--watch`.
+
+  ```bash
+  hookaido run --config /etc/hookaido/Hookaidofile --watch --watch-interval 30s
+  ```
+
+  A poll that finds no change costs one read and one hash. The hash advances on
+  every read, not only on a successful reload, so a rejected reload — an invalid
+  config, or a change that requires a restart — is reported once rather than on
+  every tick; your next edit changes the hash again and is picked up.
+
+- **A startup warning.** On Linux, if the config file turns out to live on a
+  different filesystem than its own directory — which is what a single-file bind
+  mount looks like from inside the container — Hookaido logs
+  `watch_may_not_fire` at startup with the remedy, instead of leaving you to
+  rediscover it. The warning is skipped when `--watch-interval` is set, since
+  polling covers the case.
+
 ### Live-Reloadable (no restart)
 
 | Config area                                                    | Notes                    |

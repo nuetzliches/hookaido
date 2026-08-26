@@ -96,8 +96,22 @@ func run() int {
 	logLevel := fs.String("log-level", "info", "log level (debug|info|warn|error)")
 	dotenvPath := fs.String("dotenv", "", "load environment variables from file (dev only)")
 	watch := fs.Bool("watch", false, "watch config file for reload")
+	watchInterval := fs.Duration("watch-interval", 0, "with --watch, also poll the config file at this interval (off by default; needed when the config is a single-file bind mount)")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return 2
+	}
+	if *watchInterval != 0 {
+		// Refusing rather than implying --watch: a flag that silently enables
+		// config reloading is the wrong direction for a surface that reloads
+		// auth and routes.
+		if !*watch {
+			fmt.Fprintln(os.Stderr, "--watch-interval requires --watch")
+			return 2
+		}
+		if *watchInterval < minWatchInterval {
+			fmt.Fprintf(os.Stderr, "--watch-interval must be at least %s\n", minWatchInterval)
+			return 2
+		}
 	}
 
 	baseLogger, err := newLogger(*logLevel)
@@ -408,6 +422,22 @@ func run() int {
 		go watchConfig(ctx, *configPath, runtimeLogger, func() {
 			reloadNow("watch")
 		})
+		if *watchInterval > 0 {
+			go pollConfig(ctx, *configPath, *watchInterval, data, runtimeLogger, func() {
+				reloadNow("watch_poll")
+			})
+		} else if separate, known := configOnSeparateDevice(*configPath); known && separate {
+			// The config file is on a different filesystem than its own
+			// directory, which is what a single-file bind mount looks like from
+			// inside the container. watchConfig watches the directory, and that
+			// directory does not change when the host file is replaced, so no
+			// event will ever arrive. Say so once at startup instead of letting
+			// a route stay 404 while the operator believes the config is live.
+			runtimeLogger.Warn("watch_may_not_fire",
+				slog.String("path", *configPath),
+				slog.String("reason", "config file is on a different filesystem than its directory, which is what a single-file bind mount looks like; the directory watch cannot see a host-side replace"),
+				slog.String("remedy", "mount the directory instead of the file, or pass --watch-interval"))
+		}
 	}
 
 	<-ctx.Done()

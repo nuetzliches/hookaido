@@ -108,22 +108,48 @@ curl http://localhost:2019/healthz
 
 ## Hot Reload
 
-Mount config read-write and pass `--watch`:
+Mount the config **directory** — not the config file — read-write, and pass `--watch`:
 
 ```bash
 docker run -d \
   --name hookaido \
   -p 8080:8080 -p 9443:9443 -p 2019:2019 \
   -e HOOKAIDO_PULL_TOKEN=mytoken \
-  -v $(pwd)/Hookaidofile:/app/Hookaidofile \
+  -v $(pwd)/config:/app/config \
   -v hookaido-data:/app/.data \
   ghcr.io/nuetzliches/hookaido:latest \
-  run --config /app/Hookaidofile --db /app/.data/hookaido.db --watch
+  run --config /app/config/Hookaidofile --db /app/.data/hookaido.db --watch
 ```
+
+The directory mount is the part that matters. `--watch` watches the directory
+containing the config and filters by basename, which is what makes an atomic
+replace-by-rename work. With a **single-file** bind mount —
+`-v $(pwd)/Hookaidofile:/app/Hookaidofile` — `/app` inside the container is the
+container's own directory holding one bind-mounted entry, so replacing the file
+on the host creates a new inode that the existing mount does not resolve to. The
+container's directory genuinely did not change, no event arrives, and `--watch`
+silently never fires: a new route stays `404` while `watching_config` sits in the
+log.
+
+Kubernetes has the same failure mode with `subPath` ConfigMap mounts, which are
+documented not to receive updates. Mount the ConfigMap as a volume instead.
+
+If the mount shape is not yours to change, add a polling fallback:
+
+```bash
+  run --config /app/Hookaidofile --db /app/.data/hookaido.db --watch --watch-interval 30s
+```
+
+`--watch-interval` re-reads the config path on that interval and reloads when its
+content hash changes, through the same path as an fsnotify event. Without it,
+Hookaido logs `watch_may_not_fire` at startup on Linux when it detects that the
+config file is on a different filesystem than its own directory — the signature
+of a single-file mount.
 
 ## Production Notes
 
 - Use a named volume (not a bind mount) for `/app/.data` to keep SQLite WAL durable.
+- With `--watch`, mount the config **directory**, not the config file. A single-file bind mount cannot deliver file-change events; see [Hot Reload](#hot-reload).
 - The image starts as root to fix volume ownership (`chown`), then drops to non-root user `hookaido` (UID 1000) via `su-exec`. This prevents `SQLITE_CANTOPEN` errors when Docker creates volumes as `root:root`. If you run with `--user hookaido`, the entrypoint skips `chown` and runs directly.
 - For TLS, mount cert/key files and reference them in your `Hookaidofile`.
 - Behind a reverse proxy, `match remote_ip` sees the **proxy** address, not the client — every request arrives from the proxy. Either put the IP restriction in the proxy, or set `ingress { trusted_proxies "..." }` so Hookaido reads the client address from `X-Forwarded-For`. See [`remote_ip` behind a reverse proxy](ingress.md#remote_ip-behind-a-reverse-proxy).

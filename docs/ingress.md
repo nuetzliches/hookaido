@@ -59,6 +59,14 @@ Matchers further narrow which requests a route accepts. All matchers within a ro
 | `query_exists`  | Query parameter key must be present                                        |
 | `remote_ip`     | Source IP or CIDR (from `RemoteAddr`). IPv4 and IPv6 supported             |
 
+`header` and `query` compare their values in **constant time**. Matchers normally
+only select a route — `X-GitHub-Event: push` is not a secret — but for an event
+source whose entire configuration surface is a single URL field, a `query`
+matcher on a shared token is the only credential check available, so the
+comparison is held to the same standard as the `auth` paths. Value lengths remain
+distinguishable; a matcher token is a gate against opportunistic traffic, not a
+signature.
+
 ### Named Matchers
 
 Define reusable matchers at the top level:

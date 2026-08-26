@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -3143,18 +3144,34 @@ func matchHeaders(h http.Header, expected []config.HeaderMatchConfig, required [
 	return true
 }
 
+// matchHeaderValues compares in constant time because `match header` is not
+// only a selector. For an event source whose entire configuration surface is a
+// single URL field -- no custom header, no signing secret -- a `match header`
+// or `match query` on a shared token is the only credential check available,
+// which made these the one secret comparison in the project that leaked
+// timing. Length differences stay observable through ConstantTimeCompare's
+// early return on unequal lengths, and the first-match return still lets the
+// number of values influence timing; the realistic attack is on the value.
 func matchHeaderValues(values []string, expected string) bool {
+	matched := false
 	for _, v := range values {
-		if v == expected {
-			return true
+		if constantTimeEqual(v, expected) {
+			matched = true
 		}
 		for _, part := range strings.Split(v, ",") {
-			if strings.TrimSpace(part) == expected {
-				return true
+			if constantTimeEqual(strings.TrimSpace(part), expected) {
+				matched = true
 			}
 		}
 	}
-	return false
+	return matched
+}
+
+// constantTimeEqual reports whether a and b are equal without branching on
+// their contents. Unequal lengths are still distinguishable -- padding to a
+// fixed length is not worth it for a route matcher.
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func matchQuery(values map[string][]string, expected []config.QueryMatchConfig, required []string) bool {
@@ -3182,13 +3199,16 @@ func matchQuery(values map[string][]string, expected []config.QueryMatchConfig, 
 	return true
 }
 
+// matchQueryValues compares in constant time, for the same reason as
+// matchHeaderValues above.
 func matchQueryValues(values []string, expected string) bool {
+	matched := false
 	for _, v := range values {
-		if v == expected {
-			return true
+		if constantTimeEqual(v, expected) {
+			matched = true
 		}
 	}
-	return false
+	return matched
 }
 
 func parseRemoteAddrIP(remoteAddr string) (netip.Addr, bool) {

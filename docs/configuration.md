@@ -828,10 +828,17 @@ Two things help when you cannot change the mount:
   hookaido run --config /etc/hookaido/Hookaidofile --watch --watch-interval 30s
   ```
 
-  A poll that finds no change costs one read and one hash. The hash advances on
-  every read, not only on a successful reload, so a rejected reload — an invalid
-  config, or a change that requires a restart — is reported once rather than on
-  every tick; your next edit changes the hash again and is picked up.
+  A poll that finds no change costs two reads and two hashes: a detected change
+  is re-read after a 200 ms settle before it is reported, mirroring the debounce
+  the fsnotify watcher already uses. That matters because a plain overwrite
+  truncates before it writes, so the file is briefly empty — without the settle,
+  rewriting a config with identical bytes would count as a change, and a real
+  edit would be reported twice, once as a rejected half-written config.
+
+  The hash advances on every settled read, not only on a successful reload, so a
+  rejected reload — an invalid config, or a change that requires a restart — is
+  reported once rather than on every tick; your next edit changes the hash again
+  and is picked up.
 
 - **A startup warning.** On Linux, if the config file turns out to live on a
   different filesystem than its own directory — which is what a single-file bind

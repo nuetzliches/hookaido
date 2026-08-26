@@ -14,6 +14,15 @@ import (
 // be a unit mistake than an intent.
 const minWatchInterval = time.Second
 
+// pollSettleDelay is how long a detected change has to hold still before it is
+// reported. It mirrors watchConfig's 200 ms debounce, and for the same reason:
+// a writer that truncates and then writes -- which is what a plain overwrite
+// does -- is briefly observable as empty or partial content. Without the
+// settle, one such write showed up as two changes: a rejected reload of a
+// half-written config followed by the real one, and rewriting a config with
+// identical bytes showed up as a change at all.
+const pollSettleDelay = 200 * time.Millisecond
+
 // pollConfig re-reads the config path on a fixed interval and reloads when its
 // content hash changes.
 //
@@ -30,10 +39,10 @@ const minWatchInterval = time.Second
 // The failure was silent: `watching_config` was logged, no reload happened, and
 // a new route stayed 404 while the operator believed the config was live.
 //
-// The hash advances on every read, not only on a successful reload. A rejected
-// reload -- invalid config, or a change that requires a restart -- is therefore
-// reported once rather than on every tick; the operator's next edit changes the
-// hash again and is picked up.
+// The hash advances on every settled read, not only on a successful reload. A
+// rejected reload -- invalid config, or a change that requires a restart -- is
+// therefore reported once rather than on every tick; the operator's next edit
+// changes the hash again and is picked up.
 func pollConfig(ctx context.Context, path string, interval time.Duration, initial []byte, logger *slog.Logger, reload func()) {
 	if logger == nil {
 		logger = slog.Default()
@@ -54,22 +63,51 @@ func pollConfig(ctx context.Context, path string, interval time.Duration, initia
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			data, err := os.ReadFile(path)
-			if err != nil {
-				// Transient during an atomic replace, and permanent if the file
-				// was removed. Either way the next tick retries, so this is a
-				// warning rather than a reason to stop polling.
-				logger.Warn("poll_config_failed", slog.Any("err", err))
-				continue
-			}
-			sum := hashConfig(data)
-			if sum == last {
+			sum, ok := readSettledConfigHash(ctx, path, logger)
+			if !ok || sum == last {
 				continue
 			}
 			last = sum
 			reload()
 		}
 	}
+}
+
+// readSettledConfigHash hashes the config file, and on a first read it re-reads
+// after pollSettleDelay to confirm the content is not still being written. The
+// caller only ever sees a hash that held still.
+func readSettledConfigHash(ctx context.Context, path string, logger *slog.Logger) (string, bool) {
+	first, err := os.ReadFile(path)
+	if err != nil {
+		// Transient during a replace, and permanent if the file was removed.
+		// Either way the next tick retries, so this is a warning rather than a
+		// reason to stop polling.
+		logger.Warn("poll_config_failed", slog.Any("err", err))
+		return "", false
+	}
+
+	timer := time.NewTimer(pollSettleDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return "", false
+	case <-timer.C:
+	}
+
+	second, err := os.ReadFile(path)
+	if err != nil {
+		logger.Warn("poll_config_failed", slog.Any("err", err))
+		return "", false
+	}
+
+	firstSum := hashConfig(first)
+	secondSum := hashConfig(second)
+	if firstSum != secondSum {
+		// Still being written. Leave it for the next tick rather than reloading
+		// a half-written config and reporting the failure.
+		return "", false
+	}
+	return secondSum, true
 }
 
 func hashConfig(data []byte) string {

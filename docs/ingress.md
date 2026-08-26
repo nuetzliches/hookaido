@@ -90,12 +90,15 @@ Two ways out, in order of preference:
    [`ingress.trusted_proxies`](configuration.md#trusted_proxies).
 
 `header` and `query` compare their values in **constant time**. Matchers normally
-only select a route — `X-GitHub-Event: push` is not a secret — but for an event
-source whose entire configuration surface is a single URL field, a `query`
-matcher on a shared token is the only credential check available, so the
-comparison is held to the same standard as the `auth` paths. Value lengths remain
-distinguishable; a matcher token is a gate against opportunistic traffic, not a
-signature.
+only select a route — `X-GitHub-Event: push` is not a secret — but a `query`
+matcher on a shared token was for a long time the only credential check available
+to an event source whose entire configuration surface is a single URL field, so
+the comparison is held to the same standard as the `auth` paths. Value lengths
+remain distinguishable.
+
+For that case, prefer [`auth query`](#query-token-auth): it is an authenticator
+rather than a matcher, so the route does not report as unauthenticated, and it
+reaches `secret_ref` and the runtime secrets pool for rotation.
 
 ### Named Matchers
 
@@ -116,6 +119,13 @@ Define reusable matchers at the top level:
 ## Authentication
 
 Each route can use one authentication method. Authentication runs before enqueue — rejected requests never enter the queue.
+
+| Variant | What the source must be able to send |
+| --- | --- |
+| [`auth hmac`](#hmac-verification) | A signature header (plus timestamp/nonce depending on mode) |
+| [`auth basic`](#basic-auth) | An `Authorization` header |
+| [`auth forward`](#forward-auth) | Whatever the external checker expects |
+| [`auth query`](#query-token-auth) | Nothing but the URL — the token is a query parameter |
 
 ### HMAC Verification
 
@@ -256,6 +266,79 @@ Behavior:
 Response headers specified in `copy_headers` are copied from the auth response into the stored envelope headers.
 
 > `auth forward` is mutually exclusive with `auth basic` and `auth hmac`.
+
+### Query Token Auth
+
+For event sources that can be given **nothing but a URL**:
+
+```hcl
+/webhooks/source {
+  auth query "t" secret_ref "source-token"
+  pull { path /pull/source }
+}
+```
+
+Some sources have no header, no signing secret and no basic-auth field to
+configure — the UI has one "URL" input and that is the whole contract. This is
+common with telephony/PBX platforms, appliance webhooks and older ERP systems.
+None of the three variants above can be satisfied by such a source, so the token
+travels in a query parameter.
+
+**Shorthand and rotation:**
+
+```hcl
+auth query "t" "env:URL_TOKEN"             # env / file / vault / raw ref
+auth query "t" secret_ref "source-token"   # pool-backed, rotatable
+```
+
+Repeating the directive with the same parameter name adds another accepted token,
+which is how a rotation gets an overlap window:
+
+```hcl
+/webhooks/source {
+  auth query "t" secret_ref "token-v1"
+  auth query "t" secret_ref "token-v2"
+  pull { path /pull/source }
+}
+```
+
+Behavior:
+
+- A missing or wrong token → **`404`**, the same answer an unmatched request
+  gets. There is no realistic client here that benefits from a distinguishable
+  auth error, and `404` does not confirm that the path exists.
+- Checked **before the rate limiter and before the body is read**, so a wrong
+  token costs no queue work and cannot consume the route's token budget.
+- The token is never written to the access log, the envelope, the queue, metrics
+  labels or the delivery target. That is what makes a token in the *query*
+  preferable to one in the *path* — the path is simultaneously queue key,
+  access-log field, envelope trace and Prometheus label.
+- Comparison is constant-time over SHA-256 digests, so neither the token length
+  nor the number of configured tokens is observable.
+- Rejections are reported with reason `auth` and status `404` in the ingress
+  metrics, so an operator can still tell a wrong token from an unknown path.
+- A parameter with no usable secret **fails compilation** — commenting out the
+  secret line during a rotation must not silently open the route.
+
+> `auth query` is mutually exclusive with `auth basic`, `auth hmac` and
+> `auth forward`. It also rejects a `match query` or `query_exists` on the *same*
+> parameter: both would read it, the matcher runs first, and a wrong token would
+> fall through to a later route instead of being rejected here.
+
+**Honest limitation.** A URL token cannot be made replay-safe: there is no nonce
+and no timestamp, so anyone who learns the URL can inject events. That is a
+property of the source, not of Hookaido. Use `auth hmac` whenever the source can
+sign — `auth query` is a gate against opportunistic traffic, not a signature.
+
+**Why not `match query`?** Using the matcher as a credential check works and was
+the only option before this variant existed. It reports the route as having no
+authenticator at all to anyone auditing the config, though, and it cannot reach
+`secret_ref` or the runtime secrets pool — so the token can only be rotated by
+editing the config. Prefer `auth query`.
+
+**Why not a token in the path?** The path is the queue key, an access-log field,
+an envelope trace value and a Prometheus label. A secret placed there ends up in
+all four.
 
 ## Rate Limiting
 

@@ -520,6 +520,7 @@ Each route block defines a webhook endpoint path and its processing pipeline:
   auth hmac env:HOOKAIDO_GITHUB_SECRET
   # auth basic "user" "pass"
   # auth forward "https://auth.example/check"
+  # auth query "t" secret_ref "source-token"   # for URL-only sources
 
   # Route-level publish control
   publish {
@@ -649,6 +650,58 @@ auth forward "https://auth.example/check" {
 ```
 
 > `auth forward` is mutually exclusive with `auth basic` and `auth hmac`.
+
+**Query token** (for sources that can only be given a URL):
+
+```hcl
+auth query "t" "env:URL_TOKEN"
+# or with secret rotation:
+auth query "t" secret_ref "source-token"
+# several are accepted at once, which is what gives a rotation its overlap:
+auth query "t" secret_ref "token-v1"
+auth query "t" secret_ref "token-v2"
+```
+
+Some event sources can be handed **nothing but a URL**: no custom header, no
+signing secret, no basic-auth credentials. This is common with telephony/PBX
+platforms, appliance webhooks and older ERP systems — the configuration UI has a
+single "URL" field and that is the entire contract. None of `auth basic`,
+`auth hmac` or `auth forward` can be satisfied by such a source, so the token
+goes in the query string, which is the only place the source can carry one.
+
+Behaviour worth knowing:
+
+- **A failure answers `404`, not `401`.** There is no realistic client here that
+  benefits from a distinguishable auth error, and `404` does not confirm that the
+  path exists.
+- **It is checked before the rate limiter and before the body is read**, so a
+  wrong token costs no queue work and cannot consume the route's token budget.
+- **The token never reaches the access log, the envelope, the queue, metrics
+  labels or the delivery target.** This is what makes a token in the *query*
+  preferable to one in the *path*: the path is simultaneously queue key,
+  access-log field, envelope trace and Prometheus label.
+- Comparison is constant-time, over SHA-256 digests, so neither the token's
+  length nor the number of configured tokens is observable.
+- `secret_ref` support means a URL token participates in the same rotation
+  machinery as `auth hmac` — including runtime-mutable pools rotated through the
+  Admin API, without a config edit.
+- `auth query` is mutually exclusive with `auth basic`, `auth hmac` and
+  `auth forward`, and rejects a `match query` / `query_exists` on the *same*
+  parameter: both would read it, the matcher runs first, and a wrong token would
+  fall through to a later route instead of being rejected.
+- A parameter with no usable secret **fails compilation**. Commenting out the
+  secret line during a rotation must not silently open the route.
+
+> **Honest limitation.** A URL token cannot be made replay-safe: there is no
+> nonce and no timestamp, so anyone who learns the URL can inject events. That is
+> a property of the source, not of Hookaido. Use `auth hmac` whenever the source
+> can sign; `auth query` is a gate against opportunistic traffic, not a signature.
+
+Before this existed, the only way through was to use `match query` as a
+credential check. That worked, and it is still a valid matcher — but it reported
+the route as having **no authenticator at all** to anyone auditing the config,
+and it could not reach `secret_ref` or the runtime secrets pool, so the token
+could only be rotated by editing the config. Prefer `auth query`.
 
 ### Deliver Blocks (Push Mode)
 

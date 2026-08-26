@@ -66,6 +66,7 @@ Notes:
 - `summary.queue_backend` reports the compiled runtime queue backend (`sqlite`, `memory`, `postgres`, or `mixed` when config is invalid).
 - `summary.publish_policy_direct_enabled`, `summary.publish_policy_managed_enabled`, `summary.publish_policy_allow_pull_routes`, `summary.publish_policy_allow_deliver_routes`, `summary.publish_policy_require_actor`, `summary.publish_policy_require_request_id`, `summary.publish_policy_fail_closed`, `summary.publish_policy_actor_allowlist`, and `summary.publish_policy_actor_prefixes` report compiled publish-path policy settings from `defaults.publish_policy`.
 - Compile errors include ingress HMAC header-collision validation for route `auth hmac` (`signature_header`, `timestamp_header`, and `nonce_header` must be distinct after defaults are applied).
+- Compile errors include route `auth query` validation: an unknown or duplicate `secret_ref`, a parameter with no usable secret, a combination with `auth basic`/`auth hmac`/`auth forward`, and a collision with a `match query`/`query_exists` on the same parameter.
 
 ### `config_fmt_preview`
 Format Hookaidofile without writing to disk.
@@ -82,6 +83,7 @@ Notes:
 - Preserves observability tracing shorthand (`observability { tracing on|off }`) in formatted output.
 - Preserves route queue shorthand (`queue sqlite|memory|postgres`) in formatted output.
 - Normalizes mixed route HMAC shorthand+inline options (`auth hmac secret_ref "S1" { ... }`) into stable block output (`auth hmac { ... }`).
+- Preserves route query-token auth (`auth query "<param>" [secret_ref] <value>`) in formatted output, one line per accepted token.
 
 ### `config_diff`
 Compute normalized unified diff between current and candidate Hookaidofile content.

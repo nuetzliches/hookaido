@@ -387,6 +387,17 @@ type Route struct {
 
 	AuthForward *ForwardAuthBlock
 
+	// AuthQuery* is the auth variant for sources that can be given nothing but
+	// a URL: no custom header, no signing secret, no basic-auth credentials.
+	// The token travels in a query parameter, which is the only place such a
+	// source can carry one.
+	AuthQueryParam         string
+	AuthQueryParamQuoted   bool
+	AuthQueryParamSet      bool
+	AuthQuerySecrets       []string
+	AuthQuerySecretsQuoted []bool
+	AuthQuerySecretIsRef   []bool
+
 	// AuthHMACSecrets holds secret references for ingress HMAC verification.
 	AuthHMACSecrets       []string
 	AuthHMACSecretsQuoted []bool

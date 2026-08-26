@@ -468,6 +468,7 @@ type runtimeState struct {
 	basicByRoute         map[string]*ingress.BasicAuth
 	forwardByRoute       map[string]*ingress.ForwardAuth
 	hmacByRoute          map[string]*ingress.HMACAuth
+	queryByRoute         map[string]*ingress.QueryAuth
 	ingressGlobalLimit   *tokenBucketLimiter
 	ingressRouteLimits   map[string]*tokenBucketLimiter
 	trustedProxies       []netip.Prefix
@@ -491,6 +492,7 @@ func newRuntimeState(compiled config.Compiled) *runtimeState {
 		basicByRoute:         make(map[string]*ingress.BasicAuth),
 		forwardByRoute:       make(map[string]*ingress.ForwardAuth),
 		hmacByRoute:          make(map[string]*ingress.HMACAuth),
+		queryByRoute:         make(map[string]*ingress.QueryAuth),
 		ingressRouteLimits:   make(map[string]*tokenBucketLimiter),
 		trustedProxies:       compiled.Ingress.TrustedProxies,
 		now:                  time.Now,
@@ -1036,6 +1038,7 @@ func (s *runtimeState) resolveIngressSnapshot(r *http.Request, requestPath strin
 		BasicAuth:   s.basicByRoute[route],
 		ForwardAuth: s.forwardByRoute[route],
 		HMACAuth:    s.hmacByRoute[route],
+		QueryAuth:   s.queryByRoute[route],
 	}
 	for _, rt := range s.routes {
 		if rt.Path != route {
@@ -1465,6 +1468,7 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 	hmacByRoute := make(map[string]*ingress.HMACAuth, len(compiled.Routes))
 	basicByRoute := make(map[string]*ingress.BasicAuth, len(compiled.Routes))
 	forwardByRoute := make(map[string]*ingress.ForwardAuth, len(compiled.Routes))
+	queryByRoute := make(map[string]*ingress.QueryAuth, len(compiled.Routes))
 	for _, rt := range compiled.Routes {
 		if len(rt.AuthBasic) > 0 {
 			basicByRoute[rt.Path] = ingress.NewBasicAuth(rt.AuthBasic)
@@ -1483,6 +1487,16 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			forwardByRoute[rt.Path] = forward
 		} else {
 			forwardByRoute[rt.Path] = nil
+		}
+
+		if rt.AuthQuery.Enabled {
+			auth, err := buildQueryAuth(rt, pools)
+			if err != nil {
+				return err
+			}
+			queryByRoute[rt.Path] = auth
+		} else {
+			queryByRoute[rt.Path] = nil
 		}
 
 		if len(rt.AuthHMACSecrets) == 0 {
@@ -1597,8 +1611,60 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 	s.basicByRoute = basicByRoute
 	s.forwardByRoute = forwardByRoute
 	s.hmacByRoute = hmacByRoute
+	s.queryByRoute = queryByRoute
 	s.mu.Unlock()
 	return nil
+}
+
+// buildQueryAuth constructs the `auth query` authenticator for one route.
+//
+// Static secrets are loaded now; secret_ref pools are read at verification time
+// through SelectSecrets, which is what lets a pool with several live versions
+// give a rotation its overlap window -- the thing the `match query` workaround
+// this variant replaces could never do, since a token could only be changed by
+// editing the config.
+//
+// Pools are resolved against the planned view rather than the live registry, so
+// a ref to a pool this reload introduces resolves without having to register it
+// first, exactly as `auth hmac secret_ref` does.
+func buildQueryAuth(rt config.CompiledRoute, pools map[string]*secrets.Pool) (*ingress.QueryAuth, error) {
+	var secs [][]byte
+	for _, ref := range rt.AuthQuery.Secrets {
+		b, err := secrets.LoadRef(ref)
+		if err != nil {
+			return nil, fmt.Errorf("route %q auth query secret %q: %w", rt.Path, ref, err)
+		}
+		secs = append(secs, b)
+	}
+
+	var routePools []*secrets.Pool
+	seen := make(map[string]struct{}, len(rt.AuthQuery.SecretRefs))
+	for _, ref := range rt.AuthQuery.SecretRefs {
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		pool, ok := pools[ref]
+		if !ok {
+			return nil, fmt.Errorf("route %q auth query secret_ref %q not found", rt.Path, ref)
+		}
+		routePools = append(routePools, pool)
+	}
+
+	auth := ingress.NewQueryAuth(rt.AuthQuery.Param, secs)
+	if len(routePools) > 0 {
+		capturedPools := routePools
+		auth.SelectSecrets = func(at time.Time) [][]byte {
+			out := make([][]byte, 0, 4)
+			for _, pool := range capturedPools {
+				for _, v := range pool.ValidAt(at) {
+					out = append(out, v.Value)
+				}
+			}
+			return out
+		}
+	}
+	return auth, nil
 }
 
 func startBacklogTrendCapture(ctx context.Context, trendStore queue.BacklogTrendStore, logger *slog.Logger) {

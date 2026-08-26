@@ -22,6 +22,7 @@ type RouteSnapshot struct {
 	BasicAuth   *BasicAuth
 	ForwardAuth *ForwardAuth
 	HMACAuth    *HMACAuth
+	QueryAuth   *QueryAuth
 	MaxBody     int64
 	MaxHeaders  int
 	Targets     []string
@@ -44,6 +45,7 @@ type Server struct {
 	BasicAuthFor          func(route string) *BasicAuth
 	ForwardAuthFor        func(route string) *ForwardAuth
 	HMACAuthFor           func(route string) *HMACAuth
+	QueryAuthFor          func(route string) *QueryAuth
 	LimitsFor             func(route string) (maxBodyBytes int64, maxHeaderBytes int)
 	TargetsFor            func(route string) []string
 	ObserveResult         func(accepted bool, enqueued int)
@@ -94,6 +96,9 @@ func (s *Server) snapshot(r *http.Request, requestPath string) (RouteSnapshot, b
 	if s.HMACAuthFor != nil {
 		snap.HMACAuth = s.HMACAuthFor(route)
 	}
+	if s.QueryAuthFor != nil {
+		snap.QueryAuth = s.QueryAuthFor(route)
+	}
 	if s.LimitsFor != nil {
 		snap.MaxBody, snap.MaxHeaders = s.LimitsFor(route)
 	}
@@ -120,6 +125,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		s.observe(false, 0)
 		s.observeReject("", http.StatusNotFound, "not_found")
+		return
+	}
+
+	// `auth query` is checked here -- before the rate limiter, before the
+	// adaptive gate and before the body is read -- and answers 404 rather than
+	// 401.
+	//
+	// Both are deliberate, and both preserve what the `match query` workaround
+	// this variant replaces already did. A source that can only be handed a URL
+	// has no client that benefits from a distinguishable auth error, and 404
+	// avoids confirming that the path exists at all. Rejecting before the
+	// limiter means a wrong token costs no queue work and cannot consume the
+	// route's token budget, which is exactly how a matcher miss behaves today.
+	if a := snap.QueryAuth; a != nil && !a.Verify(r) {
+		w.WriteHeader(http.StatusNotFound)
+		s.observe(false, 0)
+		// Reported as "auth" rather than "not_found" so an operator can still
+		// tell a wrong token from a genuinely unknown path. The token itself is
+		// never a label.
+		s.observeReject(route, http.StatusNotFound, "auth")
 		return
 	}
 

@@ -146,14 +146,52 @@ ingress {
     client_ca /path/to/ca.pem     # optional, enables mTLS
     client_auth require_and_verify # optional
   }
+  trusted_proxies "10.0.0.0/8" "fd00::/8"   # optional; empty by default
 }
 ```
 
-| Directive    | Default | Description                              |
-| ------------ | ------- | ---------------------------------------- |
-| `listen`     | `:8080` | Bind address                             |
-| `rate_limit` | —       | Global ingress rate limit (token-bucket) |
-| `tls`        | —       | TLS and optional mTLS configuration      |
+| Directive         | Default | Description                                                   |
+| ----------------- | ------- | ------------------------------------------------------------- |
+| `listen`          | `:8080` | Bind address                                                  |
+| `rate_limit`      | —       | Global ingress rate limit (token-bucket)                       |
+| `tls`             | —       | TLS and optional mTLS configuration                           |
+| `trusted_proxies` | empty   | Peer prefixes whose `X-Forwarded-For` is believed (see below) |
+
+#### `trusted_proxies`
+
+By default the client address is the **transport peer address** — what the socket
+reports — and `X-Forwarded-For` is ignored entirely. That is the safe default:
+believing the header unconditionally would let any client name its own source
+address.
+
+It is also a trap behind a reverse proxy, which is how Hookaido is most often
+deployed. Every request then arrives with the proxy's address, so a
+`match remote_ip` allowlist of the source's published egress range matches
+nothing and the route answers `404` for legitimate traffic. Widening the range to
+the proxy's subnet makes the traffic flow again — and matches **everything** the
+proxy forwards, from any origin. The config still reads like an origin
+restriction; it no longer is one.
+
+`trusted_proxies` is the opt-in that resolves this. When the peer address is
+inside one of the configured prefixes, the **right-most `X-Forwarded-For` entry
+that is not itself trusted** becomes the client address for `match remote_ip`.
+Walking from the right is what makes it sound: entries further left were appended
+by hops you have not vouched for, and a client can write anything it likes there.
+A request whose peer is *not* a trusted proxy keeps its peer address and the
+header is ignored — so a client talking to Hookaido directly gains nothing by
+sending one.
+
+Accepts IPs and CIDRs, IPv4 and IPv6, any number of values. Live-reloadable.
+An unparsable value fails `config validate`; a duplicate is dropped with a
+warning.
+
+If every hop in the chain is a trusted proxy, or the chain contains an entry that
+cannot be parsed, the peer address stands — the walk stops rather than reaching
+past a hop it cannot identify.
+
+Rate limiting is unaffected: Hookaido's ingress limiter is keyed per route (and
+globally), never per client address, so there is nothing for a forwarded address
+to change there.
 
 ### `pull_api`
 
@@ -759,6 +797,7 @@ kill -HUP $(cat ./hookaido.pid)
 | Pull endpoint mappings (`pull { path ... }`)                   |                          |
 | Auth settings (HMAC secrets, basic auth, forward auth, tokens) | Per-route and global     |
 | Rate limits (global + per-route)                               |                          |
+| `ingress.trusted_proxies`                                      |                          |
 | Management model labels (`application`, `endpoint_name`)       |                          |
 | Route-level `max_body` / `max_headers`                         | Per-route overrides only |
 | Route-level `publish` / `publish.direct` / `publish.managed`   |                          |

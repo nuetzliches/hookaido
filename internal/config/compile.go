@@ -139,6 +139,11 @@ type IngressConfig struct {
 	TLS    TLSConfig
 
 	RateLimit RateLimitConfig
+
+	// TrustedProxies lists the peer addresses whose X-Forwarded-For header is
+	// believed. Empty -- the default -- means the header is ignored and the
+	// client address is always the transport peer.
+	TrustedProxies []netip.Prefix
 }
 
 type DefaultsConfig struct {
@@ -2697,6 +2702,26 @@ func compileIngress(in *IngressBlock, defaultListen string) (IngressConfig, Vali
 
 	out.TLS = compileTLSBlock("ingress", in.TLS, &res)
 	out.RateLimit = compileRateLimitConfig("ingress.rate_limit", in.RateLimit, &res)
+
+	seenProxies := make(map[netip.Prefix]struct{}, len(in.TrustedProxies))
+	for i, rawProxy := range in.TrustedProxies {
+		raw := strings.TrimSpace(resolveValue(rawProxy, fmt.Sprintf("ingress.trusted_proxies[%d]", i), &res))
+		if raw == "" {
+			res.Errors = append(res.Errors, "ingress.trusted_proxies must include an IP or CIDR")
+			continue
+		}
+		pfx, err := parseRemoteIPPrefix(raw)
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("ingress.trusted_proxies[%d] %s", i, err.Error()))
+			continue
+		}
+		if _, dup := seenProxies[pfx]; dup {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("ingress.trusted_proxies[%d] %q is a duplicate; ignored", i, raw))
+			continue
+		}
+		seenProxies[pfx] = struct{}{}
+		out.TrustedProxies = append(out.TrustedProxies, pfx)
+	}
 
 	return out, res
 }

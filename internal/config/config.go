@@ -42,6 +42,11 @@ type IngressBlock struct {
 	ListenQuoted bool
 	TLS          *TLSBlock
 	RateLimit    *RateLimitBlock
+
+	// TrustedProxies is opt-in and empty by default: without it the client
+	// address is the transport peer, and X-Forwarded-For is ignored entirely.
+	TrustedProxies       []string
+	TrustedProxiesQuoted []bool
 }
 
 type DefaultsBlock struct {

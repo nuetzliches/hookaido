@@ -7,6 +7,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-08-26
+
+A release about the gap between what a config file *says* and what the running
+process actually enforces. Each of the four entries below is a place where
+Hookaido was doing something defensible while an operator, reading their own
+Hookaidofile, would reasonably conclude otherwise — an IP allowlist that matched
+the proxy, a `--watch` that could never fire, an authenticated route reporting as
+open, and the one secret comparison that was not constant time. It closes
+[#273](https://github.com/nuetzliches/hookaido/issues/273)–[#276](https://github.com/nuetzliches/hookaido/issues/276).
+
+`ingress.trusted_proxies` and `auth query` are the only new configuration
+surface; both are opt-in, and nothing changes for a config that does not use
+them. The importable Go API is unchanged, so this stays on the `/v2` module path.
+
 ### Added
 
 - **`ingress { trusted_proxies "..." }`** makes `match remote_ip` usable behind a reverse proxy. `remote_ip` compared against the transport peer address only, and `X-Forwarded-For` was not consulted anywhere — a defensible default, but one that fails silently and in both directions in the topology Hookaido is most often deployed in. Behind a TLS-terminating proxy every request arrives with the proxy's address, so an allowlist of the source's published egress range matched *nothing* and the route returned `404` for legitimate traffic; widening the range to the proxy's subnet to make it work then matched *everything* the proxy forwarded, from any origin, while the config still read like an origin restriction. The new directive is opt-in and empty by default, in which case nothing changes and the header is still never read. When set, and only when the peer address falls inside one of its prefixes, the right-most `X-Forwarded-For` entry that is not itself trusted becomes the client address for `remote_ip` — so a client talking to Hookaido directly cannot spoof its way past an allowlist. Accepts IPs and CIDRs, IPv4 and IPv6; live-reloadable. Ingress rate limiting is keyed per route and globally, never per client address, so it is unaffected. `docs/ingress.md`, `docs/configuration.md` and `docs/docker.md` now state the trap and both ways out. ([#276](https://github.com/nuetzliches/hookaido/issues/276))

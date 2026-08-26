@@ -4,16 +4,16 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-- [ ] **Test coverage ≥80%** — 76.7% as of v2.11.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
+- [ ] **Test coverage ≥80%** — 77.1% as of v2.12.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
 
-  Flat against v2.10.1's 76.9% despite a large new test surface: the #249–#258 fixes added roughly as many production statements as they added covered ones, so the ratio held while the absolute covered count grew.
+  Up from v2.11.0's 76.7%, reversing that release's slight dip from v2.10.1's 76.9%. The #273–#276 work added more covered statements than production ones: `internal/app` moved 62.5% → 64.5% because `resolveClientIP`, `pollConfig` and the query-auth wiring are all directly testable without a server bring-up, and `internal/ingress` is at 92.5%.
 
-  Ranked by uncovered statements, which is what actually moves the total — a package at 62% with 1,200 uncovered statements matters far more than one at 62% with 40:
+  Ranked by uncovered statements, which is what actually moves the total — a package at 64% with 1,200 uncovered statements matters far more than one at 64% with 40:
 
   | Package | Uncovered | Total | % |
   | --- | ---: | ---: | ---: |
-  | `internal/config` | 1241 | 5720 | 78.3% |
-  | `internal/app` | 1219 | 3255 | 62.5% |
+  | `internal/config` | 1248 | 5841 | 78.6% |
+  | `internal/app` | 1201 | 3383 | 64.5% |
   | `internal/mcp` | 932 | 4134 | 77.5% |
   | `internal/admin` | 543 | 2606 | 79.2% |
   | `modules/sqlite` | 432 | 1693 | 74.5% |
@@ -21,7 +21,7 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
   | `internal/queue` | 213 | 1337 | 84.1% |
   | `internal/pullapi` | 179 | 673 | 73.4% |
 
-  Reaching 80% needs roughly **760 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is the largest percentage gap but the hardest: its zero-coverage functions are `run.go` startup paths that need a real server bring-up, which is where the last coverage pass deliberately stopped.
+  Reaching 80% needs roughly **690 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is still the largest percentage gap and still the hardest: what remains uncovered there is concentrated in `run.go` startup paths that need a real server bring-up, which is where every coverage pass so far has deliberately stopped. The v2.12.0 delta is the argument for the approach that works — extract the logic into a function that takes its inputs as arguments, as `resolveClientIP` and `pollConfig` do, rather than trying to test `run()`.
 
 - [ ] **Publish a reachable coverage report** — awesome-go requires a Codecov or Coveralls link that resolves. CI computes a profile and uploads it, but only as a workflow artifact (`ci.yml`, `actions/upload-artifact` name `coverage`): that expires, needs a signed-in session, and is not a report — so there is no durable link to submit. Needs a coverage service wired into CI plus a README badge. Two things to fix while doing it: the `test` job does not set `HOOKAIDO_TEST_POSTGRES_DSN`, so the uploaded profile understates coverage the same way a local `make test-pg`-less run does, and it excludes nothing, so it counts generated protobuf. This is the one remaining awesome-go blocker fully in our control besides the 80% number itself.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
@@ -39,6 +39,8 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 - [ ] **VS Code LSP** — Language server backed by `config validate`/`config compile` for live diagnostics in the editor. Optional follow-up to the VS Code extension.
 
 ## Completed (move here when done)
+
+- [x] **Config-vs-reality gaps from the third review round (#273–#276)** — Four places where a Hookaidofile said one thing and the running process enforced another. `ingress { trusted_proxies }` so `match remote_ip` sees the client rather than the reverse proxy, instead of silently matching nothing or (once widened to the proxy subnet) everything. `--watch-interval` plus a `watch_may_not_fire` startup warning, because `--watch` cannot fire at all against a single-file bind mount — the shape `docs/docker.md` itself recommended. `auth query` as a first-class variant for event sources whose entire configuration surface is a URL, replacing the `match query` workaround that reported the route as unauthenticated and could not reach `secret_ref`. And constant-time comparison in `matchHeaderValues`/`matchQueryValues`, the one secret comparison in the project that still leaked timing. One PR per issue (#277–#280), each with the docs stating the honest limitation rather than only the fix.
 
 - [x] **Single-port shared listener for ingress + pull (#183)** — `ingress` can now co-listen with `pull_api` (and transitively `admin_api`) on one prefix-muxed port when their `listen` addresses match: ingress serves its bare route paths as the default handler, the APIs serve under their prefixes. Strictly opt-in; the multi-port topology remains the default. Compile-time validation was generalized (`validateSharedListeners`) to enforce non-empty/distinct/non-overlapping API prefixes, reject ingress-route-path/API-prefix collisions, and require identical TLS across the shared address; `pull_api.grpc_listen` and `observability.metrics.listen` stay dedicated. Runtime listener construction now groups HTTP components by address and muxes shared groups via a generalized `prefixMux`. New `IngressShared` compiled flag (restart-required on toggle, surfaced as `ingress_shared` in config-summary/MCP output). 5 new config tests + a single-port e2e round-trip (`TestBinaryE2E_SinglePortIngressPull`); docs (configuration.md, DESIGN.md) + CHANGELOG updated.
 - [x] **Module path migrated to `/v2` (Go modules v2+ rule)** — `go.mod` is now `github.com/nuetzliches/hookaido/v2`. Rewrote 66 `.go` files' imports, LDFLAGS in `internal/tools/release/main.go` + `Dockerfile`, install instructions in `doc.go` + `cmd/hookaido/doc.go`, the `go_package` option in `modules/grpcworker/proto/workerapi.proto` and regenerated `workerapi.pb.go`. Repo-wide `gofmt -s` cleanup of 10 files. `go build ./...`, `go vet ./...`, full `make test-pg` all green. Root cause: `proxy.golang.org` fell back to v1.5.1 because the unsuffixed module path was incompatible with v2.x.x tags — unblocks Go Report Card / pkg.go.dev / awesome-go.

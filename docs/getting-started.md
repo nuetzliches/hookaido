@@ -239,6 +239,7 @@ curl http://127.0.0.1:2019/healthz?details=1
 | `--postgres-dsn` | —                  | PostgreSQL DSN (when `queue.backend` is `postgres`) |
 | `--pid-file`  | —                     | Write PID file (enables `SIGHUP` reload) |
 | `--watch`     | `false`               | Hot-reload on config file changes        |
+| `--watch-interval` | —                | With `--watch`, also poll the config for content changes at this interval (min `1s`). Needed when the config is a **single-file** bind mount — see [Hot Reload](configuration.md#hot-reload) |
 | `--log-level` | `info`                | Runtime log level                        |
 | `--dotenv`    | —                     | Load environment variables from file     |
 

@@ -2799,6 +2799,34 @@ func (p *parser) parseRouteBlock() (Route, error) {
 					}
 					route.AuthHMACBlockSet = true
 				}
+			case "query":
+				name, nameQuoted, err := p.parseValue()
+				if err != nil {
+					return Route{}, err
+				}
+				if route.AuthQueryParamSet && route.AuthQueryParam != name {
+					return Route{}, p.errAt(typTok.pos, "route auth query parameter mismatch: %q and %q", route.AuthQueryParam, name)
+				}
+				route.AuthQueryParam = name
+				route.AuthQueryParamQuoted = nameQuoted
+				route.AuthQueryParamSet = true
+
+				next, err := p.peek()
+				if err != nil {
+					return Route{}, err
+				}
+				isRef := false
+				if next.kind == tokIdent && next.text == "secret_ref" {
+					_, _ = p.next()
+					isRef = true
+				}
+				secret, quoted, err := p.parseValue()
+				if err != nil {
+					return Route{}, err
+				}
+				route.AuthQuerySecrets = append(route.AuthQuerySecrets, secret)
+				route.AuthQuerySecretsQuoted = append(route.AuthQuerySecretsQuoted, quoted)
+				route.AuthQuerySecretIsRef = append(route.AuthQuerySecretIsRef, isRef)
 			case "forward":
 				if route.AuthForward != nil {
 					return Route{}, p.errAt(typTok.pos, "duplicate route auth forward")

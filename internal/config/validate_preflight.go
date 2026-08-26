@@ -44,6 +44,10 @@ func validateSecretPreflight(compiled Compiled) []string {
 			addSecretRefUsage(usages, ref, fmt.Sprintf("route %q auth hmac secret[%d]", routePath, j))
 		}
 
+		for j, ref := range route.AuthQuery.Secrets {
+			addSecretRefUsage(usages, ref, fmt.Sprintf("route %q auth query secret[%d]", routePath, j))
+		}
+
 		for j, delivery := range route.Deliveries {
 			signing := delivery.SigningHMAC
 			if !signing.Enabled {

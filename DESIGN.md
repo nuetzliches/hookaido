@@ -74,12 +74,13 @@ Per-route:
 - `application "..."` + `endpoint_name "..."` (optional management labels; must be set together and match `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 - `match { method, host, header, header_exists, query, query_exists, remote_ip }` (optional; additional matchers are ANDed)
 - `rate_limit { rps, burst? }` (optional; per-route ingress rate limit override)
-- `auth ...` (`basic`, `hmac`, `forward`)
+- `auth ...` (`basic`, `hmac`, `forward`, `query`)
   - HMAC shorthand: `auth hmac "env:HOOKAIDO_INGRESS_SECRET"` or `auth hmac secret_ref "S1"` (optional inline options block after shorthand, e.g. `auth hmac secret_ref "S1" { signature_header ... timestamp_header ... nonce_header ... tolerance ... }`)
   - HMAC block (richer): `auth hmac { secret ... | secret_ref ... ; signature_header ... ; timestamp_header ... ; nonce_header ... ; tolerance ... ; provider ... }` (`signature_header`/`timestamp_header`/`nonce_header` must be distinct after defaults are applied)
   - HMAC provider mode: `auth hmac { provider github; secret env:SECRET }` — uses provider-specific signature format instead of canonical Hookaido format; supported providers: `github` (`X-Hub-Signature-256`, `sha256=hex(HMAC-SHA256(secret, body))`, no replay protection), `gitea` (`X-Gitea-Signature`, `hex(HMAC-SHA256(secret, body))`, no replay protection), `stripe` (`Stripe-Signature`, `t=<ts>,v1=<hex>` over `<ts>.<body>`, fixed 5m tolerance), `cituro` (`X-CITURO-SIGNATURE`, `t=<ts>,s=<hex>` over `<ts>.<body>`, fixed 5m tolerance); `provider` is mutually exclusive with `signature_header`, `timestamp_header`, `nonce_header`, `tolerance`
   - Forward shorthand: `auth forward "https://auth.example/check"`
   - Forward block (optional): `auth forward "https://auth.example/check" { timeout ... ; copy_headers ... ; body_limit ... }`
+  - Query token: `auth query "<param>" "env:URL_TOKEN"` or `auth query "<param>" secret_ref "S1"`; repeat with the same `<param>` to accept several tokens at once (rotation overlap). For event sources whose entire configuration surface is a URL -- no header, no signing secret, no basic-auth credentials.
 - `publish on|off` (optional; defaults `on`; when `off`, Admin/MCP publish mutations reject this route)
 - `publish.direct on|off` (optional; defaults `on`; when `off`, global direct publish path rejects this route)
 - `publish.managed on|off` (optional; defaults `on`; when `off`, endpoint-scoped managed publish path rejects this route)
@@ -160,6 +161,7 @@ Compile constraints:
 - Named matchers: define `@name { ... }` at top-level, then attach with `match @name`.
 - `auth forward` performs pre-enqueue auth callouts: `2xx` allows, `401/403` denies, and transport/timeouts/other statuses fail closed with `503`.
 - `auth forward` is mutually exclusive with route `auth basic` and `auth hmac`.
+- `auth query` verifies a shared token in a query parameter. It is mutually exclusive with `auth basic`, `auth hmac` and `auth forward`, and rejects a `match query`/`query_exists` on the same parameter (both would read it and the matcher runs first). A missing or wrong token answers `404`, not `401` -- the same answer an unmatched request gets, which does not confirm that the path exists. It is verified before the rate limiter and before the body is read, so a rejected request costs no queue work. The token never reaches the access log, the envelope, the queue, metrics labels or the delivery target. Comparison is constant time over SHA-256 digests. A parameter with no usable secret is a compile error. It is not replay-safe -- there is no nonce and no timestamp -- which is a property of a URL-only source, not of Hookaido.
 - If a route defines `pull { auth token ... }`, those tokens override the global `pull_api` token allowlist for that route.
 
 ## Queue Model

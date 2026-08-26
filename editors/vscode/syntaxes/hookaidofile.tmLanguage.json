@@ -70,7 +70,7 @@
       "name": "keyword.other.block.hookaidofile"
     },
     "auth-keyword": {
-      "match": "\\b(auth|hmac|token|basic|forward|secret_ref|secret|sign)\\b",
+      "match": "\\b(auth|hmac|token|basic|forward|query|secret_ref|secret|sign)\\b",
       "name": "keyword.other.auth.hookaidofile"
     },
     "directive": {

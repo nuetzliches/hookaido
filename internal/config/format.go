@@ -722,6 +722,20 @@ func writeRouteBlock(b *bytes.Buffer, r Route) {
 			}
 		}
 	}
+	if r.AuthQueryParamSet {
+		param := formatValue(r.AuthQueryParam, r.AuthQueryParamQuoted)
+		for i, s := range r.AuthQuerySecrets {
+			if strings.TrimSpace(s) == "" {
+				continue
+			}
+			value := formatValue(s, quotedAt(r.AuthQuerySecretsQuoted, i))
+			if isAuthQueryRef(r, i) {
+				fmt.Fprintf(b, "  auth query %s secret_ref %s\n", param, value)
+			} else {
+				fmt.Fprintf(b, "  auth query %s %s\n", param, value)
+			}
+		}
+	}
 	if r.MaxBodySet {
 		fmt.Fprintf(b, "  max_body %s\n", formatValue(r.MaxBody, r.MaxBodyQuoted))
 	}
@@ -1014,6 +1028,13 @@ func isAuthHMACRef(r Route, idx int) bool {
 		return false
 	}
 	return r.AuthHMACSecretIsRef[idx]
+}
+
+func isAuthQueryRef(r Route, idx int) bool {
+	if idx < 0 || idx >= len(r.AuthQuerySecretIsRef) {
+		return false
+	}
+	return r.AuthQuerySecretIsRef[idx]
 }
 
 func shouldWriteRouteAuthHMACBlock(r Route) bool {

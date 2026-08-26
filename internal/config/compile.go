@@ -234,6 +234,7 @@ type CompiledRoute struct {
 
 	AuthBasic               map[string]string
 	AuthForward             ForwardAuthConfig
+	AuthQuery               QueryAuthConfig
 	AuthHMACSecrets         []string
 	AuthHMACSecretRefs      []string
 	AuthHMACProvider        string
@@ -253,6 +254,22 @@ type CompiledRoute struct {
 type PullConfig struct {
 	Path       string
 	AuthTokens []string
+}
+
+// QueryAuthConfig is the compiled form of `auth query`.
+//
+// Enabled is explicit rather than derived from Param, because a route whose
+// authenticator resolves to nil is served as if no auth were configured at all.
+// Compilation rejects the empty cases, so this stays consistent by construction.
+type QueryAuthConfig struct {
+	Enabled bool
+	Param   string
+
+	// Secrets are secret references (env:, file:, raw:, vault:) resolved at
+	// load time. SecretRefs name pools in the runtime `secrets` registry, whose
+	// several live versions give overlap during rotation.
+	Secrets    []string
+	SecretRefs []string
 }
 
 type MatchConfig struct {
@@ -672,7 +689,8 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 		}
 
 		// ── Channel type constraints ──────────────────────────────────
-		hasAuth := len(r.AuthBasic) > 0 || len(r.AuthHMACSecrets) > 0 || r.AuthForward != nil
+		hasAuth := len(r.AuthBasic) > 0 || len(r.AuthHMACSecrets) > 0 || r.AuthForward != nil ||
+			r.AuthQueryParamSet || len(r.AuthQuerySecrets) > 0
 		hasMatch := r.Match != nil || len(r.MatchRefs) > 0
 		channelErr := false
 		switch r.ChannelType {
@@ -888,6 +906,11 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth forward cannot be combined with auth basic or auth hmac", rPath))
 		}
 
+		queryAuth := compileQueryAuthConfig(rPath, r, compiled.Secrets, &res)
+		if queryAuth.Enabled && (len(basicAuth) > 0 || len(hmacSecrets) > 0 || len(hmacSecretRefs) > 0 || hasHMACSurface || forwardAuth.Enabled) {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query cannot be combined with auth basic, auth hmac or auth forward", rPath))
+		}
+
 		matchCfg, matchOK := compileMatch(rPath, r.Match, &res)
 		for _, ref := range r.MatchRefs {
 			ref = strings.TrimSpace(resolveValue(ref, fmt.Sprintf("route %q match @%s", rPath, ref), &res))
@@ -910,6 +933,24 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 			matchCfg.HeaderExists = append(matchCfg.HeaderExists, nm.HeaderExists...)
 			matchCfg.QueryExists = append(matchCfg.QueryExists, nm.QueryExists...)
 		}
+		// `auth query` and a `match query`/`query_exists` on the same parameter
+		// would both read it, and the matcher would run first: a request with a
+		// wrong token would fall through to a later route instead of being
+		// rejected here. Named matchers can contribute one too, so this runs
+		// after the refs are merged.
+		if queryAuth.Enabled {
+			for _, q := range matchCfg.Query {
+				if q.Name == queryAuth.Param {
+					res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query %q collides with match query %q", rPath, queryAuth.Param, q.Name))
+				}
+			}
+			for _, name := range matchCfg.QueryExists {
+				if name == queryAuth.Param {
+					res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query %q collides with match query_exists %q", rPath, queryAuth.Param, name))
+				}
+			}
+		}
+
 		routeRateLimit := compileRateLimitConfig(fmt.Sprintf("route %q rate_limit", rPath), r.RateLimit, &res)
 
 		queueBackend := "sqlite"
@@ -1361,6 +1402,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 			RateLimit:               routeRateLimit,
 			AuthBasic:               basicAuth,
 			AuthForward:             forwardAuth,
+			AuthQuery:               queryAuth,
 			AuthHMACSecrets:         hmacSecrets,
 			AuthHMACSecretRefs:      hmacSecretRefs,
 			AuthHMACProvider:        hmacProvider,
@@ -2776,6 +2818,70 @@ func compileRateLimitConfig(field string, in *RateLimitBlock, res *ValidationRes
 		defaultBurst = 1
 	}
 	out.Burst = defaultBurst
+	return out
+}
+
+// compileQueryAuthConfig compiles `auth query "<param>" [secret_ref] <value>`.
+//
+// The variant exists for event sources that can be given nothing but a URL --
+// telephony platforms, appliance webhooks, older ERP systems whose entire
+// configuration surface is one "URL" field. Before it, the only way through was
+// to abuse `match query` as a credential check, which worked but reported the
+// route as having no authenticator and could not reach the secret pools.
+func compileQueryAuthConfig(routePath string, r Route, declaredSecrets map[string]SecretConfig, res *ValidationResult) QueryAuthConfig {
+	var out QueryAuthConfig
+	if !r.AuthQueryParamSet && len(r.AuthQuerySecrets) == 0 {
+		return out
+	}
+
+	param := strings.TrimSpace(resolveValue(r.AuthQueryParam, fmt.Sprintf("route %q auth query param", routePath), res))
+	if param == "" {
+		res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query requires a parameter name", routePath))
+		return out
+	}
+
+	var literalSecrets []string
+	var secretRefs []string
+	seen := make(map[string]struct{})
+	for i, ref := range r.AuthQuerySecrets {
+		ref = strings.TrimSpace(resolveValue(ref, fmt.Sprintf("route %q auth query secret[%d]", routePath, i), res))
+		if ref == "" {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query secret must not be empty", routePath))
+			continue
+		}
+		if r.AuthQuerySecretIsRef != nil && i < len(r.AuthQuerySecretIsRef) && r.AuthQuerySecretIsRef[i] {
+			if _, ok := declaredSecrets[ref]; !ok {
+				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query secret_ref %q not found", routePath, ref))
+				continue
+			}
+			if _, ok := seen[ref]; ok {
+				res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query secret_ref duplicate %q", routePath, ref))
+				continue
+			}
+			seen[ref] = struct{}{}
+			secretRefs = append(secretRefs, ref)
+			continue
+		}
+		if err := secrets.ValidateRef(ref); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query secret[%d] %v", routePath, i, err))
+			continue
+		}
+		literalSecrets = append(literalSecrets, ref)
+	}
+
+	// A route with a param but no usable secret must not compile. run.go maps a
+	// route with no secrets to a nil authenticator, and ingress reads nil as
+	// "no auth configured" -- so commenting out the secret line during a
+	// rotation would have served the route wide open.
+	if len(literalSecrets) == 0 && len(secretRefs) == 0 {
+		res.Errors = append(res.Errors, fmt.Sprintf("route %q auth query requires at least one secret or secret_ref", routePath))
+		return out
+	}
+
+	out.Enabled = true
+	out.Param = param
+	out.Secrets = literalSecrets
+	out.SecretRefs = secretRefs
 	return out
 }
 

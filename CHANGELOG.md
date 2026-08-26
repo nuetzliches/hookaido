@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **`match header` and `match query` compare values in constant time.** Every authentication path in the project already did — basic auth, HMAC, and the pull/worker/admin bearer tokens — but the matchers used a plain `==`. That is harmless while a matcher only selects a route, and it stops being harmless because `match header`/`match query` are the *only* credential check available for an event source whose entire configuration surface is a single URL field, which is common with telephony platforms, appliance webhooks and older ERP systems. In that setup the matcher *is* the credential comparison, and it was the one in the codebase that leaked timing. The comparison no longer returns early on the first matching value either, so the number of values in the request does not influence timing; value *lengths* stay distinguishable, which is not worth padding away for a route matcher. ([#274](https://github.com/nuetzliches/hookaido/issues/274))
+
 ## [2.11.0] - 2026-08-18
 
 A correctness release. It closes the ten umbrella issues from the second full

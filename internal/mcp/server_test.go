@@ -59,6 +59,7 @@ func TestHandleRequest_ToolsList(t *testing.T) {
 		"messages_list":         false,
 		"attempts_list":         false,
 		"dlq_list":              false,
+		"pull_consumers":        false,
 	}
 	for _, tool := range result.Tools {
 		if _, ok := want[tool.Name]; ok {
@@ -130,6 +131,7 @@ func TestHandleRequest_ToolsListWithMutations(t *testing.T) {
 		"messages_list",
 		"attempts_list",
 		"dlq_list",
+		"pull_consumers",
 		"messages_cancel_by_filter",
 		"messages_requeue_by_filter",
 		"messages_resume_by_filter",

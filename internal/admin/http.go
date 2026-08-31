@@ -85,6 +85,7 @@ const (
 	readCodeInvalidQuery          = "invalid_query"
 	readCodeNotFound              = "not_found"
 	readCodeBacklogUnavailable    = "backlog_unavailable"
+	readCodePullUnavailable       = "pull_consumers_unavailable"
 	readCodeManagementUnavailable = "management_model_unavailable"
 )
 
@@ -154,6 +155,7 @@ type Server struct {
 	PublishManagedEnabledForRoute      func(route string) bool
 	LimitsForRoute                     func(route string) (maxBodyBytes int64, maxHeaderBytes int)
 	ManagementModel                    func() ManagementModel
+	PullConsumers                      func() []PullConsumer
 	RequireManagementAuditReason       bool
 	MaxBodyBytes                       int64
 	MaxHeaderBytes                     int
@@ -356,6 +358,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAttempts(w, r)
+		return
+	case "/pull/consumers":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		s.handlePullConsumers(w, r)
 		return
 	case "/management/model":
 		if r.Method != http.MethodGet {

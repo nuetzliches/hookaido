@@ -534,7 +534,7 @@ func requiredRoleForTool(name string) (Role, bool) {
 	switch name {
 	case "config_parse", "config_validate", "config_compile", "config_fmt_preview", "config_diff", "admin_health", "management_model",
 		"backlog_top_queued", "backlog_oldest_queued", "backlog_aging_summary", "backlog_trends",
-		"messages_list", "attempts_list", "dlq_list":
+		"messages_list", "attempts_list", "dlq_list", "pull_consumers":
 		return RoleRead, true
 	case "dlq_requeue", "dlq_delete", "messages_cancel", "messages_requeue", "messages_resume",
 		"messages_publish", "messages_cancel_by_filter", "messages_requeue_by_filter", "messages_resume_by_filter",
@@ -684,6 +684,8 @@ func (s *Server) callTool(name string, args map[string]any) toolsCallResult {
 		out, err = s.toolAttemptsList(args)
 	case "dlq_list":
 		out, err = s.toolDLQList(args)
+	case "pull_consumers":
+		out, err = s.toolPullConsumers(args)
 	case "dlq_requeue":
 		out, err = s.toolDLQRequeue(args)
 	case "dlq_delete":
@@ -1350,6 +1352,17 @@ func (s *Server) toolDescriptors() []toolDescriptor {
 					"outcome":       map[string]any{"type": "string", "enum": []string{"acked", "retry", "dead"}},
 					"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": backlog.MaxListLimit},
 					"before":        map[string]any{"type": "string", "description": "RFC3339 timestamp"},
+				},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "pull_consumers",
+			Description: "Read which pull consumers currently hold an SSE stream, with remote address, connected-since, messages sent, and the token reference they authenticated with (never the token). Requires a running instance reachable over the Admin API",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"route": routePathSchema(),
 				},
 				"additionalProperties": false,
 			},

@@ -49,6 +49,21 @@ type Server struct {
 	ObserveSSEConnect    func(route string)
 	ObserveSSEDisconnect func(route string, statusCode int, messagesSent int, duration time.Duration)
 
+	// IdentifyToken names the configured secret reference a request
+	// authenticated with, for the consumer registry below. It never returns the
+	// token value. Optional: without it consumers are listed without a
+	// credential.
+	IdentifyToken TokenIdentifier
+
+	// ObserveConsumerConnect and ObserveConsumerDisconnect report SSE stream
+	// lifecycle so the runtime can log it. They exist next to the SSE metric
+	// observers because a counter and an identity answer different questions:
+	// the gauge says two consumers are attached, these say which two, and the
+	// disconnect is the half that a plain `http_request` access-log line for
+	// the establishing GET can never provide.
+	ObserveConsumerConnect    func(c ConsumerConnection)
+	ObserveConsumerDisconnect func(c ConsumerConnection, statusCode int, duration time.Duration)
+
 	// LeaseRouteScoped reports whether the running config uses per-route pull
 	// credentials. When it does, lease operations are checked against the route
 	// they were issued for; when it does not, every client is authorized for
@@ -62,6 +77,9 @@ type Server struct {
 	recentLeaseOps   map[recentLeaseOpKey]*list.Element
 	recentLeaseOrder list.List
 	now              func() time.Time
+
+	consumersMu sync.Mutex
+	consumers   map[string]*consumerConn
 }
 
 func NewServer(store queue.Store) *Server {
@@ -88,13 +106,22 @@ type recentLeaseOpEntry struct {
 	expiresAt time.Time
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	cleanPath := path.Clean(r.URL.Path)
+// endpointFromPath splits a Pull API request path into the endpoint it
+// addresses, dropping the trailing operation segment.
+func endpointFromPath(requestPath string) string {
+	cleanPath := path.Clean(requestPath)
 	op := path.Base(cleanPath)
 	endpoint := strings.TrimSuffix(cleanPath, "/"+op)
 	if endpoint == "" {
 		endpoint = "/"
 	}
+	return endpoint
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cleanPath := path.Clean(r.URL.Path)
+	op := path.Base(cleanPath)
+	endpoint := endpointFromPath(cleanPath)
 
 	if r.Method == http.MethodGet {
 		if op != "stream" {

@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /admin/pull/consumers` and `pull_sse_connected` / `pull_sse_disconnected` log lines name the pull consumers attached to a route.** `hookaido_pull_sse_connection_active{route}` already said *how many* consumers a route has, which is the decisive signal — an unexpected second consumer on a competing-consumer queue is not a visible failure, because the two split the traffic while ingress keeps answering `202` for every event, so from inside either one it is indistinguishable from delivery loss. What was missing was *which*: with the gauge reading `2` and one expected, the only way to name the second was to correlate raw container logs by `remote_addr` and resolve the addresses on the host, which needs shell access and only works while the offender is still connected. The Admin API endpoint now reports each open SSE stream with its remote address, connected-since, messages sent, and the configured token reference it authenticated with — the reference (`env.PULL_TOKEN`), never the token, and for a route with its own `pull { auth token ... }` only from that route's set. The gauge stays unlabeled by consumer on purpose: a remote-address label is unbounded cardinality for a diagnostic needed occasionally. Establish and teardown are also logged at INFO, because a stream logs one access-log line when it opens and then stays open for hours, so the access log alone can reconstruct neither who is attached nor when anyone left. Covered by the read-role MCP tool `pull_consumers`. Both surfaces cover SSE streams only — a consumer polling `POST {endpoint}/dequeue` holds no connection between calls and is counted by neither. ([#285](https://github.com/nuetzliches/hookaido/issues/285))
+
 ## [2.12.0] - 2026-08-26
 
 A release about the gap between what a config file *says* and what the running

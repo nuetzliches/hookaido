@@ -514,6 +514,11 @@ type Pull struct {
 
 	AuthTokens       []string
 	AuthTokensQuoted []bool
+
+	// ConsumerGroups turns the route's single competing-consumer queue into one
+	// independent queue per group, each with its own endpoint under Path.
+	ConsumerGroups       []string
+	ConsumerGroupsQuoted []bool
 }
 
 type TLSBlock struct {

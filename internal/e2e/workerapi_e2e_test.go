@@ -30,7 +30,7 @@ func startWorkerClient(
 	t.Helper()
 
 	ws := grpcworker.NewServer(pull)
-	ws.ResolveRoute = pull.ResolveRoute
+	ws.ResolveQueue = pull.ResolveQueue
 	ws.Authorize = authorize
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -14,6 +14,13 @@ import "github.com/nuetzliches/hookaido/v2/internal/queue"
 // deployment actually uses route-scoped pull credentials: with a single global
 // token every client is authorized for every route anyway, and there is nothing
 // to enforce.
+//
+// The scope is the route, not the individual consumer group. Groups on one
+// route are a fan-out of that route, not a security boundary: they share the
+// route's pull credentials, so a client that can reach one group's endpoint can
+// already reach the others'. Two groups can therefore settle each other's
+// leases if a lease ID passes between them. Separate routes are the way to get
+// an actual isolation boundary, and the docs say so.
 
 // leaseScopeEnforced reports whether lease operations must be checked against
 // the route they were issued for.
@@ -87,10 +94,10 @@ func leaseScopeUnavailable(detail string) *OpError {
 
 // observeForeignLeases records the metrics for leases rejected by the scope
 // check and returns them as batch conflicts.
-func (s *Server) observeForeignLeases(route string, leaseIDs []string, observe func(route string, statusCode int, leaseID string, leaseExpired bool)) []queue.LeaseBatchConflict {
+func (s *Server) observeForeignLeases(q Queue, leaseIDs []string, observe func(q Queue, statusCode int, leaseID string, leaseExpired bool)) []queue.LeaseBatchConflict {
 	conflicts := make([]queue.LeaseBatchConflict, 0, len(leaseIDs))
 	for _, leaseID := range leaseIDs {
-		observe(route, 409, leaseID, false)
+		observe(q, 409, leaseID, false)
 		conflicts = append(conflicts, queue.LeaseBatchConflict{LeaseID: leaseID})
 	}
 	return conflicts

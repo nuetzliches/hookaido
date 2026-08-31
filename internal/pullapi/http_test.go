@@ -30,11 +30,11 @@ func TestPullAPI_DequeueAck(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -106,11 +106,11 @@ func TestPullAPI_AckRetryIdempotent(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rrDeq := httptest.NewRecorder()
@@ -158,11 +158,11 @@ func TestPullAPI_AckBatchIncludesRecentlyCompletedLease(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rrDeq := httptest.NewRecorder()
@@ -226,11 +226,11 @@ func TestPullAPI_NackRetryIdempotentButAckThenNackStillConflicts(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rrDeq := httptest.NewRecorder()
@@ -284,11 +284,11 @@ func TestPullAPI_DequeueAckBatch(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rrDeq := httptest.NewRecorder()
@@ -355,11 +355,11 @@ func TestPullAPI_AckBatchPartialConflict(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rrDeq := httptest.NewRecorder()
@@ -426,11 +426,11 @@ func TestPullAPI_ObserverCallbacks(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	var dequeueObserved struct {
@@ -444,13 +444,13 @@ func TestPullAPI_ObserverCallbacks(t *testing.T) {
 		leaseID      string
 		leaseExpired bool
 	}
-	srv.ObserveDequeue = func(route string, statusCode int, items []queue.Envelope) {
-		dequeueObserved.route = route
+	srv.ObserveDequeue = func(q Queue, statusCode int, items []queue.Envelope) {
+		dequeueObserved.route = q.Route
 		dequeueObserved.status = statusCode
 		dequeueObserved.items = append([]queue.Envelope(nil), items...)
 	}
-	srv.ObserveAck = func(route string, statusCode int, leaseID string, leaseExpired bool) {
-		ackObserved.route = route
+	srv.ObserveAck = func(q Queue, statusCode int, leaseID string, leaseExpired bool) {
+		ackObserved.route = q.Route
 		ackObserved.status = statusCode
 		ackObserved.leaseID = leaseID
 		ackObserved.leaseExpired = leaseExpired
@@ -500,7 +500,7 @@ func TestPullAPI_ObserverCallbacks(t *testing.T) {
 func TestPullAPI_ObserverAckExpiredConflict(t *testing.T) {
 	store := &stubStore{ackErr: queue.ErrLeaseExpired}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	var observed struct {
 		route        string
@@ -508,8 +508,8 @@ func TestPullAPI_ObserverAckExpiredConflict(t *testing.T) {
 		leaseID      string
 		leaseExpired bool
 	}
-	srv.ObserveAck = func(route string, statusCode int, leaseID string, leaseExpired bool) {
-		observed.route = route
+	srv.ObserveAck = func(q Queue, statusCode int, leaseID string, leaseExpired bool) {
+		observed.route = q.Route
 		observed.status = statusCode
 		observed.leaseID = leaseID
 		observed.leaseExpired = leaseExpired
@@ -538,7 +538,7 @@ func TestPullAPI_ObserverAckExpiredConflict(t *testing.T) {
 func TestPullAPI_AckBatchRejectsMixedLeaseIDForms(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/ack", strings.NewReader(`{"lease_id":"l1","lease_ids":["l2"]}`))
@@ -556,7 +556,7 @@ func TestPullAPI_AckBatchRejectsTooLarge(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
 	srv.MaxLeaseBatch = 2
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/ack", strings.NewReader(`{"lease_ids":["l1","l2","l3"]}`))
@@ -583,11 +583,11 @@ func TestPullAPI_NackBatchDelay(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rrDeq := httptest.NewRecorder()
@@ -670,11 +670,11 @@ func TestPullAPI_NackBatchDeadPartialConflict(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rrDeq := httptest.NewRecorder()
@@ -727,19 +727,19 @@ func TestPullAPI_NackBatchDeadPartialConflict(t *testing.T) {
 func TestPullAPI_ObserverDequeueBadBody(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	var observed struct {
 		route  string
 		status int
 	}
-	srv.ObserveDequeue = func(route string, statusCode int, _ []queue.Envelope) {
-		observed.route = route
+	srv.ObserveDequeue = func(q Queue, statusCode int, _ []queue.Envelope) {
+		observed.route = q.Route
 		observed.status = statusCode
 	}
 
@@ -767,11 +767,11 @@ func TestPullAPI_ExpiredLeaseIs409(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -836,11 +836,11 @@ func TestPullAPI_NackDelay(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -912,11 +912,11 @@ func TestPullAPI_NackDead(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -942,11 +942,11 @@ func TestPullAPI_NackDead(t *testing.T) {
 func TestPullAPI_UnknownEndpointIs404(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -964,11 +964,11 @@ func TestPullAPI_UnknownEndpointIs404(t *testing.T) {
 func TestPullAPI_DequeueRejectsUnknownFields(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -986,11 +986,11 @@ func TestPullAPI_DequeueRejectsUnknownFields(t *testing.T) {
 func TestPullAPI_DequeueRejectsTrailingJSON(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -1008,11 +1008,11 @@ func TestPullAPI_DequeueRejectsTrailingJSON(t *testing.T) {
 func TestPullAPI_DequeueAppliesServerLimits(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 	srv.MaxBatch = 2
 	srv.DefaultLeaseTTL = 45 * time.Second
@@ -1046,11 +1046,11 @@ func TestPullAPI_DequeueAppliesServerLimits(t *testing.T) {
 func TestPullAPI_DequeueAppliesMaxLeaseTTL(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 	srv.MaxLeaseTTL = 60 * time.Second
 
@@ -1068,11 +1068,11 @@ func TestPullAPI_DequeueAppliesMaxLeaseTTL(t *testing.T) {
 func TestPullAPI_DequeueAppliesDefaultMaxWait(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 	srv.DefaultMaxWait = 4 * time.Second
 
@@ -1090,11 +1090,11 @@ func TestPullAPI_DequeueAppliesDefaultMaxWait(t *testing.T) {
 func TestPullAPI_AckRejectsUnknownFields(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -1112,11 +1112,11 @@ func TestPullAPI_AckRejectsUnknownFields(t *testing.T) {
 func TestPullAPI_AckRejectsTrailingJSON(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	rr := httptest.NewRecorder()
@@ -1235,7 +1235,7 @@ func (s *stubStore) ListAttempts(req queue.AttemptListRequest) (queue.AttemptLis
 func TestPullAPI_BearerAuth(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 	srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("t1")})
 
 	rr := httptest.NewRecorder()
@@ -1281,7 +1281,7 @@ func TestPullAPI_BearerAuthSchemeIsCaseInsensitive(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := queue.NewMemoryStore()
 			srv := NewServer(store)
-			srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+			srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 			srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("t1")})
 
 			rr := httptest.NewRecorder()
@@ -1298,7 +1298,7 @@ func TestPullAPI_BearerAuthSchemeIsCaseInsensitive(t *testing.T) {
 func TestPullAPI_MethodNotAllowedStructuredError(t *testing.T) {
 	store := queue.NewMemoryStore()
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://example/x/dequeue", nil)
@@ -1317,7 +1317,7 @@ func TestPullAPI_MethodNotAllowedStructuredError(t *testing.T) {
 func TestPullAPI_DequeueStoreErrorReturns503(t *testing.T) {
 	store := &stubStore{dequeueErr: errors.New("disk full")}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/dequeue",
@@ -1335,7 +1335,7 @@ func TestPullAPI_DequeueStoreErrorReturns503(t *testing.T) {
 func TestPullAPI_UnknownOperationReturns404(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/bogus", nil)
@@ -1354,7 +1354,7 @@ func TestPullAPI_UnknownOperationReturns404(t *testing.T) {
 func TestPullAPI_AckStoreErrorReturns500(t *testing.T) {
 	store := &stubStore{ackErr: errors.New("disk I/O")}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/ack",
@@ -1372,7 +1372,7 @@ func TestPullAPI_AckStoreErrorReturns500(t *testing.T) {
 func TestPullAPI_AckExpiredLeaseIs409(t *testing.T) {
 	store := &stubStore{ackErr: queue.ErrLeaseExpired}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/ack",
@@ -1386,7 +1386,7 @@ func TestPullAPI_AckExpiredLeaseIs409(t *testing.T) {
 func TestPullAPI_NackExpiredLeaseIs409(t *testing.T) {
 	store := &stubStore{nackErr: queue.ErrLeaseExpired}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/nack",
@@ -1400,7 +1400,7 @@ func TestPullAPI_NackExpiredLeaseIs409(t *testing.T) {
 func TestPullAPI_NackStoreErrorReturns500(t *testing.T) {
 	store := &stubStore{nackErr: errors.New("disk I/O")}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/nack",
@@ -1414,7 +1414,7 @@ func TestPullAPI_NackStoreErrorReturns500(t *testing.T) {
 func TestPullAPI_MarkDeadExpiredLeaseIs409(t *testing.T) {
 	store := &stubStore{markDeadErr: queue.ErrLeaseExpired}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/nack",
@@ -1428,7 +1428,7 @@ func TestPullAPI_MarkDeadExpiredLeaseIs409(t *testing.T) {
 func TestPullAPI_MarkDeadStoreErrorReturns500(t *testing.T) {
 	store := &stubStore{markDeadErr: errors.New("disk I/O")}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/nack",
@@ -1459,7 +1459,7 @@ func decodePullError(t *testing.T, rr *httptest.ResponseRecorder) errorResponse 
 func TestPullAPI_ExtendHappyPath(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/extend",
@@ -1476,7 +1476,7 @@ func TestPullAPI_ExtendHappyPath(t *testing.T) {
 func TestPullAPI_ExtendMissingExtendBy(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/extend",
@@ -1494,7 +1494,7 @@ func TestPullAPI_ExtendMissingExtendBy(t *testing.T) {
 func TestPullAPI_ExtendInvalidDuration(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/extend",
@@ -1512,7 +1512,7 @@ func TestPullAPI_ExtendInvalidDuration(t *testing.T) {
 func TestPullAPI_ExtendExpiredLease(t *testing.T) {
 	store := &stubStore{extendErr: queue.ErrLeaseExpired}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/extend",
@@ -1530,7 +1530,7 @@ func TestPullAPI_ExtendExpiredLease(t *testing.T) {
 func TestPullAPI_ExtendRejectsUnknownFields(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) { return "/x", true }
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) { return Queue{Route: "/x", Target: "pull"}, true }
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://example/x/extend",

@@ -89,8 +89,8 @@ pull_api { auth token "raw:devtoken" }
 	if compiled.PullAPI.MaxWait != 0 {
 		t.Fatalf("pull max_wait: got %s", compiled.PullAPI.MaxWait)
 	}
-	if compiled.PathToRoute["/pull/github"] != "/webhooks/github" {
-		t.Fatalf("endpoint map missing: %#v", compiled.PathToRoute)
+	if compiled.PullEndpoints["/pull/github"].Route != "/webhooks/github" {
+		t.Fatalf("endpoint map missing: %#v", compiled.PullEndpoints)
 	}
 }
 
@@ -2123,8 +2123,8 @@ pull_api { auth token "raw:t" }
 	if compiled.Ingress.Listen != ":18083" {
 		t.Fatalf("ingress listen: got %q", compiled.Ingress.Listen)
 	}
-	if compiled.PathToRoute["/pull/github"] != "/x" {
-		t.Fatalf("endpoint map missing: %#v", compiled.PathToRoute)
+	if compiled.PullEndpoints["/pull/github"].Route != "/x" {
+		t.Fatalf("endpoint map missing: %#v", compiled.PullEndpoints)
 	}
 	if compiled.Vars["ENDPOINT_ALIAS"] != "/pull/github" {
 		t.Fatalf("compiled vars mismatch: %#v", compiled.Vars)

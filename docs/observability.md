@@ -84,7 +84,7 @@ observability {
 }
 ```
 
-**Pull consumer lifecycle:** an SSE stream logs `pull_sse_connected` when it is established and `pull_sse_disconnected` when it ends, both at INFO, carrying `consumer_id`, `route`, `endpoint`, `remote_addr` and `token_ref` (the configured secret reference, never the token). The teardown line also carries `status_code`, `messages_sent` and `duration_seconds`. The access log cannot substitute for these: a stream logs one `http_request` line when it opens and then stays open for hours, so it records neither who is still attached nor when anyone left. See [Pull API — Who Is Attached](pull-api.md#who-is-attached).
+**Pull consumer lifecycle:** an SSE stream logs `pull_sse_connected` when it is established and `pull_sse_disconnected` when it ends, both at INFO, carrying `consumer_id`, `route`, `consumer_group`, `endpoint`, `remote_addr` and `token_ref` (the configured secret reference, never the token). The teardown line also carries `status_code`, `messages_sent` and `duration_seconds`. The access log cannot substitute for these: a stream logs one `http_request` line when it opens and then stays open for hours, so it records neither who is still attached nor when anyone left. See [Pull API — Who Is Attached](pull-api.md#who-is-attached).
 
 ### Log Sinks
 
@@ -171,7 +171,9 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_pull_sse_messages_sent_total`    | counter | Messages sent over SSE, by `route`                     |
 | `hookaido_pull_sse_connection_active`      | gauge   | Currently active SSE connections, by `route`           |
 
-`hookaido_pull_sse_connection_active` is deliberately unlabeled by consumer: a remote-address label would be unbounded cardinality for a diagnostic that is only needed occasionally. When the gauge is higher than you expect, name the consumers with [`GET /pull/consumers`](admin-api.md#get-pullconsumers) or from the `pull_sse_connected` / `pull_sse_disconnected` runtime log lines.
+All `hookaido_pull_*` series above also carry a `consumer_group` label. It is empty for a route without [consumer groups](pull-api.md#consumer-groups), and Prometheus treats an empty label value as absent — so existing series and dashboards are unchanged, while a route that fans out to groups keeps them separable. Without it the connection gauge would read `2` for a route with two groups and one consumer each, which is the expected state, and an unexpected third consumer would be invisible.
+
+`hookaido_pull_sse_connection_active` is deliberately unlabeled by *consumer*: a remote-address label would be unbounded cardinality for a diagnostic that is only needed occasionally. When the gauge is higher than you expect, name the consumers with [`GET /pull/consumers`](admin-api.md#get-pullconsumers) or from the `pull_sse_connected` / `pull_sse_disconnected` runtime log lines.
 
 **Secret and publish-policy metrics:**
 
@@ -438,7 +440,7 @@ Use these series together:
 
 When dashboards span mixed Hookaido versions (for example `v1.2.x` and `v1.3.x`), treat missing metrics as "not emitted" rather than zero:
 
-- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.3.0"} == 1` (or `hookaido_build_info` version labels).
+- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.4.0"} == 1` (or `hookaido_build_info` version labels).
 - In PromQL, prefer compatibility-safe expressions (for example `metric OR on() vector(0)`) where appropriate.
 - Document minimum supported Hookaido version per dashboard bundle to avoid false "all good" signals from absent series.
 

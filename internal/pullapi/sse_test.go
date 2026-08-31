@@ -22,11 +22,11 @@ func newSSETestServer(t *testing.T) (*Server, *queue.MemoryStore) {
 	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return now }))
 	srv := NewServer(store)
 	srv.SSEKeepalive = 100 * time.Millisecond
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 	return srv, store
 }
@@ -409,11 +409,11 @@ func newBusySSEServer(t *testing.T) (*Server, *flusherRecorder, *http.Request) {
 	t.Helper()
 	srv := NewServer(busyStore{Store: queue.NewMemoryStore(), route: "/webhooks/github"})
 	srv.SSEKeepalive = time.Hour // must not be what ends the stream
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 	rr := &flusherRecorder{ResponseRecorder: httptest.NewRecorder()}
 	req := httptest.NewRequest(http.MethodGet, "http://example/pull/github/stream", nil)
@@ -471,7 +471,7 @@ func TestSSE_BusyStreamObservesDisconnect(t *testing.T) {
 
 	var mu sync.Mutex
 	disconnects := 0
-	srv.ObserveSSEDisconnect = func(route string, statusCode int, messagesSent int, duration time.Duration) {
+	srv.ObserveSSEDisconnect = func(q Queue, statusCode int, messagesSent int, duration time.Duration) {
 		mu.Lock()
 		defer mu.Unlock()
 		disconnects++
@@ -571,11 +571,11 @@ func TestSSE_MessageEnqueuedDuringDequeueIsNotMissed(t *testing.T) {
 	// Long enough that a missed wakeup cannot be rescued by a keepalive within
 	// the test's own deadline.
 	srv.SSEKeepalive = 30 * time.Second
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 
 	ts := httptest.NewServer(srv)

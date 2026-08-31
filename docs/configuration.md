@@ -535,6 +535,14 @@ Each route block defines a webhook endpoint path and its processing pipeline:
   # Mode: pull OR deliver (not both)
   pull { path /pull/github }
 
+  # Fan out to several independent consumers instead of letting them
+  # compete for one queue -- one endpoint and one queue per group:
+  # pull {
+  #   path /pull/github
+  #   consumer_group "integration"
+  #   consumer_group "workstation"
+  # }
+
   # Or push mode:
   # deliver "https://ci.internal/build" {
   #   retry exponential max 5 base 1s cap 30s jitter 0.1
@@ -906,6 +914,7 @@ Two things help when you cannot change the mount:
 | -------------------------------------------------------------- | ------------------------ |
 | Route table (add/remove/reorder routes, paths, match rules)    |                          |
 | Pull endpoint mappings (`pull { path ... }`)                   |                          |
+| Pull consumer groups (`pull { consumer_group ... }`)           | See the note below       |
 | Auth settings (HMAC secrets, basic auth, forward auth, tokens) | Per-route and global     |
 | Rate limits (global + per-route)                               |                          |
 | `ingress.trusted_proxies`                                      |                          |
@@ -916,6 +925,8 @@ Two things help when you cannot change the mount:
 | Deliver targets, URLs, retry, timeout, concurrency, signing     | Dispatcher is restarted in place after a drain; in-flight deliveries finish first (see below) |
 | Deliver headers (`header ...`) and exec target `env` values     | Same dispatcher restart; a rotated bearer token in a `header` takes effect on reload |
 | Egress policy (`defaults.egress.*`)                            | Applied with the dispatcher restart above |
+
+Adding or removing a `consumer_group` reloads without a restart, but it is not a transparent change. Adding groups to a route retires its bare pull path — a consumer still on it starts getting `404 route_not_found` — and removing a group orphans whatever is still queued under its target, which stays in the queue until retention prunes it. Drain a group before dropping it, and migrate consumer URLs alongside the config change. See [Consumer Groups](pull-api.md#consumer-groups).
 
 ### Reload Atomicity
 

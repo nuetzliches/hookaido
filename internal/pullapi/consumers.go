@@ -27,6 +27,7 @@ import (
 type ConsumerConnection struct {
 	ID            string
 	Route         string
+	ConsumerGroup string
 	Endpoint      string
 	RemoteAddr    string
 	UserAgent     string
@@ -43,8 +44,13 @@ type ConsumerConnection struct {
 // request. The registry mutex covers both, so a snapshot never observes a torn
 // message count.
 type consumerConn struct {
-	id          string
-	route       string
+	id string
+
+	// queue is kept whole rather than split into route and group: the teardown
+	// path reports it back to the observers, and rebuilding it from two fields
+	// there would silently hand them an empty Target.
+	queue Queue
+
 	endpoint    string
 	remoteAddr  string
 	userAgent   string
@@ -55,11 +61,11 @@ type consumerConn struct {
 	lastMessageAt time.Time
 }
 
-func (s *Server) registerConsumer(r *http.Request, route string) *consumerConn {
+func (s *Server) registerConsumer(r *http.Request, q Queue) *consumerConn {
 	now := s.nowTime()
 	c := &consumerConn{
 		id:          newConsumerID(),
-		route:       route,
+		queue:       q,
 		connectedAt: now,
 	}
 	if r != nil {
@@ -81,7 +87,7 @@ func (s *Server) registerConsumer(r *http.Request, route string) *consumerConn {
 	snap := c.snapshotLocked()
 	s.consumersMu.Unlock()
 
-	s.observeSSEConnect(route)
+	s.observeSSEConnect(q)
 	if s.ObserveConsumerConnect != nil {
 		s.ObserveConsumerConnect(snap)
 	}
@@ -116,10 +122,11 @@ func (s *Server) unregisterConsumer(c *consumerConn, statusCode int) {
 	}
 	delete(s.consumers, c.id)
 	snap := c.snapshotLocked()
+	queueOf := c.queue
 	s.consumersMu.Unlock()
 
 	duration := s.nowTime().Sub(snap.ConnectedAt)
-	s.observeSSEDisconnect(snap.Route, statusCode, int(snap.MessagesSent), duration)
+	s.observeSSEDisconnect(queueOf, statusCode, int(snap.MessagesSent), duration)
 	if s.ObserveConsumerDisconnect != nil {
 		s.ObserveConsumerDisconnect(snap, statusCode, duration)
 	}
@@ -147,6 +154,9 @@ func (s *Server) Consumers() []ConsumerConnection {
 		if out[i].Route != out[j].Route {
 			return out[i].Route < out[j].Route
 		}
+		if out[i].ConsumerGroup != out[j].ConsumerGroup {
+			return out[i].ConsumerGroup < out[j].ConsumerGroup
+		}
 		if !out[i].ConnectedAt.Equal(out[j].ConnectedAt) {
 			return out[i].ConnectedAt.Before(out[j].ConnectedAt)
 		}
@@ -161,7 +171,8 @@ func (s *Server) Consumers() []ConsumerConnection {
 func (c *consumerConn) snapshotLocked() ConsumerConnection {
 	return ConsumerConnection{
 		ID:            c.id,
-		Route:         c.route,
+		Route:         c.queue.Route,
+		ConsumerGroup: c.queue.ConsumerGroup,
 		Endpoint:      c.endpoint,
 		RemoteAddr:    c.remoteAddr,
 		UserAgent:     c.userAgent,

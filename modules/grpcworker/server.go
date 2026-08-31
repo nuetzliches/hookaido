@@ -21,8 +21,13 @@ import (
 type Server struct {
 	workerapipb.UnimplementedWorkerServiceServer
 
-	Pull          *pullapi.Server
-	ResolveRoute  func(endpoint string) (route string, ok bool)
+	Pull *pullapi.Server
+
+	// ResolveQueue maps a worker endpoint to the queue it reads from. A route
+	// with consumer groups serves one endpoint per group, so the route alone no
+	// longer identifies the queue.
+	ResolveQueue func(endpoint string) (pullapi.Queue, bool)
+
 	Authorize     workerapi.Authorizer
 	MaxLeaseBatch int
 }
@@ -51,7 +56,7 @@ func (s *Server) Dequeue(ctx context.Context, req *workerapipb.DequeueRequest) (
 		return nil, err
 	}
 
-	route, err := s.resolveAndAuthorize(ctx, endpoint)
+	q, err := s.resolveAndAuthorize(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +64,7 @@ func (s *Server) Dequeue(ctx context.Context, req *workerapipb.DequeueRequest) (
 		return nil, status.Error(codes.Internal, "pull server is not configured")
 	}
 
-	outcome, opErr := s.Pull.Dequeue(ctx, route, pullapi.DequeueParams{
+	outcome, opErr := s.Pull.Dequeue(ctx, q, pullapi.DequeueParams{
 		Batch:       int(req.GetBatch()),
 		MaxWait:     maxWait,
 		HasMaxWait:  hasMaxWait,
@@ -96,7 +101,7 @@ func (s *Server) Ack(ctx context.Context, req *workerapipb.AckRequest) (*workera
 		return nil, status.Error(codes.InvalidArgument, "endpoint is required")
 	}
 
-	route, err := s.resolveAndAuthorize(ctx, endpoint)
+	q, err := s.resolveAndAuthorize(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -109,13 +114,13 @@ func (s *Server) Ack(ctx context.Context, req *workerapipb.AckRequest) (*workera
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if !isBatch {
-		if opErr := s.Pull.AckSingle(route, leaseIDs[0]); opErr != nil {
+		if opErr := s.Pull.AckSingle(q, leaseIDs[0]); opErr != nil {
 			return nil, mapOpError(opErr)
 		}
 		return &workerapipb.AckResponse{Acked: 1}, nil
 	}
 
-	outcome, opErr := s.Pull.AckBatch(route, leaseIDs)
+	outcome, opErr := s.Pull.AckBatch(q, leaseIDs)
 	if opErr != nil {
 		return nil, mapOpError(opErr)
 	}
@@ -134,7 +139,7 @@ func (s *Server) Nack(ctx context.Context, req *workerapipb.NackRequest) (*worke
 		return nil, status.Error(codes.InvalidArgument, "endpoint is required")
 	}
 
-	route, err := s.resolveAndAuthorize(ctx, endpoint)
+	q, err := s.resolveAndAuthorize(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -151,13 +156,13 @@ func (s *Server) Nack(ctx context.Context, req *workerapipb.NackRequest) (*worke
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if !isBatch {
-		if opErr := s.Pull.NackSingle(route, leaseIDs[0], req.GetDead(), req.GetReason(), delay); opErr != nil {
+		if opErr := s.Pull.NackSingle(q, leaseIDs[0], req.GetDead(), req.GetReason(), delay); opErr != nil {
 			return nil, mapOpError(opErr)
 		}
 		return &workerapipb.NackResponse{Succeeded: 1}, nil
 	}
 
-	outcome, opErr := s.Pull.NackBatch(route, leaseIDs, req.GetDead(), req.GetReason(), delay)
+	outcome, opErr := s.Pull.NackBatch(q, leaseIDs, req.GetDead(), req.GetReason(), delay)
 	if opErr != nil {
 		return nil, mapOpError(opErr)
 	}
@@ -184,41 +189,45 @@ func (s *Server) Extend(ctx context.Context, req *workerapipb.ExtendRequest) (*e
 	if err != nil {
 		return nil, err
 	}
-	route, err := s.resolveAndAuthorize(ctx, endpoint)
+	q, err := s.resolveAndAuthorize(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	if s.Pull == nil {
 		return nil, status.Error(codes.Internal, "pull server is not configured")
 	}
-	if opErr := s.Pull.Extend(route, leaseID, extendBy); opErr != nil {
+	if opErr := s.Pull.Extend(q, leaseID, extendBy); opErr != nil {
 		return nil, mapOpError(opErr)
 	}
 	return &emptypb.Empty{}, nil
 }
 
-func (s *Server) resolveAndAuthorize(ctx context.Context, endpoint string) (string, error) {
+func (s *Server) resolveAndAuthorize(ctx context.Context, endpoint string) (pullapi.Queue, error) {
 	if s.Authorize != nil && !s.Authorize(ctx, endpoint) {
-		return "", status.Error(codes.Unauthenticated, "request is not authorized")
+		return pullapi.Queue{}, status.Error(codes.Unauthenticated, "request is not authorized")
 	}
-	route, ok := s.resolveRoute(endpoint)
+	q, ok := s.resolveQueue(endpoint)
 	if !ok {
-		return "", status.Error(codes.NotFound, "pull endpoint is not configured")
+		return pullapi.Queue{}, status.Error(codes.NotFound, "pull endpoint is not configured")
 	}
-	return route, nil
+	return q, nil
 }
 
-func (s *Server) resolveRoute(endpoint string) (string, bool) {
-	if s.ResolveRoute != nil {
-		return s.ResolveRoute(endpoint)
+func (s *Server) resolveQueue(endpoint string) (pullapi.Queue, bool) {
+	if s.ResolveQueue != nil {
+		return s.ResolveQueue(endpoint)
 	}
-	if s.Pull != nil && s.Pull.ResolveRoute != nil {
-		return s.Pull.ResolveRoute(endpoint)
+	if s.Pull != nil && s.Pull.ResolveQueue != nil {
+		return s.Pull.ResolveQueue(endpoint)
 	}
 	if endpoint == "" {
-		return "", false
+		return pullapi.Queue{}, false
 	}
-	return endpoint, true
+	target := "pull"
+	if s.Pull != nil && s.Pull.Target != "" {
+		target = s.Pull.Target
+	}
+	return pullapi.Queue{Route: endpoint, Target: target}, true
 }
 
 func (s *Server) leaseBatchLimit() int {

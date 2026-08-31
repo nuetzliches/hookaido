@@ -14,6 +14,7 @@ import (
 type PullConsumer struct {
 	ID            string    `json:"id"`
 	Route         string    `json:"route"`
+	ConsumerGroup string    `json:"consumer_group,omitempty"`
 	Endpoint      string    `json:"endpoint"`
 	RemoteAddr    string    `json:"remote_addr"`
 	UserAgent     string    `json:"user_agent,omitempty"`

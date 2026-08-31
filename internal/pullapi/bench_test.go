@@ -427,11 +427,11 @@ func pullBenchRefillChunk(backend string, min int) int {
 
 func newPullBenchServer(store queue.Store) *Server {
 	srv := NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		if endpoint == pullBenchEndpointRoute {
-			return pullBenchInternalRoute, true
+			return Queue{Route: pullBenchInternalRoute, Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 	return srv
 }

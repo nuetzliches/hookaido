@@ -85,7 +85,8 @@ Per-route:
 - `publish.direct on|off` (optional; defaults `on`; when `off`, global direct publish path rejects this route)
 - `publish.managed on|off` (optional; defaults `on`; when `off`, endpoint-scoped managed publish path rejects this route)
 - `queue "sqlite|memory|postgres"` shorthand or block `queue { backend "sqlite|memory|postgres" }` (defaults to SQLite; runtime currently uses one backend process-wide, so mixed route backends are rejected)
-- `pull { path, auth? }` (pull mode; excludes `deliver`)
+- `pull { path, auth?, consumer_group* }` (pull mode; excludes `deliver`)
+  - `consumer_group "<name>"` (repeatable) turns the route's single competing-consumer queue into one independent queue per group. Every inbound event is enqueued once per group, each group serves its own endpoint at `pull_api.prefix + pull.path + "/" + name`, and the bare `pull.path` stops resolving (`404 route_not_found`) so an unmigrated consumer fails visibly rather than silently taking a share of a queue it should receive in full. Names must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, be unique per route, and not collide with a Pull API operation name (`dequeue`, `ack`, `nack`, `extend`, `stream`). Groups are a fan-out of one route, not an authorization boundary: they share the route's pull credentials and can settle each other's leases.
 - `deliver "https://..." { retry?, timeout?, header?, sign ... }` (push mode; optional)
   - `header "Name" "Value"` — static or placeholder-interpolated custom headers on outbound requests (e.g. `header "Authorization" "token {env.FORGEJO_TOKEN}"`); names must be valid HTTP tokens; duplicates (case-insensitive) rejected at compile time; headers are set before HMAC signing
   - signing directives: `sign hmac <secret-ref>` or repeated `sign hmac secret_ref <ID>`, optional `sign signature_header <name>`, optional `sign timestamp_header <name>`, optional `sign secret_selection <newest_valid|oldest_valid>` (requires `sign hmac secret_ref ...`)
@@ -220,7 +221,7 @@ Persisted, replayable envelope:
 - Older versions are migrated on startup before serving traffic.
 
 ## Pull API (HTTP/JSON)
-- Base URL: `pull_api.listen` + optional `pull_api.prefix` + `pull.path` (slash-normalized).
+- Base URL: `pull_api.listen` + optional `pull_api.prefix` + `pull.path` (slash-normalized), plus `/<consumer_group>` for a route that declares consumer groups.
 - Content-Type: `application/json`.
 - Optional pull dequeue controls in `pull_api`:
   - `max_batch` (default `100`): caps request `batch`.
@@ -314,7 +315,7 @@ Endpoints:
 - For global route-selector `POST /messages/publish` and route-selector/unscoped `POST /messages/*_by_filter`, when `defaults.publish_policy.fail_closed on` is enabled and managed-route context cannot be evaluated, requests fail closed with `503` and `code=managed_resolver_missing`.
 - For global route-selector `POST /messages/*_by_filter`, ownership-source drift between `ManagementModel` and route-policy ownership callbacks for the selected route fails closed with `503` and `code=managed_target_mismatch`.
 - `GET /attempts` (query params: `route` or `application` + `endpoint_name`, `target`, `event_id`, `outcome` (`acked|retry|dead`), `limit` (default 100, max 1000), `before` (RFC3339); when selector mode is `route`, it must be an absolute Hookaido route path starting with `/`; managed selectors return `404` with `code=managed_endpoint_not_found` when selector labels do not resolve, `503` with `code=managed_resolver_missing` when resolver wiring is unavailable, and `503` with `code=managed_target_mismatch` when selector-resolved route ownership is out of sync with route ownership policy mapping)
-- `GET /pull/consumers` (returns the pull consumers holding an SSE stream right now; query param: `route`, which when provided must be an absolute Hookaido route path starting with `/`; each entry carries `id`, `route`, `endpoint`, `remote_addr`, `user_agent`, `token_ref`, `connected_at`, `connected_for_seconds`, `messages_sent` and `last_message_at`; `token_ref` is the configured secret reference the consumer authenticated with and never the token value, resolved from a route's own `pull { auth token ... }` set when it has one; SSE streams only, so a consumer polling `{endpoint}/dequeue` is not listed; the registry is per process and in memory, so a restart empties it; returns `503` with `code=pull_consumers_unavailable` when registry wiring is unavailable)
+- `GET /pull/consumers` (returns the pull consumers holding an SSE stream right now; query param: `route`, which when provided must be an absolute Hookaido route path starting with `/`; each entry carries `id`, `route`, `consumer_group` (present only for a grouped route), `endpoint`, `remote_addr`, `user_agent`, `token_ref`, `connected_at`, `connected_for_seconds`, `messages_sent` and `last_message_at`; `token_ref` is the configured secret reference the consumer authenticated with and never the token value, resolved from a route's own `pull { auth token ... }` set when it has one; SSE streams only, so a consumer polling `{endpoint}/dequeue` is not listed; the registry is per process and in memory, so a restart empties it; returns `503` with `code=pull_consumers_unavailable` when registry wiring is unavailable)
 - `GET /management/model` (returns runtime management projection with `route_count`, `application_count`, `endpoint_count`, and `applications[]` entries carrying `name`, `endpoint_count` and nested `endpoints[]` (`name`, `route`, `mode`, `targets`, `publish_policy` with `enabled` / `direct_enabled` / `managed_enabled`))
 - `GET /applications` (returns management application list with per-application endpoint counts)
 - `GET /applications/{application}/endpoints` (returns endpoint entries for one application; entries include `publish_policy`; `application` is path-escaped and matched exactly)
@@ -420,6 +421,7 @@ Secret rotation semantics:
 - Ingress reject reason labels include `memory_pressure` for retained-footprint admission rejects in the memory backend.
 - Metrics include delivery counters: `hookaido_delivery_attempts_total`, `hookaido_delivery_acked_total`, `hookaido_delivery_retry_total`, `hookaido_delivery_dead_total`.
 - Metrics include on-scrape queue gauges: `hookaido_queue_depth{state}` (queued, leased, dead), `hookaido_queue_total`, `hookaido_queue_oldest_queued_age_seconds`, and `hookaido_queue_ready_lag_seconds`.
+- Pull metrics (`hookaido_pull_*`) carry a `consumer_group` label alongside `route`. It is empty for a route without consumer groups, which Prometheus treats as an absent label, so existing series keep their identity; a route that fans out to groups stays separable, which is what keeps the connection gauge meaningful there. Emitting it raises `hookaido_metrics_schema_info` to `1.4.0`.
 - Metrics include memory-backend runtime gauges/counters when backend=`memory`: `hookaido_store_memory_items{state}`, `hookaido_store_memory_retained_bytes{state}`, `hookaido_store_memory_retained_bytes_total`, and `hookaido_store_memory_evictions_total{reason}`.
 
 ## CLI

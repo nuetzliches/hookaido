@@ -98,8 +98,11 @@ type WorkerTransportConfig struct {
 	// *pullapi.Server to avoid an import cycle with the registry package).
 	PullServer any
 
-	// ResolveRoute maps a pull endpoint to a route name.
-	ResolveRoute func(endpoint string) (route string, ok bool)
+	// ResolveQueue maps a pull endpoint to the queue it reads from — the route
+	// plus the queue target, which differ once a route fans out to consumer
+	// groups. The result is typed as any and must be a pullapi.Queue, for the
+	// same import-cycle reason as PullServer above; transports assert it.
+	ResolveQueue any
 
 	// Authorize checks if a worker request is authorized.
 	Authorize func(ctx context.Context, endpoint string) bool

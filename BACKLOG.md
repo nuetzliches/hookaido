@@ -4,24 +4,24 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-- [ ] **Test coverage ≥80%** — 77.1% as of v2.12.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
+- [ ] **Test coverage ≥80%** — 77.2% as of v2.13.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
 
-  Up from v2.11.0's 76.7%, reversing that release's slight dip from v2.10.1's 76.9%. The #273–#276 work added more covered statements than production ones: `internal/app` moved 62.5% → 64.5% because `resolveClientIP`, `pollConfig` and the query-auth wiring are all directly testable without a server bring-up, and `internal/ingress` is at 92.5%.
+  Essentially flat against v2.12.0's 77.1%, which is the honest reading of a release that added roughly 380 production statements: the #284/#285 work came with enough tests to hold the line, not to move it. `internal/pullapi` is the one real gain (73.4% → 75.7%) — the consumer registry and the group resolution are plain functions over their arguments, so they are directly testable. `internal/mcp` went the other way (77.5% → 77.1%): `pull_consumers` is Admin-proxy-only by construction, so its handler has no local path a unit test can exercise without standing up an Admin API, and it is currently covered only through the tool-registry tests.
 
   Ranked by uncovered statements, which is what actually moves the total — a package at 64% with 1,200 uncovered statements matters far more than one at 64% with 40:
 
   | Package | Uncovered | Total | % |
   | --- | ---: | ---: | ---: |
-  | `internal/config` | 1248 | 5841 | 78.6% |
-  | `internal/app` | 1201 | 3383 | 64.5% |
-  | `internal/mcp` | 932 | 4134 | 77.5% |
-  | `internal/admin` | 543 | 2606 | 79.2% |
+  | `internal/config` | 1248 | 5900 | 78.8% |
+  | `internal/app` | 1202 | 3416 | 64.8% |
+  | `internal/mcp` | 949 | 4153 | 77.1% |
+  | `internal/admin` | 543 | 2633 | 79.4% |
   | `modules/sqlite` | 432 | 1693 | 74.5% |
   | `modules/postgres` | 301 | 1293 | 76.7% |
   | `internal/queue` | 213 | 1337 | 84.1% |
-  | `internal/pullapi` | 179 | 673 | 73.4% |
+  | `internal/pullapi` | 183 | 754 | 75.7% |
 
-  Reaching 80% needs roughly **690 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is still the largest percentage gap and still the hardest: what remains uncovered there is concentrated in `run.go` startup paths that need a real server bring-up, which is where every coverage pass so far has deliberately stopped. The v2.12.0 delta is the argument for the approach that works — extract the logic into a function that takes its inputs as arguments, as `resolveClientIP` and `pollConfig` do, rather than trying to test `run()`.
+  Reaching 80% needs roughly **670 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is still the largest percentage gap and still the hardest: what remains uncovered there is concentrated in `run.go` startup paths that need a real server bring-up, which is where every coverage pass so far has deliberately stopped. The approach that works is still the one v2.12.0 demonstrated — extract the logic into a function that takes its inputs as arguments, as `resolveClientIP` and `pollConfig` do, rather than trying to test `run()`; v2.13.0's `identifyPullToken`, `adminPullConsumers` and `compileConsumerGroups` were written that way for the same reason.
 
 - [ ] **Publish a reachable coverage report** — awesome-go requires a Codecov or Coveralls link that resolves. CI computes a profile and uploads it, but only as a workflow artifact (`ci.yml`, `actions/upload-artifact` name `coverage`): that expires, needs a signed-in session, and is not a report — so there is no durable link to submit. Needs a coverage service wired into CI plus a README badge. Two things to fix while doing it: the `test` job does not set `HOOKAIDO_TEST_POSTGRES_DSN`, so the uploaded profile understates coverage the same way a local `make test-pg`-less run does, and it excludes nothing, so it counts generated protobuf. This is the one remaining awesome-go blocker fully in our control besides the 80% number itself.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
@@ -39,6 +39,8 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 - [ ] **VS Code LSP** — Language server backed by `config validate`/`config compile` for live diagnostics in the editor. Optional follow-up to the VS Code extension.
 
 ## Completed (move here when done)
+
+- [x] **Pull consumer groups and consumer visibility (#284, #285)** — Both issues came out of one investigation: two consumers on a competing-consumer pull queue split the traffic, and from inside either one that is indistinguishable from delivery loss because the ingress answers `202` for every event. `pull { consumer_group ... }` makes the fan-out topology expressible — one independent queue per group, one endpoint each under the pull path, targets `pull:<group>`, and the bare path deliberately retired with a `404` so an unmigrated consumer fails visibly. `GET /admin/pull/consumers` plus `pull_sse_connected`/`pull_sse_disconnected` at INFO make the accident diagnosable, naming the credential by its configured reference and never its value. Pull metrics gained a `consumer_group` label (empty for ungrouped routes, which Prometheus treats as absent, so no existing series changed) and the metrics schema moved to 1.4.0. One PR per issue (#286, #287), each shipped with the docs stating the migration cost rather than only the feature.
 
 - [x] **Config-vs-reality gaps from the third review round (#273–#276)** — Four places where a Hookaidofile said one thing and the running process enforced another. `ingress { trusted_proxies }` so `match remote_ip` sees the client rather than the reverse proxy, instead of silently matching nothing or (once widened to the proxy subnet) everything. `--watch-interval` plus a `watch_may_not_fire` startup warning, because `--watch` cannot fire at all against a single-file bind mount — the shape `docs/docker.md` itself recommended. `auth query` as a first-class variant for event sources whose entire configuration surface is a URL, replacing the `match query` workaround that reported the route as unauthenticated and could not reach `secret_ref`. And constant-time comparison in `matchHeaderValues`/`matchQueryValues`, the one secret comparison in the project that still leaked timing. One PR per issue (#277–#280), each with the docs stating the honest limitation rather than only the fix.
 

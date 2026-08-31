@@ -7,6 +7,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-08-31
+
+A release about one accident and the two things missing to deal with it. The
+Pull API is a competing-consumer queue, so two consumers on one route split the
+traffic — and from inside either one that is indistinguishable from delivery
+loss, because the ingress keeps answering `202` for every event. It closes
+[#284](https://github.com/nuetzliches/hookaido/issues/284) and
+[#285](https://github.com/nuetzliches/hookaido/issues/285), both reported from
+the same investigation.
+
+`pull { consumer_group ... }` makes the topology expressible where competing was
+never the intent, and `GET /admin/pull/consumers` plus the SSE lifecycle log
+lines make the accident diagnosable where it was not. `consumer_group` is the
+only new configuration surface and it is opt-in: a route without it is unchanged
+down to its queue target, which matters for messages already queued in a durable
+backend. The importable Go API is unchanged, so this stays on the `/v2` module
+path.
+
 ### Added
 
 - **`pull { consumer_group "<name>" }` fans one route out to several independent consumers.** The Pull API is a competing-consumer work queue — each message is leased to exactly one consumer — which is right for scaling workers and makes one topology impossible to express: one inbound source, several consumers that each need every message. That is not exotic; it is what you get whenever the source cannot be configured to deliver more than once, which covers appliances and telephony systems that hold exactly one webhook URL, older ERP systems, and anything whose URL is set in a vendor portal. Two environments attached to such a queue silently split the traffic, and from inside either one that is indistinguishable from delivery loss: the ingress answers `202` for every event and each side sees a fluctuating fraction arrive. Declaring consumer groups gives the route one independent queue per group — every inbound event is enqueued once per group — with its own endpoint at `pull_api.prefix + pull.path + "/" + name`. Semantics inside a group are unchanged, so workers still compete within a group while groups fan out. **The bare pull path stops resolving once groups exist** and answers `404 route_not_found`: silently keeping it would leave an unmigrated consumer taking a share of a queue it was meant to receive in full, which is the exact failure the feature exists to prevent, so it has to fail visibly instead. Group names must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, be unique per route, and not collide with a Pull API operation name. Groups are a fan-out of one route, not an authorization boundary — they share the route's pull credentials and can settle each other's leases, and the docs say so. A route without groups is unchanged down to its queue target, so nothing moves for existing configs or for messages already queued in a durable backend. One consequence worth knowing before you add groups to a live route: `POST /admin/messages/publish` auto-selects a target only for a single-target route, so publishing to a grouped route now requires an explicit `target` of `pull:<group>` and is rejected with `target_unresolvable` otherwise. Covered by the MCP config tools (`consumer_group_count` in the config-compile summary). ([#284](https://github.com/nuetzliches/hookaido/issues/284))

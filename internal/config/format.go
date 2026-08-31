@@ -762,6 +762,12 @@ func writeRouteBlock(b *bytes.Buffer, r Route) {
 			}
 			fmt.Fprintf(b, "    auth token %s\n", formatValue(t, quotedAt(r.Pull.AuthTokensQuoted, i)))
 		}
+		for i, g := range r.Pull.ConsumerGroups {
+			if strings.TrimSpace(g) == "" {
+				continue
+			}
+			fmt.Fprintf(b, "    consumer_group %s\n", formatValue(g, quotedAt(r.Pull.ConsumerGroupsQuoted, i)))
+		}
 		b.WriteString("  }\n")
 	}
 	for _, d := range r.Deliveries {

@@ -35,11 +35,11 @@ func FuzzPullAPIServer(f *testing.F) {
 		srv := NewServer(&stubStore{})
 		srv.MaxBatch = 10
 		srv.DefaultLeaseTTL = 30 * time.Second
-		srv.ResolveRoute = func(endpoint string) (string, bool) {
+		srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 			if strings.HasPrefix(endpoint, "/pull/") {
-				return "/webhooks/fuzz", true
+				return Queue{Route: "/webhooks/fuzz", Target: "pull"}, true
 			}
-			return "", false
+			return Queue{}, false
 		}
 		srv.Authorize = BearerTokenAuthorizer([][]byte{[]byte("fuzz-token")})
 

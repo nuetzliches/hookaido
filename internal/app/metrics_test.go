@@ -24,7 +24,7 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.3.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.4.0"} 1`,
 		"hookaido_tracing_enabled 0",
 		"hookaido_tracing_init_failures_total 0",
 		"hookaido_tracing_export_errors_total 0",
@@ -85,7 +85,7 @@ func TestMetricsHandler_WithDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.3.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.4.0"} 1`,
 		"hookaido_tracing_enabled 1",
 		"hookaido_tracing_init_failures_total 1",
 		"hookaido_tracing_export_errors_total 2",
@@ -656,25 +656,25 @@ func TestMetricsHandler_PullMetrics(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	m.now = func() time.Time { return now }
 
-	m.observePullDequeue("/r1", http.StatusOK, []queue.Envelope{
+	m.observePullDequeue(pullQueueKey{route: "/r1"}, http.StatusOK, []queue.Envelope{
 		{LeaseID: "l1", LeaseUntil: now.Add(30 * time.Second)},
 	})
-	m.observePullDequeue("/r1", http.StatusBadRequest, nil)
-	m.observePullDequeue("/r1", http.StatusServiceUnavailable, nil)
-	m.observePullAck("/r1", http.StatusNoContent, "l1", false)
-	m.observePullAck("/r1", http.StatusConflict, "missing-ack", false)
+	m.observePullDequeue(pullQueueKey{route: "/r1"}, http.StatusBadRequest, nil)
+	m.observePullDequeue(pullQueueKey{route: "/r1"}, http.StatusServiceUnavailable, nil)
+	m.observePullAck(pullQueueKey{route: "/r1"}, http.StatusNoContent, "l1", false)
+	m.observePullAck(pullQueueKey{route: "/r1"}, http.StatusConflict, "missing-ack", false)
 
-	m.observePullDequeue("/r1", http.StatusOK, []queue.Envelope{
+	m.observePullDequeue(pullQueueKey{route: "/r1"}, http.StatusOK, []queue.Envelope{
 		{LeaseID: "l2", LeaseUntil: now.Add(20 * time.Second)},
 	})
-	m.observePullNack("/r1", http.StatusNoContent, "l2", false)
-	m.observePullNack("/r1", http.StatusConflict, "missing-nack", false)
+	m.observePullNack(pullQueueKey{route: "/r1"}, http.StatusNoContent, "l2", false)
+	m.observePullNack(pullQueueKey{route: "/r1"}, http.StatusConflict, "missing-nack", false)
 
-	m.observePullDequeue("/r2", http.StatusOK, []queue.Envelope{
+	m.observePullDequeue(pullQueueKey{route: "/r2"}, http.StatusOK, []queue.Envelope{
 		{LeaseID: "l3", LeaseUntil: now.Add(10 * time.Second)},
 	})
-	m.observePullExtend("/r2", http.StatusNoContent, "l3", 15*time.Second, false)
-	m.observePullExtend("/r2", http.StatusConflict, "l3", 0, true)
+	m.observePullExtend(pullQueueKey{route: "/r2"}, http.StatusNoContent, "l3", 15*time.Second, false)
+	m.observePullExtend(pullQueueKey{route: "/r2"}, http.StatusConflict, "l3", 0, true)
 
 	h := newMetricsHandler("dev", now, m)
 	rr := httptest.NewRecorder()
@@ -682,19 +682,19 @@ func TestMetricsHandler_PullMetrics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_pull_dequeue_total{route="/r1",status="200"} 2`,
-		`hookaido_pull_dequeue_total{route="/r1",status="204"} 0`,
-		`hookaido_pull_dequeue_total{route="/r1",status="4xx"} 1`,
-		`hookaido_pull_dequeue_total{route="/r1",status="5xx"} 1`,
-		`hookaido_pull_acked_total{route="/r1"} 1`,
-		`hookaido_pull_nacked_total{route="/r1"} 1`,
-		`hookaido_pull_ack_conflict_total{route="/r1"} 1`,
-		`hookaido_pull_nack_conflict_total{route="/r1"} 1`,
-		`hookaido_pull_lease_active{route="/r1"} 0`,
-		`hookaido_pull_lease_expired_total{route="/r1"} 0`,
-		`hookaido_pull_dequeue_total{route="/r2",status="200"} 1`,
-		`hookaido_pull_lease_active{route="/r2"} 0`,
-		`hookaido_pull_lease_expired_total{route="/r2"} 1`,
+		`hookaido_pull_dequeue_total{route="/r1",consumer_group="",status="200"} 2`,
+		`hookaido_pull_dequeue_total{route="/r1",consumer_group="",status="204"} 0`,
+		`hookaido_pull_dequeue_total{route="/r1",consumer_group="",status="4xx"} 1`,
+		`hookaido_pull_dequeue_total{route="/r1",consumer_group="",status="5xx"} 1`,
+		`hookaido_pull_acked_total{route="/r1",consumer_group=""} 1`,
+		`hookaido_pull_nacked_total{route="/r1",consumer_group=""} 1`,
+		`hookaido_pull_ack_conflict_total{route="/r1",consumer_group=""} 1`,
+		`hookaido_pull_nack_conflict_total{route="/r1",consumer_group=""} 1`,
+		`hookaido_pull_lease_active{route="/r1",consumer_group=""} 0`,
+		`hookaido_pull_lease_expired_total{route="/r1",consumer_group=""} 0`,
+		`hookaido_pull_dequeue_total{route="/r2",consumer_group="",status="200"} 1`,
+		`hookaido_pull_lease_active{route="/r2",consumer_group=""} 0`,
+		`hookaido_pull_lease_expired_total{route="/r2",consumer_group=""} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
@@ -707,10 +707,10 @@ func TestHealthDiagnostics_PullMetrics(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
 	m.now = func() time.Time { return now }
 
-	m.observePullDequeue("/diag", http.StatusOK, []queue.Envelope{
+	m.observePullDequeue(pullQueueKey{route: "/diag"}, http.StatusOK, []queue.Envelope{
 		{LeaseID: "lease_1", LeaseUntil: now.Add(30 * time.Second)},
 	})
-	m.observePullAck("/diag", http.StatusConflict, "lease_1", true)
+	m.observePullAck(pullQueueKey{route: "/diag"}, http.StatusConflict, "lease_1", true)
 
 	diag := m.healthDiagnostics()
 	pull, ok := diag["pull"].(map[string]any)

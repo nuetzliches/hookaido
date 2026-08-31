@@ -43,13 +43,13 @@ func ingressServer(store queue.Store, routes ...string) *ingress.Server {
 
 func pullServer(store queue.Store, routes ...string) *pullapi.Server {
 	srv := pullapi.NewServer(store)
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
 		for _, r := range routes {
 			if endpoint == r {
-				return r, true
+				return pullapi.Queue{Route: r, Target: "pull"}, true
 			}
 		}
-		return "", false
+		return pullapi.Queue{}, false
 	}
 	return srv
 }

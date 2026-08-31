@@ -142,6 +142,48 @@ for endpoint in ENDPOINTS:
 
 ---
 
+## One Source, Several Independent Consumers (Consumer Groups)
+
+The recipe above fans *inbound* traffic out across routes. This one fans a *single* route out across consumers — for a source that can only be handed one webhook URL (an appliance, a telephony platform, a vendor portal with a single "URL" field) while two environments each need every event.
+
+Attaching both to one pull endpoint would not do it: the queue is competing-consumer, so they would split the traffic and each would see a fluctuating fraction arrive. Declare a group per consumer instead:
+
+```hcl
+pull_api {
+  listen :9443
+  prefix /pull
+  auth token env:HOOKAIDO_PULL_TOKEN
+}
+
+/webhooks/appliance {
+  auth query "t" env:APPLIANCE_URL_TOKEN
+  pull {
+    path /appliance
+    consumer_group "integration"
+    consumer_group "workstation"
+  }
+}
+```
+
+Each group is its own queue with its own endpoint:
+
+```python
+# The long-lived integration environment
+BASE = "https://hookaido.dmz:9443/pull/appliance/integration"
+
+# A developer machine, receiving the same events independently
+BASE = "https://hookaido.dmz:9443/pull/appliance/workstation"
+```
+
+**Key points:**
+- Every event is enqueued once per group, so both consumers receive all of it
+- Within a group, workers still compete — scale a group by adding workers to it
+- The bare `/pull/appliance/...` path stops resolving once groups exist, so a consumer that was not migrated fails with `404` instead of quietly taking half the traffic
+- A group whose consumer is down accumulates its own backlog; it does not hold up the other group
+- See [Consumer Groups](pull-api.md#consumer-groups) for the full semantics, including why groups are not an authorization boundary
+
+---
+
 ## CI/CD Job Queue (Internal Channel)
 
 Use an internal channel as a durable job queue. Jobs are published via Admin API and consumed by gRPC workers, with dead-lettering for failed jobs.

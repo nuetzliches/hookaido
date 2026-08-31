@@ -394,7 +394,8 @@ Lists the pull consumers that currently hold an SSE stream.
     {
       "id": "con_9f2c4a1b7d3e5068",
       "route": "/webhooks/appliance",
-      "endpoint": "/appliance",
+      "consumer_group": "integration",
+      "endpoint": "/appliance/integration",
       "remote_addr": "10.0.0.5:41234",
       "user_agent": "hookaido-worker/1.0",
       "token_ref": "env.PULL_TOKEN",
@@ -408,6 +409,7 @@ Lists the pull consumers that currently hold an SSE stream.
 }
 ```
 
+- `consumer_group` is present only for a route that declares [consumer groups](pull-api.md#consumer-groups); each group is an independent queue, so two consumers on one route are expected when two groups are configured and an unexpected third shows up as one group having two.
 - `token_ref` is the configured secret reference the consumer authenticated with (`env.PULL_TOKEN`, `file./run/secrets/pull`), never the token value. It is omitted when the Pull API runs without tokens. For a route with its own `pull { auth token ... }`, it names a reference from that route's set — the global `pull_api` tokens do not authorize that route, so they are never reported for it.
 - `messages_sent` counts messages written to this stream since it opened. It is not a lease count: acks arrive on separate requests that are not tied to the connection, so how many of those messages are still outstanding is not something this endpoint can answer. Use `hookaido_pull_lease_active` for that.
 - Only SSE streams appear. A consumer polling `POST {endpoint}/dequeue` holds no connection between calls, so it is listed here and counted by the gauge alike: not at all.

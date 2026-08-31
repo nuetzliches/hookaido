@@ -30,14 +30,22 @@ const (
 )
 
 type Server struct {
-	Store                queue.Store
-	Target               string
-	ResolveRoute         func(endpoint string) (route string, ok bool)
+	Store queue.Store
+
+	// Target is the queue target used when ResolveQueue is not wired. The
+	// runtime always wires it; this keeps a bare Server usable.
+	Target string
+
+	// ResolveQueue maps a pull endpoint path to the queue it reads from. It
+	// replaces a plain endpoint-to-route lookup because a route with consumer
+	// groups serves several endpoints, one per independent queue.
+	ResolveQueue func(endpoint string) (Queue, bool)
+
 	Authorize            Authorizer
-	ObserveDequeue       func(route string, statusCode int, items []queue.Envelope)
-	ObserveAck           func(route string, statusCode int, leaseID string, leaseExpired bool)
-	ObserveNack          func(route string, statusCode int, leaseID string, leaseExpired bool)
-	ObserveExtend        func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool)
+	ObserveDequeue       func(q Queue, statusCode int, items []queue.Envelope)
+	ObserveAck           func(q Queue, statusCode int, leaseID string, leaseExpired bool)
+	ObserveNack          func(q Queue, statusCode int, leaseID string, leaseExpired bool)
+	ObserveExtend        func(q Queue, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool)
 	DefaultLeaseTTL      time.Duration
 	MaxBatch             int
 	MaxLeaseBatch        int
@@ -46,8 +54,8 @@ type Server struct {
 	MaxWait              time.Duration
 	SSEKeepalive         time.Duration
 	SSEMaxConnection     time.Duration
-	ObserveSSEConnect    func(route string)
-	ObserveSSEDisconnect func(route string, statusCode int, messagesSent int, duration time.Duration)
+	ObserveSSEConnect    func(q Queue)
+	ObserveSSEDisconnect func(q Queue, statusCode int, messagesSent int, duration time.Duration)
 
 	// IdentifyToken names the configured secret reference a request
 	// authenticated with, for the consumer registry below. It never returns the
@@ -86,7 +94,7 @@ func NewServer(store queue.Store) *Server {
 	return &Server{
 		Store:            store,
 		Target:           "pull",
-		ResolveRoute:     nil,
+		ResolveQueue:     nil,
 		DefaultLeaseTTL:  30 * time.Second,
 		MaxBatch:         100,
 		MaxLeaseBatch:    100,
@@ -132,12 +140,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, pullErrUnauthorized, "request is not authorized")
 			return
 		}
-		route, ok := s.resolveRoute(endpoint)
+		q, ok := s.resolveQueue(endpoint)
 		if !ok {
 			writeError(w, http.StatusNotFound, pullErrRouteNotFound, "pull endpoint is not configured")
 			return
 		}
-		s.handleSSE(w, r, route)
+		s.handleSSE(w, r, q)
 		return
 	}
 
@@ -151,20 +159,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	route, ok := s.resolveRoute(endpoint)
+	q, ok := s.resolveQueue(endpoint)
 	if !ok {
 		writeError(w, http.StatusNotFound, pullErrRouteNotFound, "pull endpoint is not configured")
 		return
 	}
 	switch op {
 	case "dequeue":
-		s.handleDequeue(w, r, route)
+		s.handleDequeue(w, r, q)
 	case "ack":
-		s.handleAck(w, r, route)
+		s.handleAck(w, r, q)
 	case "nack":
-		s.handleNack(w, r, route)
+		s.handleNack(w, r, q)
 	case "extend":
-		s.handleExtend(w, r, route)
+		s.handleExtend(w, r, q)
 	case "stream":
 		writeError(w, http.StatusMethodNotAllowed, pullErrMethodNotAllowed, "stream requires GET method")
 	default:
@@ -194,17 +202,17 @@ type dequeueItem struct {
 	Trace      map[string]string `json:"trace,omitempty"`
 }
 
-func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route string) {
+func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, q Queue) {
 	var req dequeueRequest
 	if r.Body != nil && !decodeJSONBodyStrict(w, r, &req, true) {
-		s.observeDequeue(route, http.StatusBadRequest, nil)
+		s.observeDequeue(q, http.StatusBadRequest, nil)
 		return
 	}
 
 	maxWait, ok := parseDuration(req.MaxWait)
 	if !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "max_wait must be a valid duration")
-		s.observeDequeue(route, http.StatusBadRequest, nil)
+		s.observeDequeue(q, http.StatusBadRequest, nil)
 		return
 	}
 	if req.MaxWait == "" && s.DefaultMaxWait > 0 {
@@ -219,13 +227,13 @@ func (s *Server) handleDequeue(w http.ResponseWriter, r *http.Request, route str
 		d, ok := parseDuration(req.LeaseTTL)
 		if !ok {
 			writeError(w, http.StatusBadRequest, pullErrInvalidBody, "lease_ttl must be a valid duration")
-			s.observeDequeue(route, http.StatusBadRequest, nil)
+			s.observeDequeue(q, http.StatusBadRequest, nil)
 			return
 		}
 		leaseTTL = d
 	}
 
-	outcome, opErr := s.Dequeue(r.Context(), route, DequeueParams{
+	outcome, opErr := s.Dequeue(r.Context(), q, DequeueParams{
 		Batch:       req.Batch,
 		MaxWait:     maxWait,
 		HasMaxWait:  req.MaxWait != "",
@@ -285,21 +293,21 @@ type nackBatchResponse struct {
 	Conflicts []ackBatchConflict `json:"conflicts,omitempty"`
 }
 
-func (s *Server) handleAck(w http.ResponseWriter, r *http.Request, route string) {
+func (s *Server) handleAck(w http.ResponseWriter, r *http.Request, q Queue) {
 	req, ok := readLeaseRequest(w, r)
 	if !ok {
-		s.observeAck(route, http.StatusBadRequest, "", false)
+		s.observeAck(q, http.StatusBadRequest, "", false)
 		return
 	}
 
 	leaseIDs, isBatch, errDetail := normalizeLeaseIDs(req, s.MaxLeaseBatch)
 	if errDetail != "" {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, errDetail)
-		s.observeAck(route, http.StatusBadRequest, "", false)
+		s.observeAck(q, http.StatusBadRequest, "", false)
 		return
 	}
 	if !isBatch {
-		if opErr := s.AckSingle(route, leaseIDs[0]); opErr != nil {
+		if opErr := s.AckSingle(q, leaseIDs[0]); opErr != nil {
 			writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 			return
 		}
@@ -307,7 +315,7 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request, route string)
 		return
 	}
 
-	outcome, opErr := s.AckBatch(route, leaseIDs)
+	outcome, opErr := s.AckBatch(q, leaseIDs)
 	if opErr != nil {
 		writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 		return
@@ -326,27 +334,27 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request, route string)
 	writeJSON(w, status, out)
 }
 
-func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, route string) {
+func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, q Queue) {
 	req, ok := readLeaseRequest(w, r)
 	if !ok {
-		s.observeNack(route, http.StatusBadRequest, "", false)
+		s.observeNack(q, http.StatusBadRequest, "", false)
 		return
 	}
 
 	leaseIDs, isBatch, errDetail := normalizeLeaseIDs(req, s.MaxLeaseBatch)
 	if errDetail != "" {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, errDetail)
-		s.observeNack(route, http.StatusBadRequest, "", false)
+		s.observeNack(q, http.StatusBadRequest, "", false)
 		return
 	}
 	if !isBatch {
 		delay, ok := parseDuration(req.Delay)
 		if !req.Dead && !ok {
 			writeError(w, http.StatusBadRequest, pullErrInvalidBody, "delay must be a valid duration")
-			s.observeNack(route, http.StatusBadRequest, leaseIDs[0], false)
+			s.observeNack(q, http.StatusBadRequest, leaseIDs[0], false)
 			return
 		}
-		if opErr := s.NackSingle(route, leaseIDs[0], req.Dead, req.Reason, delay); opErr != nil {
+		if opErr := s.NackSingle(q, leaseIDs[0], req.Dead, req.Reason, delay); opErr != nil {
 			writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 			return
 		}
@@ -357,11 +365,11 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, route string
 	delay, ok := parseDuration(req.Delay)
 	if !req.Dead && !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "delay must be a valid duration")
-		s.observeNack(route, http.StatusBadRequest, "", false)
+		s.observeNack(q, http.StatusBadRequest, "", false)
 		return
 	}
 
-	outcome, opErr := s.NackBatch(route, leaseIDs, req.Dead, req.Reason, delay)
+	outcome, opErr := s.NackBatch(q, leaseIDs, req.Dead, req.Reason, delay)
 	if opErr != nil {
 		writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 		return
@@ -398,7 +406,7 @@ func mapLeaseBatchConflicts(conflicts []queue.LeaseBatchConflict) []ackBatchConf
 	return out
 }
 
-func observeBatchAck(s *Server, route string, leaseIDs []string, res queue.LeaseBatchResult) {
+func observeBatchAck(s *Server, q Queue, leaseIDs []string, res queue.LeaseBatchResult) {
 	conflicts := make(map[string]bool, len(res.Conflicts))
 	for _, conflict := range res.Conflicts {
 		conflicts[conflict.LeaseID] = conflict.Expired
@@ -406,14 +414,14 @@ func observeBatchAck(s *Server, route string, leaseIDs []string, res queue.Lease
 	for _, leaseID := range leaseIDs {
 		expired, isConflict := conflicts[leaseID]
 		if isConflict {
-			s.observeAck(route, http.StatusConflict, leaseID, expired)
+			s.observeAck(q, http.StatusConflict, leaseID, expired)
 			continue
 		}
-		s.observeAck(route, http.StatusNoContent, leaseID, false)
+		s.observeAck(q, http.StatusNoContent, leaseID, false)
 	}
 }
 
-func observeBatchNack(s *Server, route string, leaseIDs []string, res queue.LeaseBatchResult) {
+func observeBatchNack(s *Server, q Queue, leaseIDs []string, res queue.LeaseBatchResult) {
 	conflicts := make(map[string]bool, len(res.Conflicts))
 	for _, conflict := range res.Conflicts {
 		conflicts[conflict.LeaseID] = conflict.Expired
@@ -421,33 +429,33 @@ func observeBatchNack(s *Server, route string, leaseIDs []string, res queue.Leas
 	for _, leaseID := range leaseIDs {
 		expired, isConflict := conflicts[leaseID]
 		if isConflict {
-			s.observeNack(route, http.StatusConflict, leaseID, expired)
+			s.observeNack(q, http.StatusConflict, leaseID, expired)
 			continue
 		}
-		s.observeNack(route, http.StatusNoContent, leaseID, false)
+		s.observeNack(q, http.StatusNoContent, leaseID, false)
 	}
 }
 
-func (s *Server) handleExtend(w http.ResponseWriter, r *http.Request, route string) {
+func (s *Server) handleExtend(w http.ResponseWriter, r *http.Request, q Queue) {
 	req, ok := readLeaseRequest(w, r)
 	if !ok {
-		s.observeExtend(route, http.StatusBadRequest, "", 0, false)
+		s.observeExtend(q, http.StatusBadRequest, "", 0, false)
 		return
 	}
 	if req.LeaseID == "" || req.ExtendBy == "" {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "lease_id and extend_by are required")
-		s.observeExtend(route, http.StatusBadRequest, req.LeaseID, 0, false)
+		s.observeExtend(q, http.StatusBadRequest, req.LeaseID, 0, false)
 		return
 	}
 
 	extendBy, ok := parseDuration(req.ExtendBy)
 	if !ok {
 		writeError(w, http.StatusBadRequest, pullErrInvalidBody, "extend_by must be a valid duration")
-		s.observeExtend(route, http.StatusBadRequest, req.LeaseID, 0, false)
+		s.observeExtend(q, http.StatusBadRequest, req.LeaseID, 0, false)
 		return
 	}
 
-	if opErr := s.Extend(route, req.LeaseID, extendBy); opErr != nil {
+	if opErr := s.Extend(q, req.LeaseID, extendBy); opErr != nil {
 		writeError(w, opErr.StatusCode, opErr.Code, opErr.Detail)
 		return
 	}
@@ -455,34 +463,34 @@ func (s *Server) handleExtend(w http.ResponseWriter, r *http.Request, route stri
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) resolveRoute(endpoint string) (string, bool) {
-	if s.ResolveRoute == nil {
-		return endpoint, true
+func (s *Server) resolveQueue(endpoint string) (Queue, bool) {
+	if s.ResolveQueue == nil {
+		return Queue{Route: endpoint, Target: s.Target}, true
 	}
-	return s.ResolveRoute(endpoint)
+	return s.ResolveQueue(endpoint)
 }
 
-func (s *Server) observeDequeue(route string, statusCode int, items []queue.Envelope) {
+func (s *Server) observeDequeue(q Queue, statusCode int, items []queue.Envelope) {
 	if s.ObserveDequeue != nil {
-		s.ObserveDequeue(route, statusCode, items)
+		s.ObserveDequeue(q, statusCode, items)
 	}
 }
 
-func (s *Server) observeAck(route string, statusCode int, leaseID string, leaseExpired bool) {
+func (s *Server) observeAck(q Queue, statusCode int, leaseID string, leaseExpired bool) {
 	if s.ObserveAck != nil {
-		s.ObserveAck(route, statusCode, leaseID, leaseExpired)
+		s.ObserveAck(q, statusCode, leaseID, leaseExpired)
 	}
 }
 
-func (s *Server) observeNack(route string, statusCode int, leaseID string, leaseExpired bool) {
+func (s *Server) observeNack(q Queue, statusCode int, leaseID string, leaseExpired bool) {
 	if s.ObserveNack != nil {
-		s.ObserveNack(route, statusCode, leaseID, leaseExpired)
+		s.ObserveNack(q, statusCode, leaseID, leaseExpired)
 	}
 }
 
-func (s *Server) observeExtend(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
+func (s *Server) observeExtend(q Queue, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
 	if s.ObserveExtend != nil {
-		s.ObserveExtend(route, statusCode, leaseID, extendBy, leaseExpired)
+		s.ObserveExtend(q, statusCode, leaseID, extendBy, leaseExpired)
 	}
 }
 

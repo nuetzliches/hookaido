@@ -454,7 +454,7 @@ func run() int {
 type runtimeState struct {
 	mu                   sync.RWMutex
 	routes               []config.CompiledRoute
-	pathToRoute          map[string]string
+	pullEndpoints        map[string]config.PullEndpoint
 	trendSignals         config.TrendSignalsConfig
 	adaptiveBackpressure config.AdaptiveBackpressureConfig
 	pullAuthorize        pullapi.Authorizer
@@ -486,7 +486,7 @@ type runtimeState struct {
 func newRuntimeState(compiled config.Compiled) *runtimeState {
 	s := &runtimeState{
 		routes:               compiled.Routes,
-		pathToRoute:          compiled.PathToRoute,
+		pullEndpoints:        compiled.PullEndpoints,
 		trendSignals:         compiled.Defaults.TrendSignals,
 		adaptiveBackpressure: compiled.Defaults.AdaptiveBackpressure,
 		pullByRoute:          make(map[string]pullapi.Authorizer),
@@ -541,7 +541,7 @@ func (s *runtimeState) updateAll(compiled config.Compiled) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.routes = compiled.Routes
-	s.pathToRoute = compiled.PathToRoute
+	s.pullEndpoints = compiled.PullEndpoints
 	s.trendSignals = compiled.Defaults.TrendSignals
 	s.adaptiveBackpressure = compiled.Defaults.AdaptiveBackpressure
 	s.trustedProxies = compiled.Ingress.TrustedProxies
@@ -953,11 +953,19 @@ func (s *runtimeState) allowedMethodsFor(r *http.Request, requestPath string) []
 	return out
 }
 
-func (s *runtimeState) resolvePull(endpoint string) (string, bool) {
+// resolvePull maps a pull endpoint path to the queue it reads from.
+//
+// The target is part of the answer because a route with consumer groups fans
+// out to one queue per group: the route alone no longer identifies which
+// messages an endpoint is entitled to.
+func (s *runtimeState) resolvePull(endpoint string) (pullapi.Queue, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	route, ok := s.pathToRoute[endpoint]
-	return route, ok
+	ep, ok := s.pullEndpoints[endpoint]
+	if !ok {
+		return pullapi.Queue{}, false
+	}
+	return pullapi.Queue{Route: ep.Route, Target: ep.Target, ConsumerGroup: ep.ConsumerGroup}, true
 }
 
 // hasRouteScopedPullAuth reports whether any route carries its own pull
@@ -976,8 +984,8 @@ func (s *runtimeState) authorizePull(r *http.Request) bool {
 	auth := s.pullAuthorize
 	if r != nil && len(s.pullByRoute) > 0 {
 		if endpoint := pullEndpointFromRequest(r); endpoint != "" {
-			if route, ok := s.pathToRoute[endpoint]; ok {
-				if ra, ok := s.pullByRoute[route]; ok && ra != nil {
+			if ep, ok := s.pullEndpoints[endpoint]; ok {
+				if ra, ok := s.pullByRoute[ep.Route]; ok && ra != nil {
 					auth = ra
 				}
 			}
@@ -1003,8 +1011,8 @@ func (s *runtimeState) identifyPullToken(r *http.Request) string {
 	identify := s.pullIdentify
 	if r != nil && len(s.pullIdentifyByRoute) > 0 {
 		if endpoint := pullEndpointFromRequest(r); endpoint != "" {
-			if route, ok := s.pathToRoute[endpoint]; ok {
-				if ri, ok := s.pullIdentifyByRoute[route]; ok && ri != nil {
+			if ep, ok := s.pullEndpoints[endpoint]; ok {
+				if ri, ok := s.pullIdentifyByRoute[ep.Route]; ok && ri != nil {
 					identify = ri
 				}
 			}
@@ -1021,8 +1029,8 @@ func (s *runtimeState) authorizeWorker(ctx context.Context, endpoint string) boo
 	defer s.mu.RUnlock()
 	auth := s.workerAuthorize
 	if len(s.workerByRoute) > 0 {
-		if route, ok := s.pathToRoute[strings.TrimSpace(endpoint)]; ok {
-			if ra, ok := s.workerByRoute[route]; ok && ra != nil {
+		if ep, ok := s.pullEndpoints[strings.TrimSpace(endpoint)]; ok {
+			if ra, ok := s.workerByRoute[ep.Route]; ok && ra != nil {
 				auth = ra
 			}
 		}
@@ -1076,13 +1084,11 @@ func (s *runtimeState) resolveIngressSnapshot(r *http.Request, requestPath strin
 		}
 		snap.MaxBody = rt.MaxBodyBytes
 		snap.MaxHeaders = rt.MaxHeaderBytes
-		if len(rt.Deliveries) > 0 {
-			targets := make([]string, 0, len(rt.Deliveries))
-			for _, d := range rt.Deliveries {
-				targets = append(targets, d.URL)
-			}
-			snap.Targets = targets
-		}
+		// This is the enqueue fan-out. A pull route used to leave it empty and
+		// let the ingress fall back to its single `pull` target; a route with
+		// consumer groups has one queue per group and every one of them must
+		// receive the event, so the targets are now always explicit.
+		snap.Targets = compiledRouteTargets(rt)
 		break
 	}
 	return snap, true
@@ -1292,7 +1298,9 @@ func (s *runtimeState) trendSignalsConfig() config.TrendSignalsConfig {
 
 func compiledRouteTargets(rt config.CompiledRoute) []string {
 	if rt.Pull != nil {
-		return []string{"pull"}
+		// One target per consumer group, so the ingress fans the event out to
+		// every group's queue; the ungrouped case stays the literal `pull`.
+		return rt.Pull.PullTargets()
 	}
 	if len(rt.Deliveries) == 0 {
 		return nil
@@ -2617,7 +2625,7 @@ func startServers(
 	}
 
 	pullHandler := pullapi.NewServer(store)
-	pullHandler.ResolveRoute = state.resolvePull
+	pullHandler.ResolveQueue = state.resolvePull
 	pullHandler.Authorize = state.authorizePull
 	// Read through the runtime state rather than captured once: a reload can
 	// add or remove per-route pull tokens.
@@ -2641,23 +2649,23 @@ func startServers(
 	pullHandler.MaxWait = compiled.PullAPI.MaxWait
 	pullHandler.SSEKeepalive = compiled.PullAPI.SSEKeepalive
 	pullHandler.SSEMaxConnection = compiled.PullAPI.SSEMaxConnection
-	pullHandler.ObserveSSEConnect = func(route string) {
-		appMetrics.observePullSSEConnect(route)
+	pullHandler.ObserveSSEConnect = func(q pullapi.Queue) {
+		appMetrics.observePullSSEConnect(pullMetricKey(q))
 	}
-	pullHandler.ObserveSSEDisconnect = func(route string, statusCode int, messagesSent int, duration time.Duration) {
-		appMetrics.observePullSSEDisconnect(route, statusCode, messagesSent, duration)
+	pullHandler.ObserveSSEDisconnect = func(q pullapi.Queue, statusCode int, messagesSent int, duration time.Duration) {
+		appMetrics.observePullSSEDisconnect(pullMetricKey(q), statusCode, messagesSent, duration)
 	}
-	pullHandler.ObserveDequeue = func(route string, statusCode int, items []queue.Envelope) {
-		appMetrics.observePullDequeue(route, statusCode, items)
+	pullHandler.ObserveDequeue = func(q pullapi.Queue, statusCode int, items []queue.Envelope) {
+		appMetrics.observePullDequeue(pullMetricKey(q), statusCode, items)
 	}
-	pullHandler.ObserveAck = func(route string, statusCode int, leaseID string, leaseExpired bool) {
-		appMetrics.observePullAck(route, statusCode, leaseID, leaseExpired)
+	pullHandler.ObserveAck = func(q pullapi.Queue, statusCode int, leaseID string, leaseExpired bool) {
+		appMetrics.observePullAck(pullMetricKey(q), statusCode, leaseID, leaseExpired)
 	}
-	pullHandler.ObserveNack = func(route string, statusCode int, leaseID string, leaseExpired bool) {
-		appMetrics.observePullNack(route, statusCode, leaseID, leaseExpired)
+	pullHandler.ObserveNack = func(q pullapi.Queue, statusCode int, leaseID string, leaseExpired bool) {
+		appMetrics.observePullNack(pullMetricKey(q), statusCode, leaseID, leaseExpired)
 	}
-	pullHandler.ObserveExtend = func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
-		appMetrics.observePullExtend(route, statusCode, leaseID, extendBy, leaseExpired)
+	pullHandler.ObserveExtend = func(q pullapi.Queue, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
+		appMetrics.observePullExtend(pullMetricKey(q), statusCode, leaseID, extendBy, leaseExpired)
 	}
 	pullHandler.IdentifyToken = state.identifyPullToken
 
@@ -2673,6 +2681,7 @@ func startServers(
 		runtimeLogger.Info("pull_sse_connected",
 			slog.String("consumer_id", c.ID),
 			slog.String("route", c.Route),
+			slog.String("consumer_group", c.ConsumerGroup),
 			slog.String("endpoint", c.Endpoint),
 			slog.String("remote_addr", c.RemoteAddr),
 			slog.String("user_agent", c.UserAgent),
@@ -2683,6 +2692,7 @@ func startServers(
 		runtimeLogger.Info("pull_sse_disconnected",
 			slog.String("consumer_id", c.ID),
 			slog.String("route", c.Route),
+			slog.String("consumer_group", c.ConsumerGroup),
 			slog.String("endpoint", c.Endpoint),
 			slog.String("remote_addr", c.RemoteAddr),
 			slog.String("token_ref", c.TokenRef),
@@ -2941,7 +2951,7 @@ func startServers(
 		wtCfg := hookaido.WorkerTransportConfig{
 			TLSConfig:     grpcTLS,
 			PullServer:    pullHandler,
-			ResolveRoute:  state.resolvePull,
+			ResolveQueue:  state.resolvePull,
 			Authorize:     state.authorizeWorker,
 			MaxLeaseBatch: compiled.PullAPI.MaxLeaseBatch,
 		}
@@ -3248,6 +3258,7 @@ func adminPullConsumers(in []pullapi.ConsumerConnection) []admin.PullConsumer {
 		out = append(out, admin.PullConsumer{
 			ID:            c.ID,
 			Route:         c.Route,
+			ConsumerGroup: c.ConsumerGroup,
 			Endpoint:      c.Endpoint,
 			RemoteAddr:    c.RemoteAddr,
 			UserAgent:     c.UserAgent,

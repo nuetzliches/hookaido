@@ -67,6 +67,8 @@ Notes:
 - `summary.publish_policy_direct_enabled`, `summary.publish_policy_managed_enabled`, `summary.publish_policy_allow_pull_routes`, `summary.publish_policy_allow_deliver_routes`, `summary.publish_policy_require_actor`, `summary.publish_policy_require_request_id`, `summary.publish_policy_fail_closed`, `summary.publish_policy_actor_allowlist`, and `summary.publish_policy_actor_prefixes` report compiled publish-path policy settings from `defaults.publish_policy`.
 - Compile errors include ingress HMAC header-collision validation for route `auth hmac` (`signature_header`, `timestamp_header`, and `nonce_header` must be distinct after defaults are applied).
 - Compile errors include route `auth query` validation: an unknown or duplicate `secret_ref`, a parameter with no usable secret, a combination with `auth basic`/`auth hmac`/`auth forward`, and a collision with a `match query`/`query_exists` on the same parameter.
+- `summary.consumer_group_count` totals the `pull { consumer_group ... }` entries across routes, and `summary.path_count` counts pull endpoints — a route with groups contributes one endpoint per group and none for its bare path.
+- Compile errors include route `pull.consumer_group` validation: an empty or duplicate name, a name outside `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, a name reserved as a Pull API operation (`dequeue`, `ack`, `nack`, `extend`, `stream`), and a group endpoint colliding with another route's pull path.
 
 ### `config_fmt_preview`
 Format Hookaidofile without writing to disk.

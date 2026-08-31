@@ -16,14 +16,14 @@ func scopeTestServer(t *testing.T, store queue.Store) *Server {
 	srv := NewServer(store)
 	srv.Target = "pull"
 	srv.LeaseRouteScoped = func() bool { return true }
-	srv.ResolveRoute = func(endpoint string) (string, bool) {
+	srv.ResolveQueue = func(endpoint string) (Queue, bool) {
 		switch endpoint {
 		case "/pull/a":
-			return "/a", true
+			return Queue{Route: "/a", Target: "pull"}, true
 		case "/pull/b":
-			return "/b", true
+			return Queue{Route: "/b", Target: "pull"}, true
 		}
-		return "", false
+		return Queue{}, false
 	}
 	return srv
 }
@@ -55,25 +55,25 @@ func TestLeaseScope_ForeignLeaseRejected(t *testing.T) {
 		{
 			name: "ack",
 			run: func(srv *Server, route string, lease queue.Envelope) *OpError {
-				return srv.AckSingle(route, lease.LeaseID)
+				return srv.AckSingle(testQueue(route), lease.LeaseID)
 			},
 		},
 		{
 			name: "nack",
 			run: func(srv *Server, route string, lease queue.Envelope) *OpError {
-				return srv.NackSingle(route, lease.LeaseID, false, "", 0)
+				return srv.NackSingle(testQueue(route), lease.LeaseID, false, "", 0)
 			},
 		},
 		{
 			name: "mark_dead",
 			run: func(srv *Server, route string, lease queue.Envelope) *OpError {
-				return srv.NackSingle(route, lease.LeaseID, true, "manual", 0)
+				return srv.NackSingle(testQueue(route), lease.LeaseID, true, "manual", 0)
 			},
 		},
 		{
 			name: "extend",
 			run: func(srv *Server, route string, lease queue.Envelope) *OpError {
-				return srv.Extend(route, lease.LeaseID, time.Minute)
+				return srv.Extend(testQueue(route), lease.LeaseID, time.Minute)
 			},
 		},
 	}
@@ -117,7 +117,7 @@ func TestLeaseScope_BatchSplitsForeignLeases(t *testing.T) {
 	mine := leaseFor(t, store, "/a")
 	theirs := leaseFor(t, store, "/b")
 
-	res, opErr := srv.AckBatch("/a", []string{mine.LeaseID, theirs.LeaseID})
+	res, opErr := srv.AckBatch(testQueue("/a"), []string{mine.LeaseID, theirs.LeaseID})
 	if opErr != nil {
 		t.Fatalf("ack batch: %v", opErr)
 	}
@@ -145,7 +145,7 @@ func TestLeaseScope_SkippedWithoutRouteScopedCredentials(t *testing.T) {
 	srv.LeaseRouteScoped = func() bool { return false }
 
 	lease := leaseFor(t, store, "/b")
-	if opErr := srv.AckSingle("/a", lease.LeaseID); opErr != nil {
+	if opErr := srv.AckSingle(testQueue("/a"), lease.LeaseID); opErr != nil {
 		t.Fatalf("ack across routes without scoped credentials: %v", opErr)
 	}
 	if store.calls != 0 {
@@ -159,7 +159,7 @@ func TestLeaseScope_ResolverFailureDenies(t *testing.T) {
 	srv := scopeTestServer(t, store)
 	lease := leaseFor(t, store, "/a")
 
-	opErr := srv.AckSingle("/a", lease.LeaseID)
+	opErr := srv.AckSingle(testQueue("/a"), lease.LeaseID)
 	if opErr == nil {
 		t.Fatal("expected the ack to fail when the scope check cannot run")
 	}
@@ -182,7 +182,7 @@ func TestDequeue_CancelledContextDoesNotLease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	outcome, opErr := srv.Dequeue(ctx, "/a", DequeueParams{Batch: 1, MaxWait: time.Second, HasMaxWait: true})
+	outcome, opErr := srv.Dequeue(ctx, testQueue("/a"), DequeueParams{Batch: 1, MaxWait: time.Second, HasMaxWait: true})
 	if opErr != nil {
 		t.Fatalf("a cancelled dequeue must not be reported as a store failure: %v", opErr)
 	}
@@ -213,7 +213,7 @@ func TestDequeue_ContextCancelledMidWaitReturns(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if _, opErr := srv.Dequeue(ctx, "/a", DequeueParams{Batch: 1, MaxWait: 30 * time.Second, HasMaxWait: true}); opErr != nil {
+		if _, opErr := srv.Dequeue(ctx, testQueue("/a"), DequeueParams{Batch: 1, MaxWait: 30 * time.Second, HasMaxWait: true}); opErr != nil {
 			t.Errorf("dequeue: %v", opErr)
 		}
 	}()

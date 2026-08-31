@@ -114,11 +114,13 @@ func (s *Server) toolConfigCompile(args map[string]any) (any, error) {
 	compiled, res := config.Compile(cfg)
 
 	pullRouteCount := 0
+	consumerGroupCount := 0
 	deliverRouteCount := 0
 	managedRouteCount := 0
 	for _, r := range compiled.Routes {
 		if r.Pull != nil {
 			pullRouteCount++
+			consumerGroupCount += len(r.Pull.ConsumerGroups)
 		}
 		if len(r.Deliveries) > 0 {
 			deliverRouteCount++
@@ -153,13 +155,14 @@ func (s *Server) toolConfigCompile(args map[string]any) (any, error) {
 				[]string(nil),
 				compiled.Defaults.PublishPolicy.ActorPrefixes...,
 			),
-			"shared_listener":     compiled.SharedListener,
-			"ingress_shared":      compiled.IngressShared,
-			"route_count":         len(compiled.Routes),
-			"pull_route_count":    pullRouteCount,
-			"deliver_route_count": deliverRouteCount,
-			"managed_route_count": managedRouteCount,
-			"path_count":          len(compiled.PathToRoute),
+			"shared_listener":      compiled.SharedListener,
+			"ingress_shared":       compiled.IngressShared,
+			"route_count":          len(compiled.Routes),
+			"pull_route_count":     pullRouteCount,
+			"consumer_group_count": consumerGroupCount,
+			"deliver_route_count":  deliverRouteCount,
+			"managed_route_count":  managedRouteCount,
+			"path_count":           len(compiled.PullEndpoints),
 		},
 	}, nil
 }

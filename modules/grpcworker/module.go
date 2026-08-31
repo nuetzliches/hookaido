@@ -36,7 +36,13 @@ func (m *grpcWorkerModule) Serve(ln net.Listener, cfg hookaido.WorkerTransportCo
 
 	m.srv = grpc.NewServer(opts...)
 	ws := NewServer(pullServer)
-	ws.ResolveRoute = cfg.ResolveRoute
+	if cfg.ResolveQueue != nil {
+		resolve, ok := cfg.ResolveQueue.(func(endpoint string) (pullapi.Queue, bool))
+		if !ok {
+			return fmt.Errorf("grpcworker: ResolveQueue must be func(string) (pullapi.Queue, bool), got %T", cfg.ResolveQueue)
+		}
+		ws.ResolveQueue = resolve
+	}
 	if cfg.Authorize != nil {
 		ws.Authorize = cfg.Authorize
 	}

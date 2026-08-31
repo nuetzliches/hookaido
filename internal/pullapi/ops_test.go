@@ -18,7 +18,7 @@ func TestPullOpsDequeueClampsAndDefaults(t *testing.T) {
 	srv.DefaultLeaseTTL = 30 * time.Second
 	srv.MaxLeaseTTL = 20 * time.Second
 
-	_, opErr := srv.Dequeue(context.Background(), "/hooks/github", DequeueParams{
+	_, opErr := srv.Dequeue(context.Background(), testQueue("/hooks/github"), DequeueParams{
 		Batch:       99,
 		HasMaxWait:  false,
 		HasLeaseTTL: false,
@@ -57,11 +57,11 @@ func TestPullOpsAckBatchIncludesRecentlyCompleted(t *testing.T) {
 	}
 
 	srv := NewServer(store)
-	if opErr := srv.AckSingle("/r", deq.Items[0].LeaseID); opErr != nil {
+	if opErr := srv.AckSingle(testQueue("/r"), deq.Items[0].LeaseID); opErr != nil {
 		t.Fatalf("ack single opErr: %#v", opErr)
 	}
 
-	out, opErr := srv.AckBatch("/r", []string{deq.Items[0].LeaseID, deq.Items[1].LeaseID})
+	out, opErr := srv.AckBatch(testQueue("/r"), []string{deq.Items[0].LeaseID, deq.Items[1].LeaseID})
 	if opErr != nil {
 		t.Fatalf("ack batch opErr: %#v", opErr)
 	}
@@ -77,7 +77,7 @@ func TestPullOpsNackDeadUsesMarkDead(t *testing.T) {
 	store := &stubStore{}
 	srv := NewServer(store)
 
-	opErr := srv.NackSingle("/r", "lease_1", true, "no_retry", 0)
+	opErr := srv.NackSingle(testQueue("/r"), "lease_1", true, "no_retry", 0)
 	if opErr != nil {
 		t.Fatalf("unexpected opErr: %#v", opErr)
 	}
@@ -96,7 +96,7 @@ func TestPullOpsExtendLeaseConflict(t *testing.T) {
 	store := &stubStore{extendErr: queue.ErrLeaseExpired}
 	srv := NewServer(store)
 
-	opErr := srv.Extend("/r", "lease_1", 5*time.Second)
+	opErr := srv.Extend(testQueue("/r"), "lease_1", 5*time.Second)
 	if opErr == nil {
 		t.Fatalf("expected opErr")
 	}

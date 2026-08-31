@@ -794,7 +794,7 @@ func ageWindowsToMap(w backlog.AgeWindows) map[string]any {
 
 func compiledRouteTargets(r config.CompiledRoute) []string {
 	if r.Pull != nil {
-		return []string{"pull"}
+		return r.Pull.PullTargets()
 	}
 	if len(r.Deliveries) == 0 {
 		return nil

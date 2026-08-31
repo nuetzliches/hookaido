@@ -11,10 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nuetzliches/hookaido/v2/internal/pullapi"
 	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
-const metricsSchemaVersion = "1.3.0"
+const metricsSchemaVersion = "1.4.0"
 
 type runtimeMetrics struct {
 	tracingEnabled                             atomic.Int64
@@ -67,7 +68,7 @@ type runtimeMetrics struct {
 	}
 
 	pullMu      sync.Mutex
-	pullByRoute map[string]*pullRouteMetrics
+	pullByQueue map[pullQueueKey]*pullRouteMetrics
 	pullLeases  map[string]pullLease
 	now         func() time.Time
 }
@@ -85,8 +86,20 @@ type pullRouteMetrics struct {
 	sseConnectionActive  int64
 }
 
-type pullLease struct {
+// pullQueueKey identifies one pull queue in the metric maps.
+//
+// A route used to be the identity, because it had exactly one queue. A route
+// with consumer groups has one per group, and collapsing them would defeat the
+// point of the connection gauge: with two groups configured, two attached
+// consumers on one route is the expected state, and an unexpected third has to
+// remain visible as one group having two.
+type pullQueueKey struct {
 	route string
+	group string
+}
+
+type pullLease struct {
+	key   pullQueueKey
 	until time.Time
 }
 
@@ -105,7 +118,7 @@ type pullRouteSnapshot struct {
 
 func newRuntimeMetrics() *runtimeMetrics {
 	m := &runtimeMetrics{
-		pullByRoute:                     make(map[string]*pullRouteMetrics),
+		pullByQueue:                     make(map[pullQueueKey]*pullRouteMetrics),
 		pullLeases:                      make(map[string]pullLease),
 		now:                             time.Now,
 		ingressAdaptiveByReason:         make(map[string]int64),
@@ -369,12 +382,12 @@ func (m *runtimeMetrics) refreshQueueStatsAsync() {
 	m.queueStats.cachedOK = true
 }
 
-func (m *runtimeMetrics) observePullDequeue(route string, statusCode int, items []queue.Envelope) {
+func (m *runtimeMetrics) observePullDequeue(key pullQueueKey, statusCode int, items []queue.Envelope) {
 	if m == nil {
 		return
 	}
 
-	route = normalizePullRoute(route)
+	key = normalizePullQueueKey(key)
 	status := pullStatusLabel(statusCode)
 
 	m.pullMu.Lock()
@@ -382,7 +395,7 @@ func (m *runtimeMetrics) observePullDequeue(route string, statusCode int, items 
 
 	m.expirePullLeasesLocked(m.nowLocked())
 
-	metrics := m.pullRouteLocked(route)
+	metrics := m.pullQueueLocked(key)
 	metrics.dequeueByStatus[status]++
 
 	if statusCode != http.StatusOK || len(items) == 0 {
@@ -392,23 +405,23 @@ func (m *runtimeMetrics) observePullDequeue(route string, statusCode int, items 
 		if strings.TrimSpace(item.LeaseID) == "" {
 			continue
 		}
-		m.trackPullLeaseLocked(route, item.LeaseID, item.LeaseUntil)
+		m.trackPullLeaseLocked(key, item.LeaseID, item.LeaseUntil)
 	}
 }
 
-func (m *runtimeMetrics) observePullAck(route string, statusCode int, leaseID string, leaseExpired bool) {
+func (m *runtimeMetrics) observePullAck(key pullQueueKey, statusCode int, leaseID string, leaseExpired bool) {
 	if m == nil {
 		return
 	}
 
-	route = normalizePullRoute(route)
+	key = normalizePullQueueKey(key)
 
 	m.pullMu.Lock()
 	defer m.pullMu.Unlock()
 
 	m.expirePullLeasesLocked(m.nowLocked())
 
-	metrics := m.pullRouteLocked(route)
+	metrics := m.pullQueueLocked(key)
 	switch statusCode {
 	case http.StatusNoContent:
 		metrics.ackedTotal++
@@ -422,19 +435,19 @@ func (m *runtimeMetrics) observePullAck(route string, statusCode int, leaseID st
 	}
 }
 
-func (m *runtimeMetrics) observePullNack(route string, statusCode int, leaseID string, leaseExpired bool) {
+func (m *runtimeMetrics) observePullNack(key pullQueueKey, statusCode int, leaseID string, leaseExpired bool) {
 	if m == nil {
 		return
 	}
 
-	route = normalizePullRoute(route)
+	key = normalizePullQueueKey(key)
 
 	m.pullMu.Lock()
 	defer m.pullMu.Unlock()
 
 	m.expirePullLeasesLocked(m.nowLocked())
 
-	metrics := m.pullRouteLocked(route)
+	metrics := m.pullQueueLocked(key)
 	switch statusCode {
 	case http.StatusNoContent:
 		metrics.nackedTotal++
@@ -448,19 +461,19 @@ func (m *runtimeMetrics) observePullNack(route string, statusCode int, leaseID s
 	}
 }
 
-func (m *runtimeMetrics) observePullExtend(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
+func (m *runtimeMetrics) observePullExtend(key pullQueueKey, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
 	if m == nil {
 		return
 	}
 
-	route = normalizePullRoute(route)
+	key = normalizePullQueueKey(key)
 
 	m.pullMu.Lock()
 	defer m.pullMu.Unlock()
 
 	m.expirePullLeasesLocked(m.nowLocked())
 
-	metrics := m.pullRouteLocked(route)
+	metrics := m.pullQueueLocked(key)
 	switch statusCode {
 	case http.StatusNoContent:
 		if strings.TrimSpace(leaseID) == "" || extendBy <= 0 {
@@ -483,39 +496,39 @@ func (m *runtimeMetrics) observePullExtend(route string, statusCode int, leaseID
 	}
 }
 
-func (m *runtimeMetrics) observePullSSEConnect(route string) {
+func (m *runtimeMetrics) observePullSSEConnect(key pullQueueKey) {
 	if m == nil {
 		return
 	}
 
-	route = normalizePullRoute(route)
+	key = normalizePullQueueKey(key)
 
 	m.pullMu.Lock()
 	defer m.pullMu.Unlock()
 
-	metrics := m.pullRouteLocked(route)
+	metrics := m.pullQueueLocked(key)
 	metrics.sseConnectionsTotal++
 	metrics.sseConnectionActive++
 }
 
-func (m *runtimeMetrics) observePullSSEDisconnect(route string, statusCode int, messagesSent int, duration time.Duration) {
+func (m *runtimeMetrics) observePullSSEDisconnect(key pullQueueKey, statusCode int, messagesSent int, duration time.Duration) {
 	if m == nil {
 		return
 	}
 
-	route = normalizePullRoute(route)
+	key = normalizePullQueueKey(key)
 
 	m.pullMu.Lock()
 	defer m.pullMu.Unlock()
 
-	metrics := m.pullRouteLocked(route)
+	metrics := m.pullQueueLocked(key)
 	metrics.sseMessagesSentTotal += int64(messagesSent)
 	if metrics.sseConnectionActive > 0 {
 		metrics.sseConnectionActive--
 	}
 }
 
-func (m *runtimeMetrics) pullSnapshot() map[string]pullRouteSnapshot {
+func (m *runtimeMetrics) pullSnapshot() map[pullQueueKey]pullRouteSnapshot {
 	if m == nil {
 		return nil
 	}
@@ -524,12 +537,12 @@ func (m *runtimeMetrics) pullSnapshot() map[string]pullRouteSnapshot {
 	defer m.pullMu.Unlock()
 
 	m.expirePullLeasesLocked(m.nowLocked())
-	if len(m.pullByRoute) == 0 {
+	if len(m.pullByQueue) == 0 {
 		return nil
 	}
 
-	out := make(map[string]pullRouteSnapshot, len(m.pullByRoute))
-	for route, metrics := range m.pullByRoute {
+	out := make(map[pullQueueKey]pullRouteSnapshot, len(m.pullByQueue))
+	for key, metrics := range m.pullByQueue {
 		if metrics == nil {
 			continue
 		}
@@ -537,7 +550,7 @@ func (m *runtimeMetrics) pullSnapshot() map[string]pullRouteSnapshot {
 		for status, n := range metrics.dequeueByStatus {
 			byStatus[status] = n
 		}
-		out[route] = pullRouteSnapshot{
+		out[key] = pullRouteSnapshot{
 			dequeueByStatus:      byStatus,
 			ackedTotal:           metrics.ackedTotal,
 			nackedTotal:          metrics.nackedTotal,
@@ -553,19 +566,19 @@ func (m *runtimeMetrics) pullSnapshot() map[string]pullRouteSnapshot {
 	return out
 }
 
-func (m *runtimeMetrics) pullRouteLocked(route string) *pullRouteMetrics {
-	if m.pullByRoute == nil {
-		m.pullByRoute = make(map[string]*pullRouteMetrics)
+func (m *runtimeMetrics) pullQueueLocked(key pullQueueKey) *pullRouteMetrics {
+	if m.pullByQueue == nil {
+		m.pullByQueue = make(map[pullQueueKey]*pullRouteMetrics)
 	}
-	metrics, ok := m.pullByRoute[route]
+	metrics, ok := m.pullByQueue[key]
 	if !ok {
 		metrics = &pullRouteMetrics{dequeueByStatus: make(map[string]int64)}
-		m.pullByRoute[route] = metrics
+		m.pullByQueue[key] = metrics
 	}
 	return metrics
 }
 
-func (m *runtimeMetrics) trackPullLeaseLocked(route string, leaseID string, until time.Time) {
+func (m *runtimeMetrics) trackPullLeaseLocked(key pullQueueKey, leaseID string, until time.Time) {
 	if strings.TrimSpace(leaseID) == "" {
 		return
 	}
@@ -575,13 +588,13 @@ func (m *runtimeMetrics) trackPullLeaseLocked(route string, leaseID string, unti
 	}
 
 	if existing, ok := m.pullLeases[leaseID]; ok {
-		if prev := m.pullByRoute[existing.route]; prev != nil && prev.leaseActive > 0 {
+		if prev := m.pullByQueue[existing.key]; prev != nil && prev.leaseActive > 0 {
 			prev.leaseActive--
 		}
 	}
 
-	m.pullLeases[leaseID] = pullLease{route: route, until: until}
-	m.pullRouteLocked(route).leaseActive++
+	m.pullLeases[leaseID] = pullLease{key: key, until: until}
+	m.pullQueueLocked(key).leaseActive++
 }
 
 func (m *runtimeMetrics) clearPullLeaseLocked(leaseID string) {
@@ -593,7 +606,7 @@ func (m *runtimeMetrics) clearPullLeaseLocked(leaseID string) {
 		return
 	}
 	delete(m.pullLeases, leaseID)
-	if metrics := m.pullByRoute[lease.route]; metrics != nil && metrics.leaseActive > 0 {
+	if metrics := m.pullByQueue[lease.key]; metrics != nil && metrics.leaseActive > 0 {
 		metrics.leaseActive--
 	}
 }
@@ -607,7 +620,7 @@ func (m *runtimeMetrics) expirePullLeasesLocked(now time.Time) {
 			continue
 		}
 		delete(m.pullLeases, leaseID)
-		if metrics := m.pullByRoute[lease.route]; metrics != nil && metrics.leaseActive > 0 {
+		if metrics := m.pullByQueue[lease.key]; metrics != nil && metrics.leaseActive > 0 {
 			metrics.leaseActive--
 		}
 	}
@@ -620,12 +633,18 @@ func (m *runtimeMetrics) nowLocked() time.Time {
 	return time.Now()
 }
 
-func normalizePullRoute(route string) string {
-	route = strings.TrimSpace(route)
-	if route == "" {
-		return "_unknown"
+// pullMetricKey is the metric identity of the queue a pull request addressed.
+func pullMetricKey(q pullapi.Queue) pullQueueKey {
+	return pullQueueKey{route: q.Route, group: q.ConsumerGroup}
+}
+
+func normalizePullQueueKey(key pullQueueKey) pullQueueKey {
+	key.route = strings.TrimSpace(key.route)
+	if key.route == "" {
+		key.route = "_unknown"
 	}
-	return route
+	key.group = strings.TrimSpace(key.group)
+	return key
 }
 
 func pullStatusLabel(statusCode int) string {
@@ -704,13 +723,29 @@ func orderedPullStatuses(byStatus map[string]int64) []string {
 	return out
 }
 
-func sortedRoutes(snapshot map[string]pullRouteSnapshot) []string {
-	routes := make([]string, 0, len(snapshot))
-	for route := range snapshot {
-		routes = append(routes, route)
+func sortedPullQueues(snapshot map[pullQueueKey]pullRouteSnapshot) []pullQueueKey {
+	keys := make([]pullQueueKey, 0, len(snapshot))
+	for key := range snapshot {
+		keys = append(keys, key)
 	}
-	sort.Strings(routes)
-	return routes
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].route != keys[j].route {
+			return keys[i].route < keys[j].route
+		}
+		return keys[i].group < keys[j].group
+	})
+	return keys
+}
+
+// pullDiagnosticsLabel is the by_route key in the health diagnostics.
+//
+// An ungrouped route keeps its bare path, so nothing about an existing
+// deployment's output changes; a group is appended as `route#group`.
+func (k pullQueueKey) pullDiagnosticsLabel() string {
+	if k.group == "" {
+		return k.route
+	}
+	return k.route + "#" + k.group
 }
 
 func normalizeAdaptiveBackpressureReason(reason string) string {
@@ -855,7 +890,7 @@ func (m *runtimeMetrics) ingressRejectBreakdownSnapshot() map[string]map[string]
 	return out
 }
 
-func pullDiagnostics(snapshot map[string]pullRouteSnapshot) map[string]any {
+func pullDiagnostics(snapshot map[pullQueueKey]pullRouteSnapshot) map[string]any {
 	total := map[string]any{
 		"dequeue_total": map[string]any{
 			"200": int64(0),
@@ -879,8 +914,8 @@ func pullDiagnostics(snapshot map[string]pullRouteSnapshot) map[string]any {
 	}
 
 	dequeueTotal := total["dequeue_total"].(map[string]any)
-	for _, route := range sortedRoutes(snapshot) {
-		metrics := snapshot[route]
+	for _, key := range sortedPullQueues(snapshot) {
+		metrics := snapshot[key]
 		statuses := make(map[string]any, len(metrics.dequeueByStatus))
 		for _, status := range orderedPullStatuses(metrics.dequeueByStatus) {
 			value := metrics.dequeueByStatus[status]
@@ -892,7 +927,7 @@ func pullDiagnostics(snapshot map[string]pullRouteSnapshot) map[string]any {
 			}
 		}
 
-		byRoute[route] = map[string]any{
+		byRoute[key.pullDiagnosticsLabel()] = map[string]any{
 			"dequeue_total":       statuses,
 			"acked_total":         metrics.ackedTotal,
 			"nacked_total":        metrics.nackedTotal,
@@ -1068,7 +1103,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			deliveryDeadByReason[reason] = 0
 		}
 		ingressRejectBreakdown := newIngressRejectBreakdownSnapshot()
-		var pullSnapshot map[string]pullRouteSnapshot
+		var pullSnapshot map[pullQueueKey]pullRouteSnapshot
 		var secretGCPrunedByPool map[string]int64
 		if rm != nil {
 			tracingEnabled = rm.tracingEnabled.Load()
@@ -1252,26 +1287,30 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_pull_sse_messages_sent_total counter\n")
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_pull_sse_connection_active Current number of active SSE connections by route.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_pull_sse_connection_active gauge\n")
-		for _, route := range sortedRoutes(pullSnapshot) {
-			metrics := pullSnapshot[route]
+		for _, key := range sortedPullQueues(pullSnapshot) {
+			metrics := pullSnapshot[key]
+			// An ungrouped route emits consumer_group="". Prometheus treats an
+			// empty label value as absent, so every existing series keeps its
+			// identity while grouped routes stay separable.
+			labels := fmt.Sprintf("route=%q,consumer_group=%q", key.route, key.group)
 			for _, status := range orderedPullStatuses(metrics.dequeueByStatus) {
 				_, _ = fmt.Fprintf(
 					w,
-					"hookaido_pull_dequeue_total{route=%q,status=%q} %d\n",
-					route,
+					"hookaido_pull_dequeue_total{%s,status=%q} %d\n",
+					labels,
 					status,
 					metrics.dequeueByStatus[status],
 				)
 			}
-			_, _ = fmt.Fprintf(w, "hookaido_pull_acked_total{route=%q} %d\n", route, metrics.ackedTotal)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_nacked_total{route=%q} %d\n", route, metrics.nackedTotal)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_ack_conflict_total{route=%q} %d\n", route, metrics.ackConflictTotal)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_nack_conflict_total{route=%q} %d\n", route, metrics.nackConflictTotal)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_lease_active{route=%q} %d\n", route, metrics.leaseActive)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_lease_expired_total{route=%q} %d\n", route, metrics.leaseExpiredTotal)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_connections_total{route=%q} %d\n", route, metrics.sseConnectionsTotal)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_messages_sent_total{route=%q} %d\n", route, metrics.sseMessagesSentTotal)
-			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_connection_active{route=%q} %d\n", route, metrics.sseConnectionActive)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_acked_total{%s} %d\n", labels, metrics.ackedTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_nacked_total{%s} %d\n", labels, metrics.nackedTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_ack_conflict_total{%s} %d\n", labels, metrics.ackConflictTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_nack_conflict_total{%s} %d\n", labels, metrics.nackConflictTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_lease_active{%s} %d\n", labels, metrics.leaseActive)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_lease_expired_total{%s} %d\n", labels, metrics.leaseExpiredTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_connections_total{%s} %d\n", labels, metrics.sseConnectionsTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_messages_sent_total{%s} %d\n", labels, metrics.sseMessagesSentTotal)
+			_, _ = fmt.Fprintf(w, "hookaido_pull_sse_connection_active{%s} %d\n", labels, metrics.sseConnectionActive)
 		}
 
 		// --- Queue depth (on-scrape from store) ---

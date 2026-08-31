@@ -38,31 +38,31 @@ func TestObservePullSSE_ConnectAndDisconnect(t *testing.T) {
 
 	// nil-safe.
 	var nilMetrics *runtimeMetrics
-	nilMetrics.observePullSSEConnect("/r")
-	nilMetrics.observePullSSEDisconnect("/r", 200, 0, 0)
+	nilMetrics.observePullSSEConnect(pullQueueKey{route: "/r"})
+	nilMetrics.observePullSSEDisconnect(pullQueueKey{route: "/r"}, 200, 0, 0)
 
 	// Two concurrent connections, then both disconnect.
-	m.observePullSSEConnect("/r")
-	m.observePullSSEConnect("/r")
+	m.observePullSSEConnect(pullQueueKey{route: "/r"})
+	m.observePullSSEConnect(pullQueueKey{route: "/r"})
 
 	snap := m.pullSnapshot()
 	if snap == nil {
 		t.Fatalf("snapshot should not be nil after observations")
 	}
-	r := snap[normalizePullRoute("/r")]
+	r := snap[normalizePullQueueKey(pullQueueKey{route: "/r"})]
 	if r.sseConnectionsTotal != 2 {
 		t.Fatalf("connectionsTotal=%d, want 2", r.sseConnectionsTotal)
 	}
 
-	m.observePullSSEDisconnect("/r", 200, 5, 100*time.Millisecond)
-	m.observePullSSEDisconnect("/r", 500, 7, 250*time.Millisecond)
+	m.observePullSSEDisconnect(pullQueueKey{route: "/r"}, 200, 5, 100*time.Millisecond)
+	m.observePullSSEDisconnect(pullQueueKey{route: "/r"}, 500, 7, 250*time.Millisecond)
 
 	// One more disconnect when no active connections — counter shouldn't go
 	// negative.
-	m.observePullSSEDisconnect("/r", 200, 1, 0)
+	m.observePullSSEDisconnect(pullQueueKey{route: "/r"}, 200, 1, 0)
 
 	snap = m.pullSnapshot()
-	r = snap[normalizePullRoute("/r")]
+	r = snap[normalizePullQueueKey(pullQueueKey{route: "/r"})]
 	if r.sseMessagesSentTotal != 5+7+1 {
 		t.Fatalf("messagesSentTotal=%d, want 13", r.sseMessagesSentTotal)
 	}

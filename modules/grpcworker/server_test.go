@@ -32,11 +32,11 @@ func TestWorkerAPIDequeueAckFlow(t *testing.T) {
 	}
 
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) {
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
 		if endpoint == "/pull/github" {
-			return "/webhooks/github", true
+			return pullapi.Queue{Route: "/webhooks/github", Target: "pull"}, true
 		}
-		return "", false
+		return pullapi.Queue{}, false
 	}
 
 	deq, err := ws.Dequeue(context.Background(), &workerapipb.DequeueRequest{
@@ -80,8 +80,8 @@ func TestWorkerAPIDequeueAckFlow(t *testing.T) {
 func TestWorkerAPIBearerAuth(t *testing.T) {
 	store := queue.NewMemoryStore()
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) {
-		return "/r", true
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
+		return pullapi.Queue{Route: "/r", Target: "pull"}, true
 	}
 	ws.Authorize = workerapi.BearerTokenAuthorizer([][]byte{[]byte("t1")})
 
@@ -129,8 +129,8 @@ func TestWorkerAPIAckBatchConflictPayload(t *testing.T) {
 	}
 
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) {
-		return "/r", true
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
+		return pullapi.Queue{Route: "/r", Target: "pull"}, true
 	}
 
 	resp, err := ws.Ack(context.Background(), &workerapipb.AckRequest{
@@ -154,8 +154,8 @@ func TestWorkerAPIAckBatchConflictPayload(t *testing.T) {
 func TestWorkerAPIExtendRequiresDuration(t *testing.T) {
 	store := queue.NewMemoryStore()
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) {
-		return "/r", true
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
+		return pullapi.Queue{Route: "/r", Target: "pull"}, true
 	}
 
 	_, err := ws.Extend(context.Background(), &workerapipb.ExtendRequest{
@@ -238,7 +238,7 @@ func TestWorkerAPIBlankEndpoint(t *testing.T) {
 
 func TestWorkerAPIPullNilGuard(t *testing.T) {
 	ws := &Server{
-		ResolveRoute: func(endpoint string) (string, bool) { return "/r", true },
+		ResolveQueue: func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true },
 	}
 
 	tests := []struct {
@@ -279,7 +279,7 @@ func TestWorkerAPIPullNilGuard(t *testing.T) {
 func TestWorkerAPIInvalidDuration(t *testing.T) {
 	store := queue.NewMemoryStore()
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	// Negative seconds with positive nanos is invalid per protobuf spec.
 	badDuration := &durationpb.Duration{Seconds: -1, Nanos: 1}
@@ -312,7 +312,7 @@ func TestWorkerAPIInvalidDuration(t *testing.T) {
 func TestWorkerAPILeaseIDAndLeaseIDsBothSet(t *testing.T) {
 	store := queue.NewMemoryStore()
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	t.Run("Ack", func(t *testing.T) {
 		_, err := ws.Ack(context.Background(), &workerapipb.AckRequest{
@@ -340,7 +340,7 @@ func TestWorkerAPILeaseIDAndLeaseIDsBothSet(t *testing.T) {
 func TestWorkerAPILeaseIDsAllEmpty(t *testing.T) {
 	store := queue.NewMemoryStore()
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	t.Run("Ack", func(t *testing.T) {
 		_, err := ws.Ack(context.Background(), &workerapipb.AckRequest{
@@ -366,7 +366,7 @@ func TestWorkerAPILeaseIDsAllEmpty(t *testing.T) {
 func TestWorkerAPILeaseIDsExceedMaxBatch(t *testing.T) {
 	store := queue.NewMemoryStore()
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	// Default max is 100; generate 101 unique lease IDs.
 	ids := make([]string, 101)
@@ -397,7 +397,7 @@ func TestWorkerAPILeaseIDsDedup(t *testing.T) {
 	}
 
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	deq, err := ws.Dequeue(context.Background(), &workerapipb.DequeueRequest{
 		Endpoint: "/pull/r",
@@ -439,12 +439,12 @@ func TestWorkerAPIResolveRouteFallbackChain(t *testing.T) {
 		}
 
 		pullSrv := pullapi.NewServer(store)
-		pullSrv.ResolveRoute = func(endpoint string) (string, bool) {
-			return "/pull_fallback", true
+		pullSrv.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
+			return pullapi.Queue{Route: "/pull_fallback", Target: "pull"}, true
 		}
 		ws := NewServer(pullSrv)
-		ws.ResolveRoute = func(endpoint string) (string, bool) {
-			return "/server", true
+		ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
+			return pullapi.Queue{Route: "/server", Target: "pull"}, true
 		}
 
 		deq, err := ws.Dequeue(context.Background(), &workerapipb.DequeueRequest{
@@ -469,8 +469,8 @@ func TestWorkerAPIResolveRouteFallbackChain(t *testing.T) {
 		}
 
 		pullSrv := pullapi.NewServer(store)
-		pullSrv.ResolveRoute = func(endpoint string) (string, bool) {
-			return "/pull_resolved", true
+		pullSrv.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) {
+			return pullapi.Queue{Route: "/pull_resolved", Target: "pull"}, true
 		}
 		ws := NewServer(pullSrv)
 		// No server-level ResolveRoute — should fall back to Pull.ResolveRoute.
@@ -514,7 +514,7 @@ func TestWorkerAPIResolveRouteFallbackChain(t *testing.T) {
 func TestWorkerAPICustomMaxLeaseBatch(t *testing.T) {
 	store := queue.NewMemoryStore()
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 	ws.MaxLeaseBatch = 3
 
 	// Generate 4 unique lease IDs — exceeds custom max of 3.
@@ -597,7 +597,7 @@ func TestWorkerAPINackDeadViaGRPC(t *testing.T) {
 	}
 
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	deq, err := ws.Dequeue(context.Background(), &workerapipb.DequeueRequest{
 		Endpoint: "/pull/r", Batch: 1,
@@ -654,7 +654,7 @@ func TestWorkerAPINackBatch(t *testing.T) {
 	}
 
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	deq, err := ws.Dequeue(context.Background(), &workerapipb.DequeueRequest{
 		Endpoint: "/pull/r", Batch: 3,
@@ -711,7 +711,7 @@ func TestWorkerAPILargeBatchDequeue(t *testing.T) {
 	}
 
 	ws := NewServer(pullapi.NewServer(store))
-	ws.ResolveRoute = func(endpoint string) (string, bool) { return "/r", true }
+	ws.ResolveQueue = func(endpoint string) (pullapi.Queue, bool) { return pullapi.Queue{Route: "/r", Target: "pull"}, true }
 
 	deq, err := ws.Dequeue(context.Background(), &workerapipb.DequeueRequest{
 		Endpoint: "/pull/r",

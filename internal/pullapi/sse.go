@@ -17,7 +17,7 @@ const (
 	sseFallbackPoll     = time.Second
 )
 
-func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string) {
+func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, q Queue) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, pullErrInternal, "streaming not supported")
@@ -85,7 +85,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 	// are seven of those, each previously repeating the same observe line, and
 	// one of them was missed for long enough that the gauge only ever counted
 	// up (see the cancellation comment below).
-	consumer := s.registerConsumer(r, route)
+	consumer := s.registerConsumer(r, q)
 	status := http.StatusOK
 	defer func() { s.unregisterConsumer(consumer, status) }()
 
@@ -128,7 +128,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 		}
 
 		// Non-blocking dequeue.
-		outcome, opErr := s.Dequeue(ctx, route, DequeueParams{
+		outcome, opErr := s.Dequeue(ctx, q, DequeueParams{
 			Batch:       batch,
 			MaxWait:     0,
 			HasMaxWait:  true,
@@ -209,14 +209,14 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 	}
 }
 
-func (s *Server) observeSSEConnect(route string) {
+func (s *Server) observeSSEConnect(q Queue) {
 	if s.ObserveSSEConnect != nil {
-		s.ObserveSSEConnect(route)
+		s.ObserveSSEConnect(q)
 	}
 }
 
-func (s *Server) observeSSEDisconnect(route string, statusCode int, messagesSent int, duration time.Duration) {
+func (s *Server) observeSSEDisconnect(q Queue, statusCode int, messagesSent int, duration time.Duration) {
 	if s.ObserveSSEDisconnect != nil {
-		s.ObserveSSEDisconnect(route, statusCode, messagesSent, duration)
+		s.ObserveSSEDisconnect(q, statusCode, messagesSent, duration)
 	}
 }

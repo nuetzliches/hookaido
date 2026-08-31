@@ -130,8 +130,26 @@ type Compiled struct {
 	// Routes are in evaluation order (top-down).
 	Routes []CompiledRoute
 
-	// PathToRoute maps Pull paths (relative to PullAPI.Prefix) to route paths.
-	PathToRoute map[string]string
+	// PullEndpoints maps Pull paths (relative to PullAPI.Prefix) to the queue
+	// each one reads from.
+	//
+	// A route without consumer groups contributes one entry; a route with them
+	// contributes one per group and none for the bare path, so a consumer that
+	// was not migrated fails loudly with 404 instead of silently competing for
+	// a share of a queue it was meant to receive in full.
+	PullEndpoints map[string]PullEndpoint
+}
+
+// PullEndpoint is the queue one pull endpoint reads from.
+//
+// Target is what the ingress stamps on the envelopes destined for this
+// endpoint: `pull` for an ungrouped route, `pull:<group>` for a consumer
+// group. Keeping the ungrouped value unchanged matters for durable backends —
+// messages queued before a config change still carry it.
+type PullEndpoint struct {
+	Route         string
+	Target        string
+	ConsumerGroup string
 }
 
 type IngressConfig struct {
@@ -254,6 +272,122 @@ type CompiledRoute struct {
 type PullConfig struct {
 	Path       string
 	AuthTokens []string
+
+	// ConsumerGroups is empty for the default competing-consumer queue and
+	// otherwise names the independent queues this route fans out to, in
+	// declaration order.
+	ConsumerGroups []string
+}
+
+// PullTargetPrefix prefixes the queue target of a consumer group.
+const PullTargetPrefix = "pull:"
+
+// PullTargetForGroup is the queue target an ingress envelope carries for one
+// consumer group.
+func PullTargetForGroup(group string) string {
+	return PullTargetPrefix + group
+}
+
+// consumerGroupPattern constrains a group name to something that is safe as a
+// single URL path segment and readable in a metric label.
+var consumerGroupPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// reservedConsumerGroups are the Pull API operation names.
+//
+// The operation is the last path segment, so a group called `dequeue` would
+// produce `/pull/appliance/dequeue/dequeue` — parseable, but the kind of URL
+// that makes an outage harder to read rather than easier. Cheaper to reject it
+// than to explain it.
+var reservedConsumerGroups = map[string]struct{}{
+	"dequeue": {},
+	"ack":     {},
+	"nack":    {},
+	"extend":  {},
+	"stream":  {},
+}
+
+// compileConsumerGroups validates and normalizes a route's declared groups.
+//
+// The bool reports whether the route is usable; an invalid group name fails the
+// whole route rather than silently dropping one of its queues, which would look
+// exactly like the delivery loss consumer groups exist to prevent.
+func compileConsumerGroups(raw []string, rPath string, res *ValidationResult) ([]string, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	ok := true
+	for i, g := range raw {
+		name := strings.TrimSpace(resolveValue(g, fmt.Sprintf("route %q pull.consumer_group[%d]", rPath, i), res))
+		if name == "" {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q pull.consumer_group must not be empty", rPath))
+			ok = false
+			continue
+		}
+		if !consumerGroupPattern.MatchString(name) {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q pull.consumer_group %q must match %s", rPath, name, consumerGroupPattern.String()))
+			ok = false
+			continue
+		}
+		if _, reserved := reservedConsumerGroups[name]; reserved {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q pull.consumer_group %q is reserved (Pull API operation name)", rPath, name))
+			ok = false
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			res.Errors = append(res.Errors, fmt.Sprintf("route %q pull.consumer_group duplicate %q", rPath, name))
+			ok = false
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, ok
+}
+
+type pullEndpointPath struct {
+	path   string
+	target string
+	group  string
+}
+
+// pullEndpointPaths expands a pull path into the endpoints it serves.
+//
+// Without groups that is the path itself, reading the `pull` target as before.
+// With groups it is one endpoint per group and, deliberately, not the bare
+// path.
+func pullEndpointPaths(basePath string, groups []string) []pullEndpointPath {
+	if len(groups) == 0 {
+		return []pullEndpointPath{{path: basePath, target: "pull"}}
+	}
+	out := make([]pullEndpointPath, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, pullEndpointPath{
+			path:   path.Join(basePath, g),
+			target: PullTargetForGroup(g),
+			group:  g,
+		})
+	}
+	return out
+}
+
+// PullTargets returns the queue targets a pull route enqueues to: the single
+// literal `pull` when it has no consumer groups, one target per group when it
+// has.
+func (p *PullConfig) PullTargets() []string {
+	if p == nil {
+		return nil
+	}
+	if len(p.ConsumerGroups) == 0 {
+		return []string{"pull"}
+	}
+	out := make([]string, 0, len(p.ConsumerGroups))
+	for _, g := range p.ConsumerGroups {
+		out = append(out, PullTargetForGroup(g))
+	}
+	return out
 }
 
 // QueryAuthConfig is the compiled form of `auth query`.
@@ -611,7 +745,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 		namedMatchers[m.Name] = matchCfg
 	}
 
-	pathToRoute := make(map[string]string, len(cfg.Routes))
+	pullEndpoints := make(map[string]PullEndpoint, len(cfg.Routes))
 	managedEndpointToRoute := make(map[string]string, len(cfg.Routes))
 	routes := make([]CompiledRoute, 0, len(cfg.Routes))
 	hasPullRoutes := false
@@ -1346,11 +1480,37 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 				continue
 			}
 
-			if prev, ok := pathToRoute[endpoint]; ok {
-				res.Errors = append(res.Errors, fmt.Sprintf("duplicate pull path %q (routes %q and %q)", endpoint, prev, rPath))
+			groups, groupsOK := compileConsumerGroups(r.Pull.ConsumerGroups, rPath, &res)
+			if !groupsOK {
 				continue
 			}
-			pathToRoute[endpoint] = rPath
+
+			// Each group gets its own endpoint under the pull path, and the
+			// bare path stops resolving once groups exist. That is deliberate:
+			// the accident this feature exists to prevent is a consumer
+			// silently sharing a competing-consumer queue, so a consumer left
+			// on the old URL has to fail visibly rather than keep working with
+			// different semantics than the config now describes.
+			endpoints := pullEndpointPaths(endpoint, groups)
+			duplicate := false
+			for _, ep := range endpoints {
+				if prev, ok := pullEndpoints[ep.path]; ok {
+					res.Errors = append(res.Errors, fmt.Sprintf("duplicate pull path %q (routes %q and %q)", ep.path, prev.Route, rPath))
+					duplicate = true
+				}
+			}
+			if duplicate {
+				continue
+			}
+			// Registered only after every endpoint of this route is known to be
+			// free, so a rejected route leaves nothing behind in the map.
+			for _, ep := range endpoints {
+				pullEndpoints[ep.path] = PullEndpoint{
+					Route:         rPath,
+					Target:        ep.target,
+					ConsumerGroup: ep.group,
+				}
+			}
 
 			pullOK := true
 			var pullTokens []string
@@ -1382,7 +1542,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 				continue
 			}
 
-			pullCfg = &PullConfig{Path: endpoint, AuthTokens: pullTokens}
+			pullCfg = &PullConfig{Path: endpoint, AuthTokens: pullTokens, ConsumerGroups: groups}
 		}
 
 		if !matchOK {
@@ -1422,7 +1582,7 @@ func compileConfig(cfg *Config, untrusted bool) (Compiled, ValidationResult) {
 	}
 
 	compiled.Routes = routes
-	compiled.PathToRoute = pathToRoute
+	compiled.PullEndpoints = pullEndpoints
 	compiled.HasPullRoutes = hasPullRoutes
 	compiled.HasDeliverRoutes = hasDeliverRoutes
 

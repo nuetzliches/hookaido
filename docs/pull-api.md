@@ -36,6 +36,44 @@ The endpoints become:
 
 POST requests use `Content-Type: application/json`. The SSE endpoint returns `Content-Type: text/event-stream`.
 
+A route with [consumer groups](#consumer-groups) serves one endpoint per group instead, under the same `pull.path`.
+
+## Consumer Groups
+
+By default a pull route is a **competing-consumer** queue: every message is leased to exactly one consumer. That is the right default for scaling workers — add a second worker and the two share the load.
+
+It makes one topology impossible to express, though: **one inbound source, several independent consumers that each need every message.** That comes up whenever the source cannot be configured to deliver more than once — appliances and telephony systems that hold exactly one webhook URL, older ERP systems, anything where the URL is set in a vendor portal. Attach a long-lived integration environment and a developer machine to such a queue and they silently split the traffic instead of both seeing it.
+
+`consumer_group` turns the route into one independent queue per group:
+
+```hcl
+/webhooks/appliance {
+  pull {
+    path /appliance
+    consumer_group "integration"
+    consumer_group "workstation"
+  }
+}
+```
+
+Every inbound event is now enqueued once per group, and each group gets its own endpoint under the pull path:
+
+- `POST http://localhost:9443/pull/appliance/integration/dequeue` (and `/ack`, `/nack`, `/extend`, `/stream`)
+- `POST http://localhost:9443/pull/appliance/workstation/dequeue`
+
+**The bare `/pull/appliance/...` path stops resolving and answers `404 route_not_found`.** That is deliberate rather than an oversight: silently keeping it would leave an unmigrated consumer competing for a share of a queue it was meant to receive in full, which is precisely the failure this feature exists to prevent — and a failure that, from inside the consumer, is indistinguishable from delivery loss. Adding groups to an existing route is therefore a change consumers must follow; add the group segment to their URL.
+
+Semantics inside a group are unchanged. Two workers on `/pull/appliance/integration` still compete with each other, and leases still prevent double-delivery — so you can scale workers within a group and fan out across groups at the same time.
+
+Group names must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, must be unique within a route, and cannot be a Pull API operation name (`dequeue`, `ack`, `nack`, `extend`, `stream`).
+
+Notes:
+
+- **Not an authorization boundary.** Groups on one route share that route's pull credentials, so a client that can reach one group's endpoint can reach the others' — including settling their leases if a lease ID passes between them. Separate routes are the way to get an actual isolation boundary.
+- **Each group is a queue of its own**, with its own depth, backlog, retries and DLQ entries. A group whose consumer is down accumulates backlog independently and counts against `queue_limits.max_depth` like any other queue. Its messages carry the target `pull:<group>`, which is what `GET /admin/messages?target=...` and the backlog tools filter on.
+- **Observability separates groups.** Pull metrics carry a `consumer_group` label, and [`GET /admin/pull/consumers`](admin-api.md#get-pullconsumers) reports each consumer's group. Without a group configured the label is empty, which Prometheus treats as absent — existing series are unchanged.
+- A route without `consumer_group` keeps the single `pull` target it always had, so nothing changes for existing configs, including messages already queued in a durable backend.
+
 ## Authentication
 
 All Pull API requests require a bearer token:
@@ -319,7 +357,7 @@ data: {"id":"evt_1","lease_id":"lease_abc123","route":"/webhooks/github","receiv
 **Behavior:**
 
 - Auth is identical to all other Pull API endpoints (bearer token).
-- Multiple concurrent SSE connections on the same route act as competing consumers — leases prevent double-delivery.
+- Multiple concurrent SSE connections on the same endpoint act as competing consumers — leases prevent double-delivery. To have several consumers each receive every message, use [consumer groups](#consumer-groups).
 - On reconnect, the consumer sends `Last-Event-ID`. Since leases were already created, reconnect simply resumes dequeuing new items.
 - The server sends keepalive comments at the interval configured by `sse_keepalive` (default 15s). Keepalives are for proxies, not for delivery: a message becoming ready wakes the stream immediately, whether it was newly published, nacked for retry, requeued from the DLQ, resumed, or reclaimed from an expired lease. This holds on every backend.
 - Optionally, `sse_max_connection` limits the maximum connection duration for resource hygiene.
@@ -352,6 +390,8 @@ The runtime log carries the same lifecycle at INFO, which is what you need after
 ```
 
 The teardown line matters as much as the establish: a stream logs its HTTP request once, when it opens, and then stays open for hours, so the access log alone cannot tell you who is still attached.
+
+If you need every consumer to receive every message rather than a share of them, the split is not the problem to fix — see [Consumer Groups](#consumer-groups).
 
 ## Dequeue Controls
 

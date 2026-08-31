@@ -350,13 +350,27 @@ func (s *Server) publishRouteMode(route string, targets []string) string {
 			return mode
 		}
 	}
-	if len(targets) == 1 && strings.TrimSpace(targets[0]) == "pull" {
+	// Fallback for callers that wire no ModeForRoute. A pull route used to be
+	// recognizable as the single literal target `pull`; with consumer groups it
+	// has one `pull:<group>` target per group, so the shape to look for is
+	// "every target is a pull target" rather than "exactly one, named pull".
+	if len(targets) > 0 && allPullTargets(targets) {
 		return "pull"
 	}
 	if len(targets) > 0 {
 		return "deliver"
 	}
 	return ""
+}
+
+func allPullTargets(targets []string) bool {
+	for _, t := range targets {
+		t = strings.TrimSpace(t)
+		if t != "pull" && !strings.HasPrefix(t, config.PullTargetPrefix) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) mutationAuditPolicyError(audit managementAudit, scoped bool, scopedOperation string) (code, detail string) {

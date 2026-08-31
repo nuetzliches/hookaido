@@ -3488,6 +3488,13 @@ func (p *parser) parsePullBlock() (*Pull, error) {
 			default:
 				return nil, p.errAt(typTok.pos, "unknown pull auth type %q", typTok.text)
 			}
+		case "consumer_group":
+			v, quoted, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			out.ConsumerGroups = append(out.ConsumerGroups, v)
+			out.ConsumerGroupsQuoted = append(out.ConsumerGroupsQuoted, quoted)
 		default:
 			return nil, p.errAt(dirTok.pos, "unknown pull directive %q", dirTok.text)
 		}

@@ -1,7 +1,7 @@
 # Development Status
 
-Last updated: 2026-08-26
-Current release: v2.12.0
+Last updated: 2026-08-31
+Current release: v2.13.0
 
 Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change history: `CHANGELOG.md`. Prioritized work items: `BACKLOG.md`.
 
@@ -17,7 +17,7 @@ Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change histo
 
 **Config DSL** - Caddyfile-inspired syntax with `config fmt` round-trip stability. Env/file/vars placeholders, multi-value directives, hot reload via `--watch`/`SIGHUP` (with an optional `--watch-interval` content poll for mounts that cannot deliver file events), and channel-type wrappers. Defaults blocks for egress policy, deliver settings, publish policy, and trend signal tuning. Secret refs support `env:`, `file:`, `vault:`, and `raw:`.
 
-**Observability** - Structured JSON logs (access + runtime), Prometheus metrics endpoint, OpenTelemetry tracing (OTLP/HTTP), and health diagnostics with trend signals.
+**Observability** - Structured JSON logs (access + runtime), Prometheus metrics endpoint, OpenTelemetry tracing (OTLP/HTTP), and health diagnostics with trend signals. Pull consumers are identifiable rather than only countable: an Admin API listing of the SSE streams attached to each route, and connect/disconnect log lines, both naming the credential by its configured reference and never its value.
 
 **Release** - Cross-platform archives, signed checksums (Ed25519), SPDX SBOM, GitHub provenance/SBOM attestations, and `hookaido verify-release` CLI.
 

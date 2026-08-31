@@ -44,9 +44,13 @@ type ConsumerConnection struct {
 // request. The registry mutex covers both, so a snapshot never observes a torn
 // message count.
 type consumerConn struct {
-	id          string
-	route       string
-	group       string
+	id string
+
+	// queue is kept whole rather than split into route and group: the teardown
+	// path reports it back to the observers, and rebuilding it from two fields
+	// there would silently hand them an empty Target.
+	queue Queue
+
 	endpoint    string
 	remoteAddr  string
 	userAgent   string
@@ -61,8 +65,7 @@ func (s *Server) registerConsumer(r *http.Request, q Queue) *consumerConn {
 	now := s.nowTime()
 	c := &consumerConn{
 		id:          newConsumerID(),
-		route:       q.Route,
-		group:       q.ConsumerGroup,
+		queue:       q,
 		connectedAt: now,
 	}
 	if r != nil {
@@ -119,10 +122,11 @@ func (s *Server) unregisterConsumer(c *consumerConn, statusCode int) {
 	}
 	delete(s.consumers, c.id)
 	snap := c.snapshotLocked()
+	queueOf := c.queue
 	s.consumersMu.Unlock()
 
 	duration := s.nowTime().Sub(snap.ConnectedAt)
-	s.observeSSEDisconnect(Queue{Route: snap.Route, ConsumerGroup: snap.ConsumerGroup}, statusCode, int(snap.MessagesSent), duration)
+	s.observeSSEDisconnect(queueOf, statusCode, int(snap.MessagesSent), duration)
 	if s.ObserveConsumerDisconnect != nil {
 		s.ObserveConsumerDisconnect(snap, statusCode, duration)
 	}
@@ -167,8 +171,8 @@ func (s *Server) Consumers() []ConsumerConnection {
 func (c *consumerConn) snapshotLocked() ConsumerConnection {
 	return ConsumerConnection{
 		ID:            c.id,
-		Route:         c.route,
-		ConsumerGroup: c.group,
+		Route:         c.queue.Route,
+		ConsumerGroup: c.queue.ConsumerGroup,
 		Endpoint:      c.endpoint,
 		RemoteAddr:    c.remoteAddr,
 		UserAgent:     c.userAgent,

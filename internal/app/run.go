@@ -464,6 +464,8 @@ type runtimeState struct {
 	configGeneration     int
 	configLoadedAt       time.Time
 	pullByRoute          map[string]pullapi.Authorizer
+	pullIdentify         pullapi.TokenIdentifier
+	pullIdentifyByRoute  map[string]pullapi.TokenIdentifier
 	workerByRoute        map[string]workerapi.Authorizer
 	basicByRoute         map[string]*ingress.BasicAuth
 	forwardByRoute       map[string]*ingress.ForwardAuth
@@ -488,6 +490,7 @@ func newRuntimeState(compiled config.Compiled) *runtimeState {
 		trendSignals:         compiled.Defaults.TrendSignals,
 		adaptiveBackpressure: compiled.Defaults.AdaptiveBackpressure,
 		pullByRoute:          make(map[string]pullapi.Authorizer),
+		pullIdentifyByRoute:  make(map[string]pullapi.TokenIdentifier),
 		workerByRoute:        make(map[string]workerapi.Authorizer),
 		basicByRoute:         make(map[string]*ingress.BasicAuth),
 		forwardByRoute:       make(map[string]*ingress.ForwardAuth),
@@ -986,6 +989,33 @@ func (s *runtimeState) authorizePull(r *http.Request) bool {
 	return auth(r)
 }
 
+// identifyPullToken names the configured token reference a pull request
+// authenticated with, so an SSE consumer can be reported by credential rather
+// than only by remote address.
+//
+// It mirrors authorizePull's route-scoped lookup deliberately: a route with its
+// own `pull { auth_token ... }` is authorized against that set alone, so
+// reporting a match from the global set would name a credential the request
+// could not have used.
+func (s *runtimeState) identifyPullToken(r *http.Request) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	identify := s.pullIdentify
+	if r != nil && len(s.pullIdentifyByRoute) > 0 {
+		if endpoint := pullEndpointFromRequest(r); endpoint != "" {
+			if route, ok := s.pathToRoute[endpoint]; ok {
+				if ri, ok := s.pullIdentifyByRoute[route]; ok && ri != nil {
+					identify = ri
+				}
+			}
+		}
+	}
+	if identify == nil {
+		return ""
+	}
+	return identify(r)
+}
+
 func (s *runtimeState) authorizeWorker(ctx context.Context, endpoint string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1442,6 +1472,7 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 	}
 
 	pullByRoute := make(map[string]pullapi.Authorizer)
+	pullIdentifyByRoute := make(map[string]pullapi.TokenIdentifier)
 	workerByRoute := make(map[string]workerapi.Authorizer)
 	for _, rt := range compiled.Routes {
 		if rt.Pull == nil || len(rt.Pull.AuthTokens) == 0 {
@@ -1452,6 +1483,7 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 			return err
 		}
 		pullByRoute[rt.Path] = pullapi.BearerTokenAuthorizer(routeTokens)
+		pullIdentifyByRoute[rt.Path] = pullapi.BearerTokenIdentifier(rt.Pull.AuthTokens, routeTokens)
 		workerByRoute[rt.Path] = workerapi.BearerTokenAuthorizer(routeTokens)
 	}
 
@@ -1604,9 +1636,11 @@ func (s *runtimeState) loadAuth(compiled config.Compiled) error {
 	s.mu.Lock()
 	s.runtimePools = nextRuntimePools
 	s.pullAuthorize = pullapi.BearerTokenAuthorizer(tokens)
+	s.pullIdentify = pullapi.BearerTokenIdentifier(compiled.PullAPI.AuthTokens, tokens)
 	s.workerAuthorize = workerapi.BearerTokenAuthorizer(tokens)
 	s.adminAuthorize = admin.BearerTokenAuthorizer(adminTokens)
 	s.pullByRoute = pullByRoute
+	s.pullIdentifyByRoute = pullIdentifyByRoute
 	s.workerByRoute = workerByRoute
 	s.basicByRoute = basicByRoute
 	s.forwardByRoute = forwardByRoute
@@ -2625,6 +2659,38 @@ func startServers(
 	pullHandler.ObserveExtend = func(route string, statusCode int, leaseID string, extendBy time.Duration, leaseExpired bool) {
 		appMetrics.observePullExtend(route, statusCode, leaseID, extendBy, leaseExpired)
 	}
+	pullHandler.IdentifyToken = state.identifyPullToken
+
+	// One INFO line per stream establish and one per teardown.
+	//
+	// The establish was already visible as an `http_request` access-log line
+	// among thousands, and the teardown was not visible at all — an SSE stream
+	// logs its request once, when it opens, and stays open for hours. So "who
+	// is attached right now" was not reconstructable from the log even with the
+	// access log on, which is what left `remote_addr` correlation across raw
+	// container logs as the only answer.
+	pullHandler.ObserveConsumerConnect = func(c pullapi.ConsumerConnection) {
+		runtimeLogger.Info("pull_sse_connected",
+			slog.String("consumer_id", c.ID),
+			slog.String("route", c.Route),
+			slog.String("endpoint", c.Endpoint),
+			slog.String("remote_addr", c.RemoteAddr),
+			slog.String("user_agent", c.UserAgent),
+			slog.String("token_ref", c.TokenRef),
+		)
+	}
+	pullHandler.ObserveConsumerDisconnect = func(c pullapi.ConsumerConnection, statusCode int, duration time.Duration) {
+		runtimeLogger.Info("pull_sse_disconnected",
+			slog.String("consumer_id", c.ID),
+			slog.String("route", c.Route),
+			slog.String("endpoint", c.Endpoint),
+			slog.String("remote_addr", c.RemoteAddr),
+			slog.String("token_ref", c.TokenRef),
+			slog.Int("status_code", statusCode),
+			slog.Int64("messages_sent", c.MessagesSent),
+			slog.Float64("duration_seconds", duration.Seconds()),
+		)
+	}
 
 	adminH := admin.NewServer(store)
 	adminH.Authorize = state.authorizeAdmin
@@ -2636,6 +2702,9 @@ func startServers(
 	adminH.ManagedRouteSet = state.managedRouteSetForPolicy
 	adminH.TargetsForRoute = state.targetsForRoute
 	adminH.ModeForRoute = state.modeForRoute
+	adminH.PullConsumers = func() []admin.PullConsumer {
+		return adminPullConsumers(pullHandler.Consumers())
+	}
 	adminH.PublishEnabledForRoute = state.publishEnabledForRoute
 	adminH.PublishDirectEnabledForRoute = state.publishDirectEnabledForRoute
 	adminH.PublishManagedEnabledForRoute = state.publishManagedEnabledForRoute
@@ -3162,6 +3231,30 @@ func mapEgressRules(rules []config.EgressRule) []dispatcher.EgressRule {
 			Subdomains: r.Subdomains,
 			CIDR:       r.CIDR,
 			IsCIDR:     r.IsCIDR,
+		})
+	}
+	return out
+}
+
+// adminPullConsumers translates the Pull API's live consumer registry into the
+// Admin API's wire shape.
+//
+// The conversion exists so `internal/admin` does not import `internal/pullapi`:
+// the two are separate surfaces by design (see the Admin/Pull separation in
+// AGENTS.md), and the runtime is the one place that already knows both.
+func adminPullConsumers(in []pullapi.ConsumerConnection) []admin.PullConsumer {
+	out := make([]admin.PullConsumer, 0, len(in))
+	for _, c := range in {
+		out = append(out, admin.PullConsumer{
+			ID:            c.ID,
+			Route:         c.Route,
+			Endpoint:      c.Endpoint,
+			RemoteAddr:    c.RemoteAddr,
+			UserAgent:     c.UserAgent,
+			TokenRef:      c.TokenRef,
+			ConnectedAt:   c.ConnectedAt,
+			MessagesSent:  c.MessagesSent,
+			LastMessageAt: c.LastMessageAt,
 		})
 	}
 	return out

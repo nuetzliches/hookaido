@@ -84,6 +84,8 @@ observability {
 }
 ```
 
+**Pull consumer lifecycle:** an SSE stream logs `pull_sse_connected` when it is established and `pull_sse_disconnected` when it ends, both at INFO, carrying `consumer_id`, `route`, `endpoint`, `remote_addr` and `token_ref` (the configured secret reference, never the token). The teardown line also carries `status_code`, `messages_sent` and `duration_seconds`. The access log cannot substitute for these: a stream logs one `http_request` line when it opens and then stays open for hours, so it records neither who is still attached nor when anyone left. See [Pull API — Who Is Attached](pull-api.md#who-is-attached).
+
 ### Log Sinks
 
 | Sink     | Description                   |
@@ -168,6 +170,8 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_pull_sse_connections_total`      | counter | SSE connections established, by `route`                |
 | `hookaido_pull_sse_messages_sent_total`    | counter | Messages sent over SSE, by `route`                     |
 | `hookaido_pull_sse_connection_active`      | gauge   | Currently active SSE connections, by `route`           |
+
+`hookaido_pull_sse_connection_active` is deliberately unlabeled by consumer: a remote-address label would be unbounded cardinality for a diagnostic that is only needed occasionally. When the gauge is higher than you expect, name the consumers with [`GET /pull/consumers`](admin-api.md#get-pullconsumers) or from the `pull_sse_connected` / `pull_sse_disconnected` runtime log lines.
 
 **Secret and publish-policy metrics:**
 

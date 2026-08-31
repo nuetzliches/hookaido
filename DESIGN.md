@@ -247,6 +247,7 @@ Endpoints:
 - `POST {endpoint}/ack`
 - `POST {endpoint}/nack`
 - `POST {endpoint}/extend`
+- `GET {endpoint}/stream` (SSE; each event creates a lease with the same semantics as `dequeue`). Streams are registered in a per-process consumer registry surfaced by Admin `GET /pull/consumers` and logged at INFO as `pull_sse_connected` / `pull_sse_disconnected` with `consumer_id`, `route`, `endpoint`, `remote_addr` and `token_ref` (the configured secret reference, never the token value). Multiple streams on one route remain competing consumers.
 
 `ack` request forms:
 ```json
@@ -313,6 +314,7 @@ Endpoints:
 - For global route-selector `POST /messages/publish` and route-selector/unscoped `POST /messages/*_by_filter`, when `defaults.publish_policy.fail_closed on` is enabled and managed-route context cannot be evaluated, requests fail closed with `503` and `code=managed_resolver_missing`.
 - For global route-selector `POST /messages/*_by_filter`, ownership-source drift between `ManagementModel` and route-policy ownership callbacks for the selected route fails closed with `503` and `code=managed_target_mismatch`.
 - `GET /attempts` (query params: `route` or `application` + `endpoint_name`, `target`, `event_id`, `outcome` (`acked|retry|dead`), `limit` (default 100, max 1000), `before` (RFC3339); when selector mode is `route`, it must be an absolute Hookaido route path starting with `/`; managed selectors return `404` with `code=managed_endpoint_not_found` when selector labels do not resolve, `503` with `code=managed_resolver_missing` when resolver wiring is unavailable, and `503` with `code=managed_target_mismatch` when selector-resolved route ownership is out of sync with route ownership policy mapping)
+- `GET /pull/consumers` (returns the pull consumers holding an SSE stream right now; query param: `route`, which when provided must be an absolute Hookaido route path starting with `/`; each entry carries `id`, `route`, `endpoint`, `remote_addr`, `user_agent`, `token_ref`, `connected_at`, `connected_for_seconds`, `messages_sent` and `last_message_at`; `token_ref` is the configured secret reference the consumer authenticated with and never the token value, resolved from a route's own `pull { auth token ... }` set when it has one; SSE streams only, so a consumer polling `{endpoint}/dequeue` is not listed; the registry is per process and in memory, so a restart empties it; returns `503` with `code=pull_consumers_unavailable` when registry wiring is unavailable)
 - `GET /management/model` (returns runtime management projection with `route_count`, `application_count`, `endpoint_count`, and `applications[]` entries carrying `name`, `endpoint_count` and nested `endpoints[]` (`name`, `route`, `mode`, `targets`, `publish_policy` with `enabled` / `direct_enabled` / `managed_enabled`))
 - `GET /applications` (returns management application list with per-application endpoint counts)
 - `GET /applications/{application}/endpoints` (returns endpoint entries for one application; entries include `publish_policy`; `application` is path-escaped and matched exactly)
@@ -469,6 +471,7 @@ Queue/Admin tools:
 - `management_model` (application/endpoint projection from compiled config)
 - `management_endpoint_upsert`, `management_endpoint_delete` (application/endpoint mapping CUD in config source-of-truth)
 - `attempts_list`
+- `pull_consumers` (live SSE consumer registry; Admin-proxy only, since an SSE connection is not durable queue state)
 
 Backend note:
 - For `queue.backend sqlite`, MCP queue tools can read/mutate via direct SQLite access.

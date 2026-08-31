@@ -75,9 +75,20 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 		notifyCh = sn.NotifyCh
 	}
 
-	s.observeSSEConnect(route)
-	start := time.Now()
-	messagesSent := 0
+	// The stream enters the registry only once the response head is out, so
+	// what /admin/pull/consumers lists is exactly what
+	// hookaido_pull_sse_connection_active counts: streams a consumer is
+	// attached to, not requests that failed validation above and never became
+	// one.
+	//
+	// Teardown is a single defer rather than a call on each return path. There
+	// are seven of those, each previously repeating the same observe line, and
+	// one of them was missed for long enough that the gauge only ever counted
+	// up (see the cancellation comment below).
+	consumer := s.registerConsumer(r, route)
+	status := http.StatusOK
+	defer func() { s.unregisterConsumer(consumer, status) }()
+
 	keepaliveTicker := time.NewTicker(keepalive)
 	defer keepaliveTicker.Stop()
 
@@ -93,7 +104,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 		// observeSSEDisconnect never ran either, so
 		// hookaido_pull_sse_connection_active only ever counted up.
 		if ctx.Err() != nil {
-			s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
 			return
 		}
 
@@ -129,7 +139,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 			// Store unavailable — write an SSE error event and close.
 			fmt.Fprintf(w, "event: error\ndata: %s\n\n", opErr.Detail)
 			flusher.Flush()
-			s.observeSSEDisconnect(route, opErr.StatusCode, messagesSent, time.Since(start))
+			status = opErr.StatusCode
 			return
 		}
 
@@ -152,10 +162,9 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 				// error, so on a busy stream a disconnect went unnoticed until
 				// the next idle moment -- which may never come.
 				if _, err := fmt.Fprintf(w, "id: %s\nevent: message\ndata: %s\n\n", it.LeaseID, data); err != nil {
-					s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
 					return
 				}
-				messagesSent++
+				s.recordMessagesSent(consumer, 1)
 			}
 			flusher.Flush()
 			// Reset keepalive timer after activity.
@@ -170,12 +179,10 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 				continue
 			case <-keepaliveTicker.C:
 				if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
-					s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
 					return
 				}
 				flusher.Flush()
 			case <-ctx.Done():
-				s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
 				return
 			}
 		} else {
@@ -189,7 +196,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 					<-fallback.C
 				}
 				if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
-					s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
 					return
 				}
 				flusher.Flush()
@@ -197,7 +203,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, route string)
 				if !fallback.Stop() {
 					<-fallback.C
 				}
-				s.observeSSEDisconnect(route, http.StatusOK, messagesSent, time.Since(start))
 				return
 			}
 		}

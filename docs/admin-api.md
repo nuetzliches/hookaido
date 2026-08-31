@@ -374,6 +374,47 @@ Endpoint-scoped publish:
 
 > Target, route, and scope are resolved from the endpoint mapping — do not include selector fields in items.
 
+## Pull Consumers
+
+### `GET /pull/consumers`
+
+Lists the pull consumers that currently hold an SSE stream.
+
+`hookaido_pull_sse_connection_active{route}` already reports how many consumers are attached to a route, which is the decisive signal — an unexpected second consumer on a competing-consumer queue looks, from inside either one, exactly like delivery loss. This endpoint answers which ones they are, so the count turns into a fix.
+
+**Query parameters:**
+
+| Parameter | Default | Description                        |
+| --------- | ------- | ---------------------------------- |
+| `route`   | all     | Restrict to one route path         |
+
+```json
+{
+  "consumers": [
+    {
+      "id": "con_9f2c4a1b7d3e5068",
+      "route": "/webhooks/appliance",
+      "endpoint": "/appliance",
+      "remote_addr": "10.0.0.5:41234",
+      "user_agent": "hookaido-worker/1.0",
+      "token_ref": "env.PULL_TOKEN",
+      "connected_at": "2026-08-31T14:02:11Z",
+      "connected_for_seconds": 3612.4,
+      "messages_sent": 81,
+      "last_message_at": "2026-08-31T15:01:48Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+- `token_ref` is the configured secret reference the consumer authenticated with (`env.PULL_TOKEN`, `file./run/secrets/pull`), never the token value. It is omitted when the Pull API runs without tokens. For a route with its own `pull { auth token ... }`, it names a reference from that route's set — the global `pull_api` tokens do not authorize that route, so they are never reported for it.
+- `messages_sent` counts messages written to this stream since it opened. It is not a lease count: acks arrive on separate requests that are not tied to the connection, so how many of those messages are still outstanding is not something this endpoint can answer. Use `hookaido_pull_lease_active` for that.
+- Only SSE streams appear. A consumer polling `POST {endpoint}/dequeue` holds no connection between calls, so it is listed here and counted by the gauge alike: not at all.
+- The registry is per process and in memory. A restart empties it, and in a multi-instance deployment each instance reports its own consumers.
+
+The same lifecycle is logged at INFO as `pull_sse_connected` / `pull_sse_disconnected`; see [Pull API — Who Is Attached](pull-api.md#who-is-attached).
+
 ## Management Model
 
 ### `GET /management/model`

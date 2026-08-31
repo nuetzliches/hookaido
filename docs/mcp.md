@@ -79,6 +79,7 @@ Runtime control tools (`instance_start`, `instance_stop`, `instance_reload`) req
 | `dlq_list`              | `read` | List dead-letter queue items                    |
 | `messages_list`         | `read` | List queue messages (all states)                |
 | `attempts_list`         | `read` | List delivery attempts                          |
+| `pull_consumers`        | `read` | Pull consumers with an open SSE stream          |
 | `backlog_top_queued`    | `read` | Top queued route/target buckets                 |
 | `backlog_oldest_queued` | `read` | Oldest queued messages                          |
 | `backlog_aging_summary` | `read` | Aging distribution with percentiles             |

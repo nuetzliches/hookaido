@@ -438,6 +438,22 @@ Arguments:
 Notes:
 - `route` (when provided) must be an absolute Hookaido route path (starts with `/`).
 
+### `pull_consumers`
+List the pull consumers that currently hold an SSE stream.
+
+Arguments:
+```json
+{
+  "route": "/webhooks/appliance"
+}
+```
+
+Notes:
+- `route` (when provided) must be an absolute Hookaido route path (starts with `/`).
+- Always served through the Admin proxy (`GET /pull/consumers`), with no local fallback: an SSE connection is not durable queue state, it exists only in the memory of the process serving it. Fails with a clear error when no config path is configured or the config does not compile.
+- `token_ref` is the configured secret reference the consumer authenticated with, never the token value.
+- SSE streams only. A consumer polling `{endpoint}/dequeue` holds no connection between calls and is not listed.
+
 ### `dlq_requeue` (requires `--enable-mutations`)
 Requeue dead-letter items by ID.
 

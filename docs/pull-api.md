@@ -333,6 +333,26 @@ event: error
 data: dequeue is temporarily unavailable
 ```
 
+### Who Is Attached
+
+An unexpected second consumer on a route is the failure mode worth planning for, because from inside either consumer it does not look like a second consumer — it looks like delivery loss. The queue is competing-consumer, so the two split the traffic: ingress answers `202 {"status":"queued"}` for every event, and each side sees a fluctuating fraction of them arrive. It is easy to end up there by accident, with a shared token or a second environment pointed at the same host.
+
+Two surfaces answer it:
+
+- `hookaido_pull_sse_connection_active{route}` — **how many** consumers are attached. If this says `2` and you expect `1`, that is the problem, and it is the fastest signal.
+- [`GET /pull/consumers`](admin-api.md#get-pullconsumers) on the Admin API — **which** ones: remote address, connected-since, messages sent, and the configured token reference each authenticated with.
+
+Both cover SSE streams only. A consumer polling `POST {endpoint}/dequeue` holds no connection between calls, so it is counted by neither.
+
+The runtime log carries the same lifecycle at INFO, which is what you need after the fact:
+
+```json
+{"level":"INFO","msg":"pull_sse_connected","consumer_id":"con_9f2c...","route":"/webhooks/appliance","endpoint":"/appliance","remote_addr":"10.0.0.5:41234","user_agent":"hookaido-worker/1.0","token_ref":"env.PULL_TOKEN"}
+{"level":"INFO","msg":"pull_sse_disconnected","consumer_id":"con_9f2c...","route":"/webhooks/appliance","remote_addr":"10.0.0.5:41234","token_ref":"env.PULL_TOKEN","status_code":200,"messages_sent":81,"duration_seconds":3612.4}
+```
+
+The teardown line matters as much as the establish: a stream logs its HTTP request once, when it opens, and then stays open for hours, so the access log alone cannot tell you who is still attached.
+
 ## Dequeue Controls
 
 Fine-tune Pull API behavior in the config:

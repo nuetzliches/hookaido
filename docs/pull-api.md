@@ -72,7 +72,7 @@ Notes:
 - **Not an authorization boundary.** Groups on one route share that route's pull credentials, so a client that can reach one group's endpoint can reach the others' — including settling their leases if a lease ID passes between them. Separate routes are the way to get an actual isolation boundary.
 - **Each group is a queue of its own**, with its own depth, backlog, retries and DLQ entries. A group whose consumer is down accumulates backlog independently and counts against `queue_limits.max_depth` like any other queue. Its messages carry the target `pull:<group>`, which is what `GET /admin/messages?target=...` and the backlog tools filter on.
 - **Admin publish needs an explicit target.** `POST /admin/messages/publish` auto-selects the target only for a route with exactly one; a grouped route has several, so an item without `target` is rejected with `target_unresolvable` listing the group targets. Publish to `pull:<group>` to reach one group, or send one item per group to reach them all — there is no "publish to every group" shorthand, because unlike an ingress event a republished message is usually meant for the one consumer that needs it again.
-- **Observability separates groups.** Pull metrics carry a `consumer_group` label, and [`GET /admin/pull/consumers`](admin-api.md#get-pullconsumers) reports each consumer's group. Without a group configured the label is empty, which Prometheus treats as absent — existing series are unchanged.
+- **Observability separates groups.** Pull metrics and the per-queue backlog gauges (`hookaido_queue_route_depth{route,consumer_group,state}`) both carry a `consumer_group` label, and [`GET /admin/pull/consumers`](admin-api.md#get-pullconsumers) reports each consumer's group. Without a group configured the label is empty, which Prometheus treats as absent — existing series are unchanged.
 - A route without `consumer_group` keeps the single `pull` target it always had, so nothing changes for existing configs, including messages already queued in a durable backend.
 
 ## Authentication
@@ -420,6 +420,10 @@ pull_api {
 3. **Extend leases proactively** — if processing takes >50% of your `lease_ttl`, extend early.
 4. **Dead-letter on permanent failures** — use `nack { dead: true, reason: "..." }` for non-retryable errors.
 5. **Idempotent processing** — Hookaido provides at-least-once delivery, so your handler should tolerate duplicates.
+6. **Do not wait for an SSE stream to end.** A TCP connection can go half-open — the peer is gone, nothing closes, and your read simply never returns. The server notices when a keepalive write fails and tears the stream down on its side; your side sees no error, no EOF, and no messages, and it will sit there indefinitely while ingress keeps accepting events for the route. Treat it as a liveness problem you own:
+   - Keep a read deadline of a small multiple of `sse_keepalive` (default 15s) — a keepalive comment or a message must arrive within, say, `3 x sse_keepalive`. If nothing does, consider the stream dead, close it, and reconnect. This is what the keepalives are worth to a consumer; they are not needed for delivery, since a message becoming ready wakes the stream immediately.
+   - Set `sse_max_connection` as defense in depth. It bounds how long any single stream — including a wedged one — can persist, so a consumer that reconnects on close recovers even if its own detector is broken.
+   - On the operator side, `hookaido_queue_route_depth{state="queued"}` joined with `hookaido_pull_sse_connection_active` alerts on exactly this state; see [Alerting on a consumer that went away](observability.md#available-metrics).
 
 ---
 

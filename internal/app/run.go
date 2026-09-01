@@ -282,6 +282,18 @@ func run() int {
 		}
 	}
 
+	// adoptRunning installs a newly compiled config as the running one. Every
+	// path that advances `running` goes through it, for the same reason
+	// reconcileDispatcher is a named step: what is derived from the config --
+	// the dispatcher, and the configured queue set the route-labeled metrics
+	// zero-fill from -- must not be left behind by a path that forgot to
+	// update it. The caller must hold reloadMu.
+	adoptRunning := func(prev, updated config.Compiled) {
+		running = updated
+		appMetrics.setKnownQueues(updated)
+		reconcileDispatcher(prev, updated)
+	}
+
 	reloadNow := func(trigger string) {
 		reloadMu.Lock()
 		defer reloadMu.Unlock()
@@ -291,8 +303,7 @@ func run() int {
 		if !ok {
 			return
 		}
-		running = updated
-		reconcileDispatcher(prev, updated)
+		adoptRunning(prev, updated)
 	}
 
 	upsertManagedEndpoint := func(req admin.ManagementEndpointUpsertRequest) (admin.ManagementEndpointMutationResult, error) {
@@ -306,8 +317,7 @@ func run() int {
 		if err != nil {
 			return admin.ManagementEndpointMutationResult{}, err
 		}
-		running = updated
-		reconcileDispatcher(prev, updated)
+		adoptRunning(prev, updated)
 		return result, nil
 	}
 
@@ -322,8 +332,7 @@ func run() int {
 		if err != nil {
 			return admin.ManagementEndpointMutationResult{}, err
 		}
-		running = updated
-		reconcileDispatcher(prev, updated)
+		adoptRunning(prev, updated)
 		return result, nil
 	}
 
@@ -364,6 +373,7 @@ func run() int {
 	go runReloadSignalHandler(ctx, hupCh, startupDone, reloadNow)
 	runtimeLogger.Info("queue_backend_selected", slog.String("backend", queueBackend))
 	appMetrics.queueStore = store
+	appMetrics.setKnownQueues(running)
 	if trendStore, ok := any(store).(queue.BacklogTrendStore); ok {
 		startBacklogTrendCapture(ctx, trendStore, runtimeLogger)
 	}

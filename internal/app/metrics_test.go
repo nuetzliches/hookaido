@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nuetzliches/hookaido/v2/internal/config"
 	"github.com/nuetzliches/hookaido/v2/internal/queue"
 	"github.com/nuetzliches/hookaido/v2/modules/sqlite"
 )
@@ -24,7 +26,7 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.4.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.5.0"} 1`,
 		"hookaido_tracing_enabled 0",
 		"hookaido_tracing_init_failures_total 0",
 		"hookaido_tracing_export_errors_total 0",
@@ -85,7 +87,7 @@ func TestMetricsHandler_WithDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.4.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.5.0"} 1`,
 		"hookaido_tracing_enabled 1",
 		"hookaido_tracing_init_failures_total 1",
 		"hookaido_tracing_export_errors_total 2",
@@ -278,6 +280,211 @@ func TestMetricsHandler_QueueLagAge(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
 		}
+	}
+}
+
+func TestMetricsHandler_QueueRouteDepth(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	nowVar := now
+	store := queue.NewMemoryStore(queue.WithNowFunc(func() time.Time { return nowVar }))
+
+	// The busy route's working set dwarfs the stalled route's backlog, which is
+	// exactly why the instance-global gauges cannot show the stall.
+	for i := 0; i < 5; i++ {
+		if err := store.Enqueue(queue.Envelope{
+			ID:         fmt.Sprintf("busy_%d", i),
+			Route:      "/busy",
+			Target:     "pull",
+			ReceivedAt: nowVar.Add(-2 * time.Second),
+			NextRunAt:  nowVar.Add(-1 * time.Second),
+		}); err != nil {
+			t.Fatalf("enqueue busy: %v", err)
+		}
+	}
+	if err := store.Enqueue(queue.Envelope{
+		ID:         "quiet_1",
+		Route:      "/quiet",
+		Target:     "pull",
+		ReceivedAt: nowVar.Add(-10 * time.Hour),
+		NextRunAt:  nowVar.Add(-10 * time.Hour),
+	}); err != nil {
+		t.Fatalf("enqueue quiet: %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+
+	h := newMetricsHandler("dev", nowVar, m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_queue_route_depth{route="/busy",consumer_group="",state="queued"} 5`,
+		`hookaido_queue_route_depth{route="/busy",consumer_group="",state="leased"} 0`,
+		`hookaido_queue_route_depth{route="/busy",consumer_group="",state="dead"} 0`,
+		`hookaido_queue_route_depth{route="/quiet",consumer_group="",state="queued"} 1`,
+		`hookaido_queue_route_oldest_queued_age_seconds{route="/busy",consumer_group=""} 2.000000`,
+		`hookaido_queue_route_oldest_queued_age_seconds{route="/quiet",consumer_group=""} 36000.000000`,
+		`hookaido_queue_route_ready_lag_seconds{route="/quiet",consumer_group=""} 36000.000000`,
+		// The aggregates keep their exact previous shape, so a dashboard that
+		// sums the family does not double-count.
+		`hookaido_queue_depth{state="queued"} 6`,
+		`hookaido_queue_total 6`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsHandler_QueueRouteDepthZeroFillsConfiguredQueues(t *testing.T) {
+	store := queue.NewMemoryStore()
+	// A route that is no longer configured but still holds items: its backlog
+	// is precisely the one nobody is draining any more, so it has to stay
+	// visible alongside the configured queues.
+	if err := store.Enqueue(queue.Envelope{ID: "orphan_1", Route: "/retired", Target: "pull"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	m := newRuntimeMetrics()
+	m.queueStore = store
+	m.setKnownQueues(config.Compiled{Routes: []config.CompiledRoute{
+		{Path: "/grouped", Pull: &config.PullConfig{ConsumerGroups: []string{"billing", "search"}}},
+		{Path: "/plain", Pull: &config.PullConfig{}},
+		{Path: "/push", Deliveries: []config.CompiledDeliver{
+			{URL: "https://a.test/hook"},
+			{URL: "https://b.test/hook"},
+		}},
+		// No queue of its own, so no phantom zero series.
+		{Path: "/inert"},
+	}})
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_queue_route_depth{route="/grouped",consumer_group="billing",state="queued"} 0`,
+		`hookaido_queue_route_depth{route="/grouped",consumer_group="search",state="queued"} 0`,
+		`hookaido_queue_route_depth{route="/plain",consumer_group="",state="queued"} 0`,
+		`hookaido_queue_route_depth{route="/push",consumer_group="",state="queued"} 0`,
+		`hookaido_queue_route_oldest_queued_age_seconds{route="/plain",consumer_group=""} 0.000000`,
+		`hookaido_queue_route_depth{route="/retired",consumer_group="",state="queued"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `hookaido_queue_route_depth{route="/inert"`) {
+		t.Fatalf("route without a queue should not get a series:\n%s", body)
+	}
+	// Two deliver targets are one queue, not two series.
+	if got := strings.Count(body, `hookaido_queue_route_depth{route="/push",consumer_group="",state="queued"}`); got != 1 {
+		t.Fatalf("expected one queued series for the deliver route, got %d:\n%s", got, body)
+	}
+}
+
+func TestMetricsHandler_QueueRouteDepthFromCompiledConfig(t *testing.T) {
+	compiled := compileForNonceTest(t, `
+ingress { listen "127.0.0.1:8080" }
+pull_api {
+  listen "127.0.0.1:9443"
+  auth token "env:PULL_TOKEN"
+}
+
+/webhooks/appliance {
+  pull {
+    path /appliance
+    consumer_group "integration"
+    consumer_group "workstation"
+  }
+}
+
+/webhooks/plain {
+  pull { path /plain }
+}
+
+/webhooks/push {
+  deliver "https://a.test/hook" {}
+}
+`)
+
+	m := newRuntimeMetrics()
+	m.queueStore = queue.NewMemoryStore()
+	m.setKnownQueues(compiled)
+
+	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example/metrics", nil))
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`hookaido_queue_route_depth{route="/webhooks/appliance",consumer_group="integration",state="queued"} 0`,
+		`hookaido_queue_route_depth{route="/webhooks/appliance",consumer_group="workstation",state="queued"} 0`,
+		`hookaido_queue_route_depth{route="/webhooks/plain",consumer_group="",state="queued"} 0`,
+		`hookaido_queue_route_depth{route="/webhooks/push",consumer_group="",state="queued"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics output:\n%s", want, body)
+		}
+	}
+	// The grouped route's queues are the groups', not the bare pull target.
+	if strings.Contains(body, `hookaido_queue_route_depth{route="/webhooks/appliance",consumer_group="",`) {
+		t.Fatalf("grouped route should not emit an ungrouped series:\n%s", body)
+	}
+}
+
+func TestQueueRouteDepthSeries_AggregatesTargetsPerQueue(t *testing.T) {
+	keys, depths := queueRouteDepthSeries([]queue.RouteBacklogBucket{
+		{
+			Route:           "/push",
+			Target:          "https://b.test/hook",
+			Queued:          2,
+			Leased:          1,
+			OldestQueuedAge: 30 * time.Second,
+			ReadyLag:        5 * time.Second,
+		},
+		{
+			Route:           "/push",
+			Target:          "https://a.test/hook",
+			Queued:          3,
+			Dead:            4,
+			OldestQueuedAge: 90 * time.Second,
+			ReadyLag:        2 * time.Second,
+		},
+		{
+			Route:  "/grouped",
+			Target: "pull:billing",
+			Queued: 7,
+		},
+	}, nil)
+
+	want := []queueRouteKey{
+		{route: "/grouped", group: "billing"},
+		{route: "/push"},
+	}
+	if len(keys) != len(want) {
+		t.Fatalf("keys: got %v want %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("keys[%d]: got %+v want %+v", i, keys[i], want[i])
+		}
+	}
+
+	push := depths[queueRouteKey{route: "/push"}]
+	if push.queued != 5 || push.leased != 1 || push.dead != 4 {
+		t.Fatalf("push depth: got %+v", push)
+	}
+	// Age and lag are the worst target's, not a sum: they are durations, and a
+	// fanout route's stall is as old as its oldest stuck target.
+	if push.oldestQueuedAge != 90*time.Second {
+		t.Fatalf("push oldest queued age: got %s", push.oldestQueuedAge)
+	}
+	if push.readyLag != 5*time.Second {
+		t.Fatalf("push ready lag: got %s", push.readyLag)
 	}
 }
 

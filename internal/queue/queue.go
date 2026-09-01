@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"sort"
 	"time"
 )
 
@@ -282,6 +283,79 @@ type BacklogBucket struct {
 	ReadyLag               time.Duration
 }
 
+// RouteBacklogBucket is one (route, target) pair's backlog across the states a
+// depth gauge reports.
+//
+// It exists because TopQueued is a top-N cut: a low-volume route whose consumer
+// went away sits below the cut behind any busy route, so its backlog had no
+// series of its own, and its items were numerically invisible inside the
+// instance-global aggregates. This breakdown is complete -- every pair holding
+// at least one queued, leased or dead item -- so per-route depth and age can be
+// reported without that blind spot. Cardinality stays bounded by the configured
+// routes and their targets.
+type RouteBacklogBucket struct {
+	Route  string
+	Target string
+
+	Queued int
+	Leased int
+	Dead   int
+
+	OldestQueuedReceivedAt time.Time
+	EarliestQueuedNextRun  time.Time
+	OldestQueuedAge        time.Duration
+	ReadyLag               time.Duration
+}
+
+// SortRouteBacklogBuckets orders a backlog breakdown by route then target,
+// the order Stats.Backlog is documented to carry.
+func SortRouteBacklogBuckets(buckets []RouteBacklogBucket) {
+	sort.Slice(buckets, func(i, j int) bool {
+		if buckets[i].Route != buckets[j].Route {
+			return buckets[i].Route < buckets[j].Route
+		}
+		return buckets[i].Target < buckets[j].Target
+	})
+}
+
+// TopQueuedFromBacklog reduces a complete backlog breakdown to the top-N
+// buckets that hold queued items, ordered by queued count descending and then
+// by route and target.
+//
+// Deriving both views from one breakdown is also why the stores no longer run a
+// separate top-N query: two queries can disagree about a route across a
+// concurrent write, and Stats reports them side by side.
+func TopQueuedFromBacklog(buckets []RouteBacklogBucket, limit int) []BacklogBucket {
+	out := make([]BacklogBucket, 0, len(buckets))
+	for _, b := range buckets {
+		if b.Queued <= 0 {
+			continue
+		}
+		out = append(out, BacklogBucket{
+			Route:                  b.Route,
+			Target:                 b.Target,
+			Queued:                 b.Queued,
+			OldestQueuedReceivedAt: b.OldestQueuedReceivedAt,
+			EarliestQueuedNextRun:  b.EarliestQueuedNextRun,
+			OldestQueuedAge:        b.OldestQueuedAge,
+			ReadyLag:               b.ReadyLag,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Queued != out[j].Queued {
+			return out[i].Queued > out[j].Queued
+		}
+		if out[i].Route != out[j].Route {
+			return out[i].Route < out[j].Route
+		}
+		return out[i].Target < out[j].Target
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 type Stats struct {
 	Total   int
 	ByState map[State]int
@@ -292,6 +366,10 @@ type Stats struct {
 	ReadyLag               time.Duration
 
 	TopQueued []BacklogBucket
+
+	// Backlog is the complete per-(route, target) breakdown, ordered by route
+	// then target. Unlike TopQueued it is never truncated.
+	Backlog []RouteBacklogBucket
 }
 
 type HistogramBucket struct {

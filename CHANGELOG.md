@@ -7,6 +7,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-09-01
+
+A release about one blind spot in the metrics. Every queue gauge was
+instance-global, which is adequate on a single-route instance and quietly
+useless on a multi-route one: when a low-volume route's consumer went away, its
+backlog was numerically invisible in `hookaido_queue_depth` beside a busy
+route's normal working set, and `hookaido_queue_oldest_queued_age_seconds` said
+an item was hours old without saying which route it belonged to. The only
+per-route evidence was an *absence* — no `ack` lines for that route in the
+access log from one point in the night onwards — and an absence is not something
+you can alert on. It closes
+[#289](https://github.com/nuetzliches/hookaido/issues/289).
+
+The queue gauges now also come in per-queue form, labeled `route` and
+`consumer_group` to match the `hookaido_pull_*` families, which makes the
+conjunction that actually matters expressible for the first time: items queued on
+a route with no consumer attached to it. The instance-global gauges are
+unchanged, deliberately — a `route` label on them would have made every existing
+`sum()` report double — so no existing dashboard moves. The Pull API docs gained
+the consumer's half of the keepalive story, which is where this failure mode
+starts: a half-open stream returns no error and no EOF, so a consumer that never
+checks for silence waits forever.
+
 ### Added
 
 - **Per-queue backlog gauges: `hookaido_queue_route_depth{route,consumer_group,state}`, `hookaido_queue_route_oldest_queued_age_seconds{route,consumer_group}` and `hookaido_queue_route_ready_lag_seconds{route,consumer_group}`.** Every queue gauge was instance-global, which made a stalled route invisible beside a busy one: when a low-volume route's consumer went away without noticing — sitting in a read on a half-open connection while the server's keepalive writes failed — items piled up on that route for hours while ingress kept answering `202`, and a second, continuously busy route drained normally the whole time. `hookaido_queue_depth{state="queued"}` could not show it, because that route's backlog is numerically invisible next to the busy route's normal working set, and `hookaido_queue_oldest_queued_age_seconds` said an item was hours old without saying *which* route it belonged to. The only per-route evidence was an absence — no `POST /<route>/ack` lines in the access log from one point in the night onwards — and an absence is not something you can alert on. With the route on both sides, the alert that matters becomes writable: `hookaido_queue_route_depth{state="queued"} > 0 and on (route, consumer_group) hookaido_pull_sse_connection_active == 0`. The label set matches the `hookaido_pull_*` families exactly, `consumer_group` included, because on a route with consumer groups a route-only label would hide a stalled group behind a busy one — the same blind spot, one level down. A series is emitted for **every configured route**, including one whose queue is empty, so `== 0` is expressible and a vanished series means the route was reconfigured away rather than "all clear"; a route that is no longer configured but still holds items keeps reporting it. The store-side breakdown they are rendered from is complete, where `Stats.TopQueued` is a top-N cut that would have left a route below the cut with no series at all; `TopQueued` is now derived from that same breakdown, so the two views cannot disagree about a route the way two separate store queries could across a concurrent write. Cardinality stays bounded by the configured routes and their groups; a deliver route that fans out to several targets is one series per route, summing depth and reporting the worst target's age and lag. ([#289](https://github.com/nuetzliches/hookaido/issues/289))
@@ -645,7 +668,10 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.14.0...HEAD
+[2.14.0]: https://github.com/nuetzliches/hookaido/compare/v2.13.0...v2.14.0
+[2.13.0]: https://github.com/nuetzliches/hookaido/compare/v2.12.0...v2.13.0
+[2.12.0]: https://github.com/nuetzliches/hookaido/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/nuetzliches/hookaido/compare/v2.10.1...v2.11.0
 [2.10.1]: https://github.com/nuetzliches/hookaido/compare/v2.10.0...v2.10.1
 [2.10.0]: https://github.com/nuetzliches/hookaido/compare/v2.9.0...v2.10.0

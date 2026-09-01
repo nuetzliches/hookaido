@@ -4,24 +4,26 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-- [ ] **Test coverage ≥80%** — 77.2% as of v2.13.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
+- [ ] **Test coverage ≥80%** — 77.3% as of v2.14.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
 
-  Essentially flat against v2.12.0's 77.1%, which is the honest reading of a release that added roughly 380 production statements: the #284/#285 work came with enough tests to hold the line, not to move it. `internal/pullapi` is the one real gain (73.4% → 75.7%) — the consumer registry and the group resolution are plain functions over their arguments, so they are directly testable. `internal/mcp` went the other way (77.5% → 77.1%): `pull_consumers` is Admin-proxy-only by construction, so its handler has no local path a unit test can exercise without standing up an Admin API, and it is currently covered only through the tool-registry tests.
+  Up a tenth of a point against v2.13.0's 77.2%, and the per-package movement says more than the total does: #289 added about 130 production statements and 7 uncovered ones, so the new code landed at roughly 95% covered. That is what holding the line looks like when a release is small — it neither moves the number nor loses ground to it.
+
+  `internal/queue` is the one package that improved in both directions (84.1% → 84.6%, four *fewer* uncovered statements across twenty more total): the backlog breakdown and the top-N reduction are plain functions over their arguments, and the cross-backend contract test exercises them on all three stores at once. `internal/app` moved 64.8% → 65.4% only because the metric folding was extracted into `queueRouteDepthSeries` rather than written inline in the scrape handler — the new `run.go` wiring (`adoptRunning`, the startup `setKnownQueues`) sits in the same untested startup path as everything else there.
 
   Ranked by uncovered statements, which is what actually moves the total — a package at 64% with 1,200 uncovered statements matters far more than one at 64% with 40:
 
   | Package | Uncovered | Total | % |
   | --- | ---: | ---: | ---: |
   | `internal/config` | 1248 | 5900 | 78.8% |
-  | `internal/app` | 1202 | 3416 | 64.8% |
+  | `internal/app` | 1207 | 3491 | 65.4% |
   | `internal/mcp` | 949 | 4153 | 77.1% |
   | `internal/admin` | 543 | 2633 | 79.4% |
-  | `modules/sqlite` | 432 | 1693 | 74.5% |
-  | `modules/postgres` | 301 | 1293 | 76.7% |
-  | `internal/queue` | 213 | 1337 | 84.1% |
+  | `modules/sqlite` | 433 | 1708 | 74.6% |
+  | `modules/postgres` | 301 | 1311 | 77.0% |
+  | `internal/queue` | 209 | 1357 | 84.6% |
   | `internal/pullapi` | 183 | 754 | 75.7% |
 
-  Reaching 80% needs roughly **670 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is still the largest percentage gap and still the hardest: what remains uncovered there is concentrated in `run.go` startup paths that need a real server bring-up, which is where every coverage pass so far has deliberately stopped. The approach that works is still the one v2.12.0 demonstrated — extract the logic into a function that takes its inputs as arguments, as `resolveClientIP` and `pollConfig` do, rather than trying to test `run()`; v2.13.0's `identifyPullToken`, `adminPullConsumers` and `compileConsumerGroups` were written that way for the same reason.
+  Reaching 80% needs roughly **646 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is still the largest percentage gap and still the hardest: what remains uncovered there is concentrated in `run.go` startup paths that need a real server bring-up, which is where every coverage pass so far has deliberately stopped. The approach that works is still the one v2.12.0 demonstrated — extract the logic into a function that takes its inputs as arguments, as `resolveClientIP` and `pollConfig` do, rather than trying to test `run()`; v2.13.0's `identifyPullToken`, `adminPullConsumers` and `compileConsumerGroups` were written that way for the same reason.
 
 - [ ] **Publish a reachable coverage report** — awesome-go requires a Codecov or Coveralls link that resolves. CI computes a profile and uploads it, but only as a workflow artifact (`ci.yml`, `actions/upload-artifact` name `coverage`): that expires, needs a signed-in session, and is not a report — so there is no durable link to submit. Needs a coverage service wired into CI plus a README badge. Two things to fix while doing it: the `test` job does not set `HOOKAIDO_TEST_POSTGRES_DSN`, so the uploaded profile understates coverage the same way a local `make test-pg`-less run does, and it excludes nothing, so it counts generated protobuf. This is the one remaining awesome-go blocker fully in our control besides the 80% number itself.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.
@@ -39,6 +41,8 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 - [ ] **VS Code LSP** — Language server backed by `config validate`/`config compile` for live diagnostics in the editor. Optional follow-up to the VS Code extension.
 
 ## Completed (move here when done)
+
+- [x] **Per-queue backlog gauges (#289)** — Every queue gauge was instance-global, so a stalled route was invisible beside a busy one: a low-volume route whose consumer had gone away accumulated for ten hours while `hookaido_queue_depth` showed nothing unusual and `hookaido_queue_oldest_queued_age_seconds` could not name the route. `hookaido_queue_route_depth{route,consumer_group,state}` plus the matching `_oldest_queued_age_seconds` and `_ready_lag_seconds` families make the join against `hookaido_pull_sse_connection_active` writable, which is the alert the report was actually missing. New names rather than a `route` label on the aggregates, because labeled and unlabeled series in one family would have doubled every existing `sum()`; `consumer_group` is in the label set so a stalled group cannot hide behind a busy one on the same route. Store side, `queue.Stats` gained a complete per-`(route, target)` breakdown and `TopQueued` is now derived from it in all three backends — one query where there were two, so the two views cannot disagree across a concurrent write, and a route below the top-N cut is no longer a blind spot one level down. Shipped with the consumer's half of the keepalive story in `docs/pull-api.md`, since a half-open SSE stream is where the incident began. One PR (#290); metrics schema 1.5.0.
 
 - [x] **Pull consumer groups and consumer visibility (#284, #285)** — Both issues came out of one investigation: two consumers on a competing-consumer pull queue split the traffic, and from inside either one that is indistinguishable from delivery loss because the ingress answers `202` for every event. `pull { consumer_group ... }` makes the fan-out topology expressible — one independent queue per group, one endpoint each under the pull path, targets `pull:<group>`, and the bare path deliberately retired with a `404` so an unmigrated consumer fails visibly. `GET /admin/pull/consumers` plus `pull_sse_connected`/`pull_sse_disconnected` at INFO make the accident diagnosable, naming the credential by its configured reference and never its value. Pull metrics gained a `consumer_group` label (empty for ungrouped routes, which Prometheus treats as absent, so no existing series changed) and the metrics schema moved to 1.4.0. One PR per issue (#286, #287), each shipped with the docs stating the migration cost rather than only the feature.
 

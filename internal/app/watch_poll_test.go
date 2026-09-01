@@ -311,7 +311,17 @@ func TestPollConfig_ReportsOnlyTheSettledContent(t *testing.T) {
 		seen <- string(data)
 	})
 
-	// Write the new config in pieces, slowly enough that a poll lands inside it.
+	// Write the new config in pieces, slowly enough that a poll lands inside it
+	// (the gap exceeds the poll interval) but fast enough that the file is still
+	// changing across a settle window.
+	//
+	// The gap is a fraction of pollSettleDelay rather than a bare duration,
+	// because the relationship is the whole assumption of the test: at a flat
+	// 120ms against a 200ms settle the margin was thin enough that a loaded
+	// `-race` runner could stretch one sleep past the window, at which point the
+	// poller correctly reported settled partial content and the test blamed it
+	// for a stall in the writer.
+	const chunkGap = pollSettleDelay / 5
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -323,7 +333,7 @@ func TestPollConfig_ReportsOnlyTheSettledContent(t *testing.T) {
 		if err := f.Sync(); err != nil {
 			t.Fatalf("sync: %v", err)
 		}
-		time.Sleep(120 * time.Millisecond)
+		time.Sleep(chunkGap)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("close: %v", err)

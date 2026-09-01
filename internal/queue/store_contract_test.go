@@ -260,6 +260,123 @@ func TestStoreContract_StatsTopBacklogReportsAgeAndLag(t *testing.T) {
 	}
 }
 
+// Stats.Backlog is what the route-labeled queue gauges are rendered from, so
+// it has to be complete: TopQueued is a top-N cut, and a low-volume route that
+// falls below it is exactly the stalled route an operator is looking for.
+func TestStoreContract_StatsBacklogCoversEveryRouteAndState(t *testing.T) {
+	for _, factory := range contractStoreFactories() {
+		t.Run(factory.name, func(t *testing.T) {
+			now := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+			store := factory.new(t, &now)
+
+			// One busy route plus more quiet routes than the top-N cut admits.
+			const quietRoutes = 12
+			for i := 0; i < 3; i++ {
+				if err := store.Enqueue(queue.Envelope{
+					ID:     fmt.Sprintf("evt_busy_%d", i),
+					Route:  "/busy",
+					Target: "pull",
+				}); err != nil {
+					t.Fatalf("enqueue busy: %v", err)
+				}
+			}
+			for i := 0; i < quietRoutes; i++ {
+				if err := store.Enqueue(queue.Envelope{
+					ID:     fmt.Sprintf("evt_quiet_%d", i),
+					Route:  fmt.Sprintf("/quiet-%02d", i),
+					Target: "pull",
+				}); err != nil {
+					t.Fatalf("enqueue quiet: %v", err)
+				}
+			}
+
+			// A leased and a dead item on one route, so the breakdown covers
+			// every state the depth gauge reports.
+			if err := store.Enqueue(queue.Envelope{ID: "evt_lease", Route: "/settled", Target: "pull"}); err != nil {
+				t.Fatalf("enqueue lease: %v", err)
+			}
+			if err := store.Enqueue(queue.Envelope{ID: "evt_dead", Route: "/settled", Target: "pull"}); err != nil {
+				t.Fatalf("enqueue dead: %v", err)
+			}
+			resp, err := store.Dequeue(queue.DequeueRequest{Route: "/settled", Target: "pull", Batch: 2, LeaseTTL: time.Hour})
+			if err != nil {
+				t.Fatalf("dequeue: %v", err)
+			}
+			if len(resp.Items) != 2 {
+				t.Fatalf("dequeue items=%d, want 2", len(resp.Items))
+			}
+			if err := store.MarkDead(resp.Items[1].LeaseID, "test_failure"); err != nil {
+				t.Fatalf("mark dead: %v", err)
+			}
+
+			stats, err := store.Stats()
+			if err != nil {
+				t.Fatalf("stats: %v", err)
+			}
+
+			if len(stats.TopQueued) != 10 {
+				t.Fatalf("TopQueued buckets=%d, want the top-N cut of 10", len(stats.TopQueued))
+			}
+			if want := quietRoutes + 2; len(stats.Backlog) != want {
+				t.Fatalf("Backlog buckets=%d, want %d", len(stats.Backlog), want)
+			}
+			if !sort.SliceIsSorted(stats.Backlog, func(i, j int) bool {
+				if stats.Backlog[i].Route != stats.Backlog[j].Route {
+					return stats.Backlog[i].Route < stats.Backlog[j].Route
+				}
+				return stats.Backlog[i].Target < stats.Backlog[j].Target
+			}) {
+				t.Fatalf("Backlog is not ordered by route then target: %+v", stats.Backlog)
+			}
+
+			byRoute := make(map[string]queue.RouteBacklogBucket, len(stats.Backlog))
+			for _, b := range stats.Backlog {
+				if b.Target != "pull" {
+					t.Fatalf("bucket target=%q, want pull", b.Target)
+				}
+				byRoute[b.Route] = b
+			}
+
+			if got := byRoute["/busy"]; got.Queued != 3 || got.Leased != 0 || got.Dead != 0 {
+				t.Fatalf("busy bucket=%+v, want queued 3", got)
+			}
+			// The last quiet route sits below the top-N cut; before the
+			// breakdown existed it had no per-route figures at all.
+			last := fmt.Sprintf("/quiet-%02d", quietRoutes-1)
+			if got := byRoute[last]; got.Queued != 1 {
+				t.Fatalf("%s bucket=%+v, want queued 1", last, got)
+			}
+			if got := byRoute["/settled"]; got.Queued != 0 || got.Leased != 1 || got.Dead != 1 {
+				t.Fatalf("settled bucket=%+v, want leased 1 and dead 1", got)
+			}
+
+			// A queued-free bucket carries no age or lag, and a stalled one
+			// carries both.
+			const stalled = 30 * time.Minute
+			now = now.Add(stalled)
+			stats, err = store.Stats()
+			if err != nil {
+				t.Fatalf("stats after stall: %v", err)
+			}
+			for _, b := range stats.Backlog {
+				switch b.Route {
+				case "/settled":
+					if b.OldestQueuedAge != 0 || b.ReadyLag != 0 {
+						t.Fatalf("settled bucket age/lag=%s/%s, want 0 with nothing queued", b.OldestQueuedAge, b.ReadyLag)
+					}
+				default:
+					if b.OldestQueuedAge != stalled {
+						t.Fatalf("%s bucket OldestQueuedAge=%s, want %s", b.Route, b.OldestQueuedAge, stalled)
+					}
+					if b.ReadyLag != stalled {
+						t.Fatalf("%s bucket ReadyLag=%s, want %s", b.Route, b.ReadyLag, stalled)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestStoreContract_DequeueAck(t *testing.T) {
 	for _, factory := range contractStoreFactories() {
 		t.Run(factory.name, func(t *testing.T) {

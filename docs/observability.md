@@ -129,6 +129,51 @@ Set `enabled off` to disable the metrics listener while keeping config in place.
 | `hookaido_queue_total`          | gauge   | Current total items across all queue states   |
 | `hookaido_queue_oldest_queued_age_seconds` | gauge | Age of the oldest queued item in seconds |
 | `hookaido_queue_ready_lag_seconds` | gauge | Ready lag of the earliest runnable queued item in seconds |
+| `hookaido_queue_route_depth{route,consumer_group,state}` | gauge | Current items by route, consumer group and state (queued, leased, dead) |
+| `hookaido_queue_route_oldest_queued_age_seconds{route,consumer_group}` | gauge | Age of the oldest queued item on that queue, in seconds |
+| `hookaido_queue_route_ready_lag_seconds{route,consumer_group}` | gauge | Ready lag of the earliest runnable queued item on that queue, in seconds |
+
+The four unlabeled families above are instance-global and stay that way: a route
+label on them would put labeled and unlabeled series in one family, and
+`sum(hookaido_queue_depth{state="queued"})` would then double-count. The
+`hookaido_queue_route_*` families carry the per-queue breakdown instead, and
+`sum by (state) (hookaido_queue_route_depth)` reproduces the aggregate.
+
+Every configured route gets a series, including one whose queue is empty, so
+`== 0` is expressible and a series that disappeared means the route was
+reconfigured away rather than "all clear". A route that is no longer configured
+but still holds items keeps reporting them. Cardinality is bounded by the
+configured routes and their consumer groups; the label set matches the
+`hookaido_pull_*` families, and `consumer_group` is empty for a route without
+[consumer groups](pull-api.md#consumer-groups). Deliver routes that fan out to
+several targets are one series per route: depth sums the targets, age and lag
+report the worst of them.
+
+**Alerting on a consumer that went away.** A pull consumer can stop draining
+without disconnecting — it sits in a read on a half-open connection while the
+server's keepalive writes fail — and ingress keeps answering `202` for that
+route the whole time. On a multi-route instance the instance-global gauges
+cannot show it: a low-volume route's backlog is numerically invisible next to a
+busy route's normal working set, and `hookaido_queue_oldest_queued_age_seconds`
+says an item is old without saying which route it belongs to. Joined on the
+route, the two sides say it outright:
+
+```promql
+# Items are queued on a route with no consumer attached to it.
+  hookaido_queue_route_depth{state="queued"} > 0
+and on (route, consumer_group)
+  hookaido_pull_sse_connection_active == 0
+```
+
+```promql
+# A backlog that is ageing, wherever it is.
+max by (route, consumer_group) (hookaido_queue_route_oldest_queued_age_seconds) > 600
+```
+
+The first rule covers SSE consumers, which hold a connection. A consumer that
+polls `POST {endpoint}/dequeue` holds none between calls and is not counted by
+`hookaido_pull_sse_connection_active`; alert on the age rule, or on
+`rate(hookaido_pull_acked_total[15m]) == 0` beside a non-zero depth, for those.
 
 **Ingress metrics:**
 
@@ -440,7 +485,7 @@ Use these series together:
 
 When dashboards span mixed Hookaido versions (for example `v1.2.x` and `v1.3.x`), treat missing metrics as "not emitted" rather than zero:
 
-- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.4.0"} == 1` (or `hookaido_build_info` version labels).
+- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.5.0"} == 1` (or `hookaido_build_info` version labels).
 - In PromQL, prefer compatibility-safe expressions (for example `metric OR on() vector(0)`) where appropriate.
 - Document minimum supported Hookaido version per dashboard bundle to avoid false "all good" signals from absent series.
 

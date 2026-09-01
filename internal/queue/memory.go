@@ -1657,29 +1657,39 @@ func (s *MemoryStore) Stats() (Stats, error) {
 	total := 0
 	var oldestQueuedReceivedAt time.Time
 	var earliestQueuedNextRun time.Time
-	backlog := map[string]*BacklogBucket{}
+	// Buckets cover queued, leased and dead, so the per-route depth gauges can
+	// report the same states as the instance-global ones. TopQueued is derived
+	// from the queued counts afterwards.
+	backlogKeys := make([]string, 0, len(s.items))
+	backlog := map[string]*RouteBacklogBucket{}
+	bucketFor := func(env *Envelope) *RouteBacklogBucket {
+		key := env.Route + "\x00" + env.Target
+		b := backlog[key]
+		if b == nil {
+			b = &RouteBacklogBucket{
+				Route:  env.Route,
+				Target: env.Target,
+			}
+			backlog[key] = b
+			backlogKeys = append(backlogKeys, key)
+		}
+		return b
+	}
 	for _, env := range s.items {
 		if env == nil {
 			continue
 		}
 		byState[env.State]++
 		total++
-		if env.State == StateQueued {
+		switch env.State {
+		case StateQueued:
 			if !env.ReceivedAt.IsZero() && (oldestQueuedReceivedAt.IsZero() || env.ReceivedAt.Before(oldestQueuedReceivedAt)) {
 				oldestQueuedReceivedAt = env.ReceivedAt
 			}
 			if !env.NextRunAt.IsZero() && (earliestQueuedNextRun.IsZero() || env.NextRunAt.Before(earliestQueuedNextRun)) {
 				earliestQueuedNextRun = env.NextRunAt
 			}
-			key := env.Route + "\x00" + env.Target
-			b := backlog[key]
-			if b == nil {
-				b = &BacklogBucket{
-					Route:  env.Route,
-					Target: env.Target,
-				}
-				backlog[key] = b
-			}
+			b := bucketFor(env)
 			b.Queued++
 			if !env.ReceivedAt.IsZero() && (b.OldestQueuedReceivedAt.IsZero() || env.ReceivedAt.Before(b.OldestQueuedReceivedAt)) {
 				b.OldestQueuedReceivedAt = env.ReceivedAt
@@ -1687,6 +1697,10 @@ func (s *MemoryStore) Stats() (Stats, error) {
 			if !env.NextRunAt.IsZero() && (b.EarliestQueuedNextRun.IsZero() || env.NextRunAt.Before(b.EarliestQueuedNextRun)) {
 				b.EarliestQueuedNextRun = env.NextRunAt
 			}
+		case StateLeased:
+			bucketFor(env).Leased++
+		case StateDead:
+			bucketFor(env).Dead++
 		}
 	}
 
@@ -1699,8 +1713,9 @@ func (s *MemoryStore) Stats() (Stats, error) {
 		readyLag = now.Sub(earliestQueuedNextRun)
 	}
 
-	topQueued := make([]BacklogBucket, 0, len(backlog))
-	for _, b := range backlog {
+	buckets := make([]RouteBacklogBucket, 0, len(backlog))
+	for _, key := range backlogKeys {
+		b := backlog[key]
 		if b == nil {
 			continue
 		}
@@ -1710,20 +1725,10 @@ func (s *MemoryStore) Stats() (Stats, error) {
 		if !b.EarliestQueuedNextRun.IsZero() && now.After(b.EarliestQueuedNextRun) {
 			b.ReadyLag = now.Sub(b.EarliestQueuedNextRun)
 		}
-		topQueued = append(topQueued, *b)
+		buckets = append(buckets, *b)
 	}
-	sort.Slice(topQueued, func(i, j int) bool {
-		if topQueued[i].Queued != topQueued[j].Queued {
-			return topQueued[i].Queued > topQueued[j].Queued
-		}
-		if topQueued[i].Route != topQueued[j].Route {
-			return topQueued[i].Route < topQueued[j].Route
-		}
-		return topQueued[i].Target < topQueued[j].Target
-	})
-	if len(topQueued) > statsTopBacklogLimit {
-		topQueued = topQueued[:statsTopBacklogLimit]
-	}
+	SortRouteBacklogBuckets(buckets)
+	topQueued := TopQueuedFromBacklog(buckets, statsTopBacklogLimit)
 
 	return Stats{
 		Total:                  total,
@@ -1733,6 +1738,7 @@ func (s *MemoryStore) Stats() (Stats, error) {
 		OldestQueuedAge:        oldestQueuedAge,
 		ReadyLag:               readyLag,
 		TopQueued:              topQueued,
+		Backlog:                buckets,
 	}, nil
 }
 

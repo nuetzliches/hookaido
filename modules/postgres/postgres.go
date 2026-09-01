@@ -1791,52 +1791,78 @@ WHERE state = $1
 			}
 		}
 
-		topRows, err := s.db.QueryContext(context.Background(), `
-SELECT route, target, COUNT(*), MIN(received_at), MIN(next_run_at)
+		// One uncapped breakdown over the reported states, rather than the
+		// top-N queued query this used to run: a route below the cut had no
+		// per-route series at all, which is the blind spot the route-labeled
+		// gauges exist to close. TopQueued is derived from the same rows.
+		backlogRows, err := s.db.QueryContext(context.Background(), `
+SELECT route, target, state, COUNT(*), MIN(received_at), MIN(next_run_at)
 FROM queue_items
-WHERE state = $1
-GROUP BY route, target
-ORDER BY COUNT(*) DESC, route ASC, target ASC
-LIMIT $2
+WHERE state IN ($1, $2, $3)
+GROUP BY route, target, state
 `,
 			string(queue.StateQueued),
-			statsTopBacklogLimit,
+			string(queue.StateLeased),
+			string(queue.StateDead),
 		)
 		if err != nil {
 			return queue.Stats{}, err
 		}
-		defer topRows.Close()
+		defer backlogRows.Close()
 
-		for topRows.Next() {
-			var b queue.BacklogBucket
+		backlogIndex := map[string]int{}
+		backlog := make([]queue.RouteBacklogBucket, 0)
+		for backlogRows.Next() {
+			var route string
+			var target string
+			var state string
+			var count int
 			var oldest sql.NullTime
 			var earliest sql.NullTime
-			if err := topRows.Scan(&b.Route, &b.Target, &b.Queued, &oldest, &earliest); err != nil {
+			if err := backlogRows.Scan(&route, &target, &state, &count, &oldest, &earliest); err != nil {
 				return queue.Stats{}, err
 			}
-			// Per-bucket age and lag were left zero here, so the top-backlog
-			// buckets reported "queued 0s ago" on Postgres however long the
-			// route had been stalled -- the metric an operator uses to spot a
-			// stuck target. The process-wide aggregates above were already
-			// populated; only the per-bucket ones were missing. Derived exactly
-			// as the SQLite backend does.
-			if oldest.Valid {
-				b.OldestQueuedReceivedAt = oldest.Time.UTC()
+			key := route + "\x00" + target
+			idx, ok := backlogIndex[key]
+			if !ok {
+				backlog = append(backlog, queue.RouteBacklogBucket{Route: route, Target: target})
+				idx = len(backlog) - 1
+				backlogIndex[key] = idx
 			}
-			if earliest.Valid {
-				b.EarliestQueuedNextRun = earliest.Time.UTC()
+			b := &backlog[idx]
+			switch queue.State(state) {
+			case queue.StateQueued:
+				b.Queued = count
+				// Per-bucket age and lag were left zero here, so the
+				// top-backlog buckets reported "queued 0s ago" on Postgres
+				// however long the route had been stalled -- the metric an
+				// operator uses to spot a stuck target. The process-wide
+				// aggregates above were already populated; only the per-bucket
+				// ones were missing. Derived exactly as the SQLite backend does.
+				if oldest.Valid {
+					b.OldestQueuedReceivedAt = oldest.Time.UTC()
+				}
+				if earliest.Valid {
+					b.EarliestQueuedNextRun = earliest.Time.UTC()
+				}
+				if !b.OldestQueuedReceivedAt.IsZero() && !now.Before(b.OldestQueuedReceivedAt) {
+					b.OldestQueuedAge = now.Sub(b.OldestQueuedReceivedAt)
+				}
+				if !b.EarliestQueuedNextRun.IsZero() && now.After(b.EarliestQueuedNextRun) {
+					b.ReadyLag = now.Sub(b.EarliestQueuedNextRun)
+				}
+			case queue.StateLeased:
+				b.Leased = count
+			case queue.StateDead:
+				b.Dead = count
 			}
-			if !b.OldestQueuedReceivedAt.IsZero() && !now.Before(b.OldestQueuedReceivedAt) {
-				b.OldestQueuedAge = now.Sub(b.OldestQueuedReceivedAt)
-			}
-			if !b.EarliestQueuedNextRun.IsZero() && now.After(b.EarliestQueuedNextRun) {
-				b.ReadyLag = now.Sub(b.EarliestQueuedNextRun)
-			}
-			stats.TopQueued = append(stats.TopQueued, b)
 		}
-		if err := topRows.Err(); err != nil {
+		if err := backlogRows.Err(); err != nil {
 			return queue.Stats{}, err
 		}
+		queue.SortRouteBacklogBuckets(backlog)
+		stats.Backlog = backlog
+		stats.TopQueued = queue.TopQueuedFromBacklog(backlog, statsTopBacklogLimit)
 
 		return stats, nil
 	})

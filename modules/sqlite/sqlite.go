@@ -2600,44 +2600,66 @@ WHERE state = ?;
 		readyLag = pruneNow.Sub(earliestQueuedNextRun)
 	}
 
+	// One uncapped breakdown over the reported states, rather than the top-N
+	// queued query this used to run: a route below the cut had no per-route
+	// series at all, which is the blind spot the route-labeled gauges exist to
+	// close. TopQueued is derived from the same rows.
 	backlogRows, err := s.db.QueryContext(context.Background(), `
-SELECT route, target, COUNT(*), MIN(received_at), MIN(next_run_at)
+SELECT route, target, state, COUNT(*), MIN(received_at), MIN(next_run_at)
 FROM queue_items
-WHERE state = ?
-GROUP BY route, target
-ORDER BY COUNT(*) DESC, route ASC, target ASC
-LIMIT ?;
-`, string(queue.StateQueued), statsTopBacklogLimit)
+WHERE state IN (?, ?, ?)
+GROUP BY route, target, state;
+`, string(queue.StateQueued), string(queue.StateLeased), string(queue.StateDead))
 	if err != nil {
 		return queue.Stats{}, err
 	}
 	defer backlogRows.Close()
 
-	topQueued := make([]queue.BacklogBucket, 0, statsTopBacklogLimit)
+	backlogIndex := map[string]int{}
+	backlog := make([]queue.RouteBacklogBucket, 0)
 	for backlogRows.Next() {
-		var b queue.BacklogBucket
+		var route string
+		var target string
+		var state string
+		var count int
 		var oldest sql.NullInt64
 		var earliest sql.NullInt64
-		if err := backlogRows.Scan(&b.Route, &b.Target, &b.Queued, &oldest, &earliest); err != nil {
+		if err := backlogRows.Scan(&route, &target, &state, &count, &oldest, &earliest); err != nil {
 			return queue.Stats{}, err
 		}
-		if oldest.Valid {
-			b.OldestQueuedReceivedAt = time.Unix(0, oldest.Int64).UTC()
+		key := route + "\x00" + target
+		idx, ok := backlogIndex[key]
+		if !ok {
+			backlog = append(backlog, queue.RouteBacklogBucket{Route: route, Target: target})
+			idx = len(backlog) - 1
+			backlogIndex[key] = idx
 		}
-		if earliest.Valid {
-			b.EarliestQueuedNextRun = time.Unix(0, earliest.Int64).UTC()
+		b := &backlog[idx]
+		switch queue.State(state) {
+		case queue.StateQueued:
+			b.Queued = count
+			if oldest.Valid {
+				b.OldestQueuedReceivedAt = time.Unix(0, oldest.Int64).UTC()
+			}
+			if earliest.Valid {
+				b.EarliestQueuedNextRun = time.Unix(0, earliest.Int64).UTC()
+			}
+			if !b.OldestQueuedReceivedAt.IsZero() && !pruneNow.Before(b.OldestQueuedReceivedAt) {
+				b.OldestQueuedAge = pruneNow.Sub(b.OldestQueuedReceivedAt)
+			}
+			if !b.EarliestQueuedNextRun.IsZero() && pruneNow.After(b.EarliestQueuedNextRun) {
+				b.ReadyLag = pruneNow.Sub(b.EarliestQueuedNextRun)
+			}
+		case queue.StateLeased:
+			b.Leased = count
+		case queue.StateDead:
+			b.Dead = count
 		}
-		if !b.OldestQueuedReceivedAt.IsZero() && !pruneNow.Before(b.OldestQueuedReceivedAt) {
-			b.OldestQueuedAge = pruneNow.Sub(b.OldestQueuedReceivedAt)
-		}
-		if !b.EarliestQueuedNextRun.IsZero() && pruneNow.After(b.EarliestQueuedNextRun) {
-			b.ReadyLag = pruneNow.Sub(b.EarliestQueuedNextRun)
-		}
-		topQueued = append(topQueued, b)
 	}
 	if err := backlogRows.Err(); err != nil {
 		return queue.Stats{}, err
 	}
+	queue.SortRouteBacklogBuckets(backlog)
 
 	return queue.Stats{
 		Total:                  total,
@@ -2646,7 +2668,8 @@ LIMIT ?;
 		EarliestQueuedNextRun:  earliestQueuedNextRun,
 		OldestQueuedAge:        oldestQueuedAge,
 		ReadyLag:               readyLag,
-		TopQueued:              topQueued,
+		TopQueued:              queue.TopQueuedFromBacklog(backlog, statsTopBacklogLimit),
+		Backlog:                backlog,
 	}, nil
 }
 

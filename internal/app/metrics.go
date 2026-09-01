@@ -11,11 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nuetzliches/hookaido/v2/internal/config"
 	"github.com/nuetzliches/hookaido/v2/internal/pullapi"
 	"github.com/nuetzliches/hookaido/v2/internal/queue"
 )
 
-const metricsSchemaVersion = "1.4.0"
+const metricsSchemaVersion = "1.5.0"
 
 type runtimeMetrics struct {
 	tracingEnabled                             atomic.Int64
@@ -58,7 +59,14 @@ type runtimeMetrics struct {
 
 	// Queue store for on-scrape stats
 	queueStore queue.Store
-	queueStats struct {
+	// knownQueues is the configured queue set, kept so every configured route
+	// gets a route-labeled depth series even while its queue is empty. Without
+	// it `== 0` is not expressible and a series that vanished because the
+	// instance drained is indistinguishable from one that vanished because the
+	// route was reconfigured away.
+	knownQueuesMu sync.RWMutex
+	knownQueues   []queueRouteKey
+	queueStats    struct {
 		mu         sync.Mutex
 		ttl        time.Duration
 		cached     queue.Stats
@@ -380,6 +388,141 @@ func (m *runtimeMetrics) refreshQueueStatsAsync() {
 	m.queueStats.cached = stats
 	m.queueStats.cachedAt = at
 	m.queueStats.cachedOK = true
+}
+
+// queueRouteKey identifies one queue in the route-labeled queue gauges: the
+// route, plus the consumer group when the route fans out to groups.
+//
+// It mirrors the label set of the hookaido_pull_* families on purpose. The
+// route-labeled depth exists to be joined against
+// hookaido_pull_sse_connection_active -- `queued > 0 and on(route,
+// consumer_group) sse_connection_active == 0` is the alert that says a
+// consumer went away -- and a join needs both labels: on a route with consumer
+// groups, route alone would hide a stalled group behind a busy one, one level
+// down from the blind spot the label closes.
+type queueRouteKey struct {
+	route string
+	group string
+}
+
+// queueRouteDepth is one queue's contribution to the route-labeled gauges,
+// summed over the targets that belong to it.
+type queueRouteDepth struct {
+	queued int
+	leased int
+	dead   int
+
+	oldestQueuedAge time.Duration
+	readyLag        time.Duration
+}
+
+func (m *runtimeMetrics) setKnownQueues(compiled config.Compiled) {
+	if m == nil {
+		return
+	}
+
+	seen := make(map[queueRouteKey]struct{})
+	keys := make([]queueRouteKey, 0, len(compiled.Routes))
+	for _, rt := range compiled.Routes {
+		for _, target := range compiledRouteTargets(rt) {
+			key := normalizeQueueRouteKey(queueRouteKey{
+				route: rt.Path,
+				group: consumerGroupFromQueueTarget(target),
+			})
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	sortQueueRouteKeys(keys)
+
+	m.knownQueuesMu.Lock()
+	m.knownQueues = keys
+	m.knownQueuesMu.Unlock()
+}
+
+func (m *runtimeMetrics) knownQueueKeys() []queueRouteKey {
+	if m == nil {
+		return nil
+	}
+	m.knownQueuesMu.RLock()
+	defer m.knownQueuesMu.RUnlock()
+	if len(m.knownQueues) == 0 {
+		return nil
+	}
+	return append([]queueRouteKey(nil), m.knownQueues...)
+}
+
+// consumerGroupFromQueueTarget maps a queue target back to the consumer_group
+// label. Deliver targets are URLs or exec commands and carry no group.
+func consumerGroupFromQueueTarget(target string) string {
+	if !strings.HasPrefix(target, config.PullTargetPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(target, config.PullTargetPrefix))
+}
+
+func normalizeQueueRouteKey(key queueRouteKey) queueRouteKey {
+	key.route = strings.TrimSpace(key.route)
+	if key.route == "" {
+		key.route = "_unknown"
+	}
+	key.group = strings.TrimSpace(key.group)
+	return key
+}
+
+func sortQueueRouteKeys(keys []queueRouteKey) {
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].route != keys[j].route {
+			return keys[i].route < keys[j].route
+		}
+		return keys[i].group < keys[j].group
+	})
+}
+
+// queueRouteDepthSeries folds the store's backlog breakdown into one entry per
+// queue and zero-fills the configured queues that hold nothing.
+//
+// The union matters in both directions: a configured queue that is empty still
+// needs a series so an alert can say `== 0`, and a queue that is no longer
+// configured but still holds items has to keep reporting them -- dropping it
+// would hide exactly the backlog nobody is draining any more.
+func queueRouteDepthSeries(buckets []queue.RouteBacklogBucket, known []queueRouteKey) ([]queueRouteKey, map[queueRouteKey]queueRouteDepth) {
+	out := make(map[queueRouteKey]queueRouteDepth, len(buckets)+len(known))
+	keys := make([]queueRouteKey, 0, len(buckets)+len(known))
+	for _, key := range known {
+		if _, ok := out[key]; ok {
+			continue
+		}
+		out[key] = queueRouteDepth{}
+		keys = append(keys, key)
+	}
+	for _, bucket := range buckets {
+		key := normalizeQueueRouteKey(queueRouteKey{
+			route: bucket.Route,
+			group: consumerGroupFromQueueTarget(bucket.Target),
+		})
+		depth, ok := out[key]
+		if !ok {
+			keys = append(keys, key)
+		}
+		depth.queued += bucket.Queued
+		depth.leased += bucket.Leased
+		depth.dead += bucket.Dead
+		// A queue is one series but can span several targets (a deliver route
+		// fanning out), so age and lag are the worst target's, not a sum.
+		if bucket.OldestQueuedAge > depth.oldestQueuedAge {
+			depth.oldestQueuedAge = bucket.OldestQueuedAge
+		}
+		if bucket.ReadyLag > depth.readyLag {
+			depth.readyLag = bucket.ReadyLag
+		}
+		out[key] = depth
+	}
+	sortQueueRouteKeys(keys)
+	return keys, out
 }
 
 func (m *runtimeMetrics) observePullDequeue(key pullQueueKey, statusCode int, items []queue.Envelope) {
@@ -1337,6 +1480,46 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 				_, _ = fmt.Fprintf(w, "# HELP hookaido_queue_ready_lag_seconds Lag in seconds of the earliest ready queued item.\n")
 				_, _ = fmt.Fprintf(w, "# TYPE hookaido_queue_ready_lag_seconds gauge\n")
 				_, _ = fmt.Fprintf(w, "hookaido_queue_ready_lag_seconds %.6f\n", stats.ReadyLag.Seconds())
+
+				// The route-labeled families are separate names rather than a
+				// route label on the aggregates above, so that
+				// sum(hookaido_queue_depth{state="queued"}) keeps meaning the
+				// instance total: labeled and unlabeled series in one family
+				// would make every existing dashboard sum double.
+				queueKeys, queueDepths := queueRouteDepthSeries(stats.Backlog, rm.knownQueueKeys())
+				_, _ = fmt.Fprintf(w, "# HELP hookaido_queue_route_depth Current number of items in the queue by route, consumer group and state.\n")
+				_, _ = fmt.Fprintf(w, "# TYPE hookaido_queue_route_depth gauge\n")
+				for _, key := range queueKeys {
+					// An ungrouped route emits consumer_group="", matching the
+					// hookaido_pull_* families so the join key lines up.
+					labels := fmt.Sprintf("route=%q,consumer_group=%q", key.route, key.group)
+					depth := queueDepths[key]
+					_, _ = fmt.Fprintf(w, "hookaido_queue_route_depth{%s,state=\"queued\"} %d\n", labels, depth.queued)
+					_, _ = fmt.Fprintf(w, "hookaido_queue_route_depth{%s,state=\"leased\"} %d\n", labels, depth.leased)
+					_, _ = fmt.Fprintf(w, "hookaido_queue_route_depth{%s,state=\"dead\"} %d\n", labels, depth.dead)
+				}
+				_, _ = fmt.Fprintf(w, "# HELP hookaido_queue_route_oldest_queued_age_seconds Age in seconds of the oldest queued item by route and consumer group.\n")
+				_, _ = fmt.Fprintf(w, "# TYPE hookaido_queue_route_oldest_queued_age_seconds gauge\n")
+				for _, key := range queueKeys {
+					_, _ = fmt.Fprintf(
+						w,
+						"hookaido_queue_route_oldest_queued_age_seconds{route=%q,consumer_group=%q} %.6f\n",
+						key.route,
+						key.group,
+						queueDepths[key].oldestQueuedAge.Seconds(),
+					)
+				}
+				_, _ = fmt.Fprintf(w, "# HELP hookaido_queue_route_ready_lag_seconds Lag in seconds of the earliest ready queued item by route and consumer group.\n")
+				_, _ = fmt.Fprintf(w, "# TYPE hookaido_queue_route_ready_lag_seconds gauge\n")
+				for _, key := range queueKeys {
+					_, _ = fmt.Fprintf(
+						w,
+						"hookaido_queue_route_ready_lag_seconds{route=%q,consumer_group=%q} %.6f\n",
+						key.route,
+						key.group,
+						queueDepths[key].readyLag.Seconds(),
+					)
+				}
 			}
 
 			if provider, ok := queueStore.(queue.RuntimeMetricsProvider); ok {

@@ -27,6 +27,9 @@ hookaido.db-wal
 # Local env files
 .env
 
+# Crash dumps from the local toolchain (msys/bash), never build output
+*.stackdump
+
 # Local artifacts (keys, binaries, etc.)
 /.artifacts/
 /.bench/

@@ -1,7 +1,7 @@
 # Development Status
 
-Last updated: 2026-08-31
-Current release: v2.13.0
+Last updated: 2026-09-01
+Current release: v2.14.0
 
 Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change history: `CHANGELOG.md`. Prioritized work items: `BACKLOG.md`.
 
@@ -17,7 +17,7 @@ Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change histo
 
 **Config DSL** - Caddyfile-inspired syntax with `config fmt` round-trip stability. Env/file/vars placeholders, multi-value directives, hot reload via `--watch`/`SIGHUP` (with an optional `--watch-interval` content poll for mounts that cannot deliver file events), and channel-type wrappers. Defaults blocks for egress policy, deliver settings, publish policy, and trend signal tuning. Secret refs support `env:`, `file:`, `vault:`, and `raw:`.
 
-**Observability** - Structured JSON logs (access + runtime), Prometheus metrics endpoint, OpenTelemetry tracing (OTLP/HTTP), and health diagnostics with trend signals. Pull consumers are identifiable rather than only countable: an Admin API listing of the SSE streams attached to each route, and connect/disconnect log lines, both naming the credential by its configured reference and never its value.
+**Observability** - Structured JSON logs (access + runtime), Prometheus metrics endpoint, OpenTelemetry tracing (OTLP/HTTP), and health diagnostics with trend signals. Queue backlog is reported per queue as well as instance-wide, labeled by `route` and `consumer_group` so a stalled route is visible beside a busy one and can be joined against the pull connection gauge; every configured route gets a series, empty queue included. Pull consumers are identifiable rather than only countable: an Admin API listing of the SSE streams attached to each route, and connect/disconnect log lines, both naming the credential by its configured reference and never its value.
 
 **Release** - Cross-platform archives, signed checksums (Ed25519), SPDX SBOM, GitHub provenance/SBOM attestations, and `hookaido verify-release` CLI.
 
@@ -42,6 +42,6 @@ Current weighted implementation grade: **~95%**.
 ## What's Missing (MVP Core)
 
 - Runtime reload intentionally keeps restart-required edges for topology/startup-bound changes (listeners, API prefixes, dispatcher-affecting settings).
-- Test coverage is 76.9% against the 80% target tracked in `BACKLOG.md` (`make cover`, generated protobuf excluded). Ranked by uncovered statements, the gaps are `internal/config`, `internal/app`, `internal/mcp` and `internal/admin`; `internal/app` is the largest percentage gap and the hardest, since what is left are `run.go` startup paths needing a real server bring-up.
+- Test coverage is 77.3% against the 80% target tracked in `BACKLOG.md` (`make cover`, generated protobuf excluded). Ranked by uncovered statements, the gaps are `internal/config`, `internal/app`, `internal/mcp` and `internal/admin`; `internal/app` is the largest percentage gap and the hardest, since what is left are `run.go` startup paths needing a real server bring-up.
 
 See `BACKLOG.md` for prioritized next steps.

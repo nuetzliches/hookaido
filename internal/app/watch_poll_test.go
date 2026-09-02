@@ -376,17 +376,20 @@ func TestPollConfig_ReportsOnlyTheSettledContent(t *testing.T) {
 	// (the gap exceeds the poll interval) but fast enough that the file is still
 	// changing across a settle window.
 	//
-	// The gap is a fraction of pollSettleDelay rather than a bare duration,
-	// because the relationship is the whole assumption of the test: at a flat
-	// 120ms against a 200ms settle the margin was thin enough that a loaded
-	// `-race` runner could stretch one sleep past the window, at which point the
-	// poller correctly reported settled partial content and the test blamed it
-	// for a stall in the writer.
+	// The gap is a fraction of pollSettleDelay rather than a bare duration, but
+	// the gap alone cannot carry the test: a loaded `-race` runner can stretch
+	// one of these sleeps past the settle window whatever it is set to, and then
+	// a prefix really did hold still. So record when each chunk hit the disk and
+	// judge a partial report against that timeline below, instead of assuming
+	// the sleeps were timely.
 	const chunkGap = pollSettleDelay / 5
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	var prefixes []string
+	var writtenAt []time.Time
+	content := ""
 	for _, chunk := range []string{"# v2\n", "route \"/a\" {}\n", "route \"/b\" {}\n"} {
 		if _, err := f.WriteString(chunk); err != nil {
 			t.Fatalf("write chunk: %v", err)
@@ -394,13 +397,19 @@ func TestPollConfig_ReportsOnlyTheSettledContent(t *testing.T) {
 		if err := f.Sync(); err != nil {
 			t.Fatalf("sync: %v", err)
 		}
+		content += chunk
+		prefixes = append(prefixes, content)
+		writtenAt = append(writtenAt, time.Now())
 		time.Sleep(chunkGap)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	want := "# v2\nroute \"/a\" {}\nroute \"/b\" {}\n"
+	// The reports arrive through a buffered channel and are read only now that
+	// the writing goroutine is done with the timeline, so no synchronisation is
+	// needed around it.
+	want := prefixes[len(prefixes)-1]
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
@@ -408,11 +417,31 @@ func TestPollConfig_ReportsOnlyTheSettledContent(t *testing.T) {
 			if got == want {
 				return
 			}
-			// Anything else means a partial state was reported as a config
-			// change, which is exactly what the settle exists to prevent.
+			// A partial state reported as a config change is exactly what the
+			// settle exists to prevent -- but only when the file demonstrably
+			// changed again inside the settle window, which is what makes the
+			// poller's two reads differ and the report premature. If the writer
+			// stalled longer than that after this prefix, the prefix genuinely
+			// settled: reporting it is correct, and the full config is still
+			// reported once it settles too.
+			if i := indexOfString(prefixes, got); i >= 0 && i+1 < len(writtenAt) {
+				if stall := writtenAt[i+1].Sub(writtenAt[i]); stall >= pollSettleDelay {
+					t.Logf("writer stalled %v after chunk %d, so %q had settled; still waiting for the full config", stall, i+1, got)
+					continue
+				}
+			}
 			t.Fatalf("reload observed a partial config: %q", got)
 		case <-deadline:
 			t.Fatal("the settled config was never reported")
 		}
 	}
+}
+
+func indexOfString(values []string, want string) int {
+	for i, v := range values {
+		if v == want {
+			return i
+		}
+	}
+	return -1
 }

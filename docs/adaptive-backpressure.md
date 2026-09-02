@@ -118,6 +118,6 @@ Use production-like ingress load tests for threshold tuning decisions. The bench
 
 When dashboards span versions, gate adaptive panels/alerts with:
 
-- `hookaido_metrics_schema_info{schema="1.6.0"} == 1`
+- `hookaido_metrics_schema_info{schema="1.7.0"} == 1`
 
-This avoids interpreting missing pre-`1.3.0` series as zero. (The schema is `1.6.0` since the runtime-secret pool gauges and the classified auth-reject counter were added; the adaptive series themselves are unchanged, so gate on whichever version you actually require.)
+This avoids interpreting missing pre-`1.3.0` series as zero. (The schema is `1.7.0` since `hookaido_ingress_rejected_by_reason_total` gained a `route` label; `hookaido_ingress_adaptive_backpressure_total{reason}` itself is unchanged, so gate on whichever version you actually require. Which routes adaptive backpressure shed is in `hookaido_ingress_rejected_by_reason_total{reason="adaptive_backpressure"}`.)

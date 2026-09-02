@@ -2813,9 +2813,9 @@ func startServers(
 			appMetrics.observeIngressAdaptiveBackpressure(reason)
 		}
 	}
-	ing.ObserveReject = func(_ string, statusCode int, reason string) {
+	ing.ObserveReject = func(route string, statusCode int, reason string) {
 		if appMetrics != nil {
-			appMetrics.observeIngressReject(statusCode, reason)
+			appMetrics.observeIngressReject(route, statusCode, reason)
 		}
 	}
 	ing.ObserveAuthReject = func(route string, reason string) {

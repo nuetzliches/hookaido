@@ -71,24 +71,38 @@ func NewQueryAuth(param string, secrets [][]byte) *QueryAuth {
 // are compared as SHA-256 digests, which keeps the configured token's length out
 // of the timing as well.
 func (a *QueryAuth) Verify(r *http.Request) bool {
+	ok, _ := a.VerifyCause(r)
+	return ok
+}
+
+// VerifyCause is Verify plus the reason it refused, as one of the AuthReject*
+// causes (empty when it accepted).
+//
+// The cause matters here for the same reason it does for HMAC: a route whose
+// `secret_ref` pool holds no valid version refuses every request, and that is a
+// Hookaido-side outage rather than a caller presenting a wrong token. Query auth
+// answers 404 for both, so without the classification the two are
+// indistinguishable from the outside *and* from the metrics.
+func (a *QueryAuth) VerifyCause(r *http.Request) (bool, string) {
 	if a == nil {
-		return true
+		return true, ""
 	}
 	if r == nil || r.URL == nil {
-		return false
+		return false, AuthRejectMalformed
 	}
 
 	values, ok := r.URL.Query()[a.Param]
 	if !ok || len(values) == 0 {
-		return false
+		return false, AuthRejectCredentials
 	}
 
 	candidates := a.candidates()
 	failClosed := len(candidates) == 0
 	if failClosed {
-		// Unreachable through the config path -- compilation rejects an
-		// `auth query` with no secret, and a pool always has at least one live
-		// version. Compare against the decoy anyway, so the refusal costs what a
+		// Reached when every secret_ref pool the route names is empty of
+		// versions valid now -- the #295 failure. (Compilation rejects an
+		// `auth query` with no secret at all, so a static-only route cannot get
+		// here.) Compare against the decoy anyway, so the refusal costs what a
 		// wrong token costs, and fail closed rather than trusting that.
 		candidates = [][sha256.Size]byte{a.decoy}
 	}
@@ -102,7 +116,14 @@ func (a *QueryAuth) Verify(r *http.Request) bool {
 			}
 		}
 	}
-	return matched && !failClosed
+	switch {
+	case failClosed:
+		return false, AuthRejectNoValidSecret
+	case !matched:
+		return false, AuthRejectCredentials
+	default:
+		return true, ""
+	}
 }
 
 func (a *QueryAuth) candidates() [][sha256.Size]byte {

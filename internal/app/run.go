@@ -374,6 +374,10 @@ func run() int {
 	runtimeLogger.Info("queue_backend_selected", slog.String("backend", queueBackend))
 	appMetrics.queueStore = store
 	appMetrics.setKnownQueues(running)
+	// Wired before the listeners come up, so the first scrape of a process that
+	// booted with an empty pool already reports it. The registry keeps pool
+	// pointers across reloads, so this needs no re-wiring.
+	appMetrics.setSecretPoolStateSource(state.secretPoolStates)
 	if trendStore, ok := any(store).(queue.BacklogTrendStore); ok {
 		startBacklogTrendCapture(ctx, trendStore, runtimeLogger)
 	}
@@ -386,6 +390,11 @@ func run() int {
 	// Must come after startServers because attachSecretStore (called inside)
 	// is what populates runtimeState.secretStore.
 	startSecretGC(ctx, state, appMetrics, runtimeLogger)
+	// And after startSecretGC, whose startup sweep can itself be what empties a
+	// pool. Startup is the one point loadAuth cannot cover: it runs before
+	// hydration, so a pool that is about to be filled from the store still
+	// looks empty to it.
+	state.warnSecretPoolsWithoutValidVersion(runtimeLogger, "startup")
 
 	// Registered unconditionally: a reload can create a dispatcher even when the
 	// initial config had no deliver routes, and this defer used to sit inside the
@@ -761,6 +770,98 @@ func (s *runtimeState) hydrateRuntimeSecrets(compiled config.Compiled, logger *s
 		}
 	}
 	return nil
+}
+
+// secretPoolStates censuses every registered secret pool as of at.
+//
+// Reads the registry rather than the config, so it covers static pools too: a
+// static pool whose single version has lapsed rejects requests exactly as an
+// empty runtime pool does, and reporting only runtime pools would have left
+// that half invisible.
+func (s *runtimeState) secretPoolStates(at time.Time) []secrets.PoolState {
+	if s == nil || s.secretRegistry == nil {
+		return nil
+	}
+	return s.secretRegistry.StatesAt(at)
+}
+
+// warnSecretPoolsWithoutValidVersion logs one WARN per route whose configured
+// `secret_ref` names a pool holding no version valid at the check time.
+//
+// This is the log line the #295 incident wanted and did not get. The process
+// starts, `config validate` is green, `/healthz` is green -- and every webhook
+// gets a 401, with the only evidence sitting in a third party's delivery log.
+// A route that cannot authenticate anyone is a route that is down, and it says
+// so here.
+//
+// The `usable_secrets` field is why this is not simply "pool is empty": a route
+// may also carry static `auth hmac "file:..."` secrets, in which case an empty
+// pool costs it the rotation overlap but not the ability to authenticate. Zero
+// usable secrets is the outage; the rest is a heads-up.
+func (s *runtimeState) warnSecretPoolsWithoutValidVersion(logger *slog.Logger, trigger string) {
+	if s == nil || logger == nil {
+		return
+	}
+
+	s.mu.RLock()
+	routes := s.routes
+	now := s.now
+	s.mu.RUnlock()
+	at := time.Now().UTC()
+	if now != nil {
+		at = now().UTC()
+	}
+
+	// One census per pass, shared by every route that refers to a pool, so two
+	// routes on the same pool cannot report different states.
+	states := make(map[string]secrets.PoolState)
+	for _, st := range s.secretPoolStates(at) {
+		states[st.Name] = st
+	}
+
+	report := func(routePath, kind string, refs []string, staticSecrets int) {
+		empty := make([]string, 0, len(refs))
+		valid := staticSecrets
+		for _, ref := range refs {
+			st, ok := states[ref]
+			if !ok {
+				// A ref to an unregistered pool cannot happen: loadAuth fails
+				// the reload before it applies anything. Counted as empty
+				// rather than skipped so a future path that could produce one
+				// is loud instead of silent.
+				empty = append(empty, ref)
+				continue
+			}
+			valid += st.Valid
+			if st.Valid == 0 {
+				empty = append(empty, ref)
+			}
+		}
+		if len(empty) == 0 {
+			return
+		}
+		effect := "rotation overlap is gone; the route still authenticates with its remaining secrets"
+		if valid == 0 {
+			effect = "every request on this route is rejected with 401 until a valid version lands"
+		}
+		logger.Warn("route_secret_ref_without_valid_version",
+			slog.String("route", routePath),
+			slog.String("auth", kind),
+			slog.Any("pools", empty),
+			slog.Int("usable_secrets", valid),
+			slog.String("trigger", trigger),
+			slog.String("effect", effect),
+		)
+	}
+
+	for _, rt := range routes {
+		if len(rt.AuthHMACSecretRefs) > 0 {
+			report(rt.Path, "hmac", rt.AuthHMACSecretRefs, len(rt.AuthHMACSecrets))
+		}
+		if rt.AuthQuery.Enabled && len(rt.AuthQuery.SecretRefs) > 0 {
+			report(rt.Path, "query", rt.AuthQuery.SecretRefs, len(rt.AuthQuery.Secrets))
+		}
+	}
 }
 
 // secretPool exposes a runtime-mutable pool via the admin API, subject to the
@@ -1750,57 +1851,135 @@ func startBacklogTrendCapture(ctx context.Context, trendStore queue.BacklogTrend
 	}()
 }
 
-// startSecretGC runs a periodic sweep that prunes expired versions from every
-// registered secret pool and removes the corresponding rows from the persisted
-// store. Complements Pool.Add's opportunistic pruning (which only fires at
-// max_versions). Without the sweeper, deployments with many short overlap
-// windows accumulate expired-but-not-at-cap versions indefinitely in
-// Pool.ListMetadata() output and in the runtime_secrets table.
+// secretSweeper is the periodic runtime-secret maintenance pass.
+//
+// It does two things on the same schedule because both answer to the same
+// clock. It prunes expired versions -- complementing Pool.Add's opportunistic
+// pruning, which only fires at max_versions, so that deployments with many
+// short overlap windows do not accumulate expired-but-not-at-cap versions
+// indefinitely in Pool.ListMetadata() output and in the runtime_secrets table.
+// And it reports a pool that has arrived at zero valid versions, which is the
+// state that makes every route naming it answer 401 (see #295): nothing else
+// observes the moment a version lapses, so without a pass like this the
+// transition into that state happens silently.
+//
+// sweep is not safe for concurrent use. Its caller drives it from one
+// goroutine at a time: once synchronously at startup, then from the ticker.
+type secretSweeper struct {
+	state   *runtimeState
+	metrics *runtimeMetrics
+	logger  *slog.Logger
+	now     func() time.Time
+
+	// hadValid remembers, per pool, whether the previous sweep found a valid
+	// version. Warning on the transition rather than on the state is what
+	// keeps this usable: a pool that has been dry for a day is a real outage,
+	// but a WARN every five minutes for it is a log the operator learns to
+	// ignore. The Prometheus gauge carries the steady state; this carries the
+	// moment it changed, which is the one a log-stream alert can catch.
+	//
+	// A pool absent from the map has never been swept, so its first sweep
+	// reports whichever state it is in -- and a process that comes up with an
+	// empty pool is exactly the case #295 describes.
+	hadValid map[string]bool
+}
+
+func newSecretSweeper(state *runtimeState, metrics *runtimeMetrics, logger *slog.Logger) *secretSweeper {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &secretSweeper{
+		state:    state,
+		metrics:  metrics,
+		logger:   logger,
+		now:      func() time.Time { return time.Now().UTC() },
+		hadValid: make(map[string]bool),
+	}
+}
+
+func (s *secretSweeper) sweep(trigger string) {
+	if s == nil || s.state == nil || s.state.secretRegistry == nil {
+		return
+	}
+	now := s.now()
+	names := s.state.secretRegistry.Names()
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		pool, ok := s.state.secretRegistry.Pool(name)
+		if !ok {
+			continue
+		}
+		removed := pool.PruneExpired(now)
+
+		// Censused after the prune, because pruning is one of the two ways a
+		// pool arrives at zero valid versions. The other is a version simply
+		// lapsing, which this census catches whether it was pruned or not.
+		seen[name] = struct{}{}
+		st := pool.StateAt(now)
+		previous, known := s.hadValid[name]
+		s.hadValid[name] = st.Valid > 0
+		switch {
+		case st.Valid == 0 && (!known || previous):
+			s.logger.Warn("runtime_secret_pool_without_valid_version",
+				slog.String("pool", name),
+				slog.Int("versions", st.Total),
+				slog.Int("pending", st.Pending),
+				slog.String("trigger", trigger),
+				slog.String("effect", "every route whose secret_ref names this pool rejects requests with 401 until a valid version lands"),
+			)
+		case st.Valid > 0 && known && !previous:
+			s.logger.Info("runtime_secret_pool_valid_version_restored",
+				slog.String("pool", name),
+				slog.Int("valid", st.Valid),
+				slog.String("trigger", trigger),
+			)
+		}
+
+		if len(removed) == 0 {
+			continue
+		}
+		for _, id := range removed {
+			// Store delete errors are logged but do not unwind the pool
+			// mutation: the version is already gone from memory, so the
+			// DB row is at worst orphaned and operator-visible via logs.
+			if _, err := s.state.deleteSecretRecord(name, id); err != nil {
+				s.logger.Warn("secret_gc_store_delete_failed",
+					slog.String("pool", name),
+					slog.String("version_id", id),
+					slog.String("trigger", trigger),
+					slog.Any("err", err))
+			}
+		}
+		s.metrics.observeSecretGCPruned(name, len(removed))
+		s.logger.Info("secret_gc_pruned",
+			slog.String("pool", name),
+			slog.Int("removed", len(removed)),
+			slog.String("trigger", trigger))
+	}
+
+	// A dropped pool must not keep its remembered state: were it declared
+	// again later, the stale entry would suppress the warning for a pool that
+	// comes back empty.
+	for name := range s.hadValid {
+		if _, ok := seen[name]; !ok {
+			delete(s.hadValid, name)
+		}
+	}
+}
+
+// startSecretGC drives the secret sweeper.
 //
 // Runs an immediate sweep on startup ("startup" trigger) so that rows left
-// over from a previous process lifetime are cleaned up before the first
-// ticker elapses. Stops when ctx is cancelled.
+// over from a previous process lifetime are cleaned up, and a pool that came
+// up without a valid version is reported, before the first ticker elapses.
+// Stops when ctx is cancelled.
 func startSecretGC(ctx context.Context, state *runtimeState, metrics *runtimeMetrics, logger *slog.Logger) {
 	if state == nil || state.secretRegistry == nil {
 		return
 	}
-	if logger == nil {
-		logger = slog.Default()
-	}
+	sweeper := newSecretSweeper(state, metrics, logger)
 
-	sweep := func(trigger string) {
-		now := time.Now().UTC()
-		names := state.secretRegistry.Names()
-		for _, name := range names {
-			pool, ok := state.secretRegistry.Pool(name)
-			if !ok {
-				continue
-			}
-			removed := pool.PruneExpired(now)
-			if len(removed) == 0 {
-				continue
-			}
-			for _, id := range removed {
-				// Store delete errors are logged but do not unwind the pool
-				// mutation: the version is already gone from memory, so the
-				// DB row is at worst orphaned and operator-visible via logs.
-				if _, err := state.deleteSecretRecord(name, id); err != nil {
-					logger.Warn("secret_gc_store_delete_failed",
-						slog.String("pool", name),
-						slog.String("version_id", id),
-						slog.String("trigger", trigger),
-						slog.Any("err", err))
-				}
-			}
-			metrics.observeSecretGCPruned(name, len(removed))
-			logger.Info("secret_gc_pruned",
-				slog.String("pool", name),
-				slog.Int("removed", len(removed)),
-				slog.String("trigger", trigger))
-		}
-	}
-
-	sweep("startup")
+	sweeper.sweep("startup")
 	go func() {
 		ticker := time.NewTicker(secretGCInterval)
 		defer ticker.Stop()
@@ -1809,7 +1988,7 @@ func startSecretGC(ctx context.Context, state *runtimeState, metrics *runtimeMet
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				sweep("interval")
+				sweeper.sweep("interval")
 			}
 		}
 	}()
@@ -1917,6 +2096,12 @@ func reloadConfig(path string, running config.Compiled, state *runtimeState, log
 	}
 	state.updateAll(compiled)
 	state.setConfigFingerprint(data)
+
+	// After updateAll, so the check sees the routes the reload just installed.
+	// A reload is the moment an operator is watching the log, and it is where
+	// "starts fine, 401s everything" was previously reported as
+	// config_reloaded_ok and nothing else.
+	state.warnSecretPoolsWithoutValidVersion(logger, trigger)
 
 	logger.Info("config_reloaded_ok", slog.String("trigger", trigger))
 	return compiled, true
@@ -2631,6 +2816,11 @@ func startServers(
 	ing.ObserveReject = func(_ string, statusCode int, reason string) {
 		if appMetrics != nil {
 			appMetrics.observeIngressReject(statusCode, reason)
+		}
+	}
+	ing.ObserveAuthReject = func(route string, reason string) {
+		if appMetrics != nil {
+			appMetrics.observeIngressAuthReject(route, reason)
 		}
 	}
 

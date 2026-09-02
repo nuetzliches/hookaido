@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/nuetzliches/hookaido/v2/internal/config"
+	"github.com/nuetzliches/hookaido/v2/internal/ingress"
 	"github.com/nuetzliches/hookaido/v2/internal/pullapi"
 	"github.com/nuetzliches/hookaido/v2/internal/queue"
+	"github.com/nuetzliches/hookaido/v2/internal/secrets"
 )
 
-const metricsSchemaVersion = "1.5.0"
+const metricsSchemaVersion = "1.6.0"
 
 type runtimeMetrics struct {
 	tracingEnabled                             atomic.Int64
@@ -56,6 +58,21 @@ type runtimeMetrics struct {
 	// practice bounded by the number of declared runtime secrets.
 	secretGCMu           sync.Mutex
 	secretGCPrunedByPool map[string]int64
+
+	// secretPoolStates censuses the registered runtime-secret pools at scrape
+	// time. Unlike the GC counter it is not an accumulation of observations:
+	// whether a pool holds a currently-valid version is a function of the wall
+	// clock, so it can only be answered when asked. Nothing observes the
+	// moment a version lapses, which is exactly why an emptied pool was
+	// invisible.
+	secretPoolMu     sync.RWMutex
+	secretPoolStates func(at time.Time) []secrets.PoolState
+
+	// Ingress auth-reject counters, by route and classified cause. Both labels
+	// are bounded by config: routes are declared, causes are a fixed set.
+	authRejectMu       sync.Mutex
+	authRejectByReason map[authRejectKey]int64
+	authRejectedTotal  atomic.Int64
 
 	// Queue store for on-scrape stats
 	queueStore queue.Store
@@ -253,6 +270,75 @@ func (m *runtimeMetrics) observeSecretGCPruned(pool string, n int) {
 	}
 	m.secretGCPrunedByPool[pool] += int64(n)
 	m.secretGCMu.Unlock()
+}
+
+// setSecretPoolStateSource installs the census used by the pool gauges and the
+// /healthz?details=1 rollup. The registry it reads through keeps pool pointers
+// across reloads, so this is wired once at startup and needs no re-wiring.
+func (m *runtimeMetrics) setSecretPoolStateSource(fn func(at time.Time) []secrets.PoolState) {
+	if m == nil {
+		return
+	}
+	m.secretPoolMu.Lock()
+	m.secretPoolStates = fn
+	m.secretPoolMu.Unlock()
+}
+
+// secretPoolStateSnapshot censuses the pools as of now. Returns nil when no
+// source is wired, which is what keeps the gauges absent (rather than
+// misreporting zero) in a process with no secret registry at all.
+func (m *runtimeMetrics) secretPoolStateSnapshot() []secrets.PoolState {
+	if m == nil {
+		return nil
+	}
+	m.secretPoolMu.RLock()
+	fn := m.secretPoolStates
+	m.secretPoolMu.RUnlock()
+	if fn == nil {
+		return nil
+	}
+	now := time.Now
+	if m.now != nil {
+		now = m.now
+	}
+	return fn(now().UTC())
+}
+
+// authRejectKey identifies one classified auth rejection in the metric map.
+type authRejectKey struct {
+	route  string
+	reason string
+}
+
+// observeIngressAuthReject records one auth rejection on route, classified.
+// The route may be empty (a reject taken before any route resolved); Prometheus
+// treats an empty label value as absent, which is the honest rendering of
+// "no route to attribute this to".
+func (m *runtimeMetrics) observeIngressAuthReject(route string, reason string) {
+	if m == nil {
+		return
+	}
+	key := authRejectKey{route: route, reason: normalizeAuthRejectReason(reason)}
+	m.authRejectedTotal.Add(1)
+	m.authRejectMu.Lock()
+	if m.authRejectByReason == nil {
+		m.authRejectByReason = make(map[authRejectKey]int64)
+	}
+	m.authRejectByReason[key]++
+	m.authRejectMu.Unlock()
+}
+
+func (m *runtimeMetrics) authRejectSnapshot() map[authRejectKey]int64 {
+	if m == nil {
+		return nil
+	}
+	m.authRejectMu.Lock()
+	defer m.authRejectMu.Unlock()
+	out := make(map[authRejectKey]int64, len(m.authRejectByReason))
+	for k, v := range m.authRejectByReason {
+		out[k] = v
+	}
+	return out
 }
 
 func (m *runtimeMetrics) secretGCPrunedSnapshot() map[string]int64 {
@@ -827,6 +913,39 @@ var ingressRejectReasonOrder = []string{
 	"other",
 }
 
+// authRejectReasonOrder is the zero-fill order for the auth-reject counter.
+//
+// Zero-filling matters more here than for most families: the alert an operator
+// wants is `increase(...{reason="no_valid_secret"}[15m]) > 0`, and a series that
+// only appears once the outage has already happened cannot be alerted on
+// beforehand -- nor distinguished, afterwards, from a scrape target that was
+// never up. The route dimension cannot be zero-filled the same way, so the
+// baseline is emitted with an empty route.
+var authRejectReasonOrder = []string{
+	ingress.AuthRejectNoValidSecret,
+	ingress.AuthRejectSignatureMismatch,
+	ingress.AuthRejectTimestampOutOfWindow,
+	ingress.AuthRejectReplay,
+	ingress.AuthRejectMalformed,
+	ingress.AuthRejectCredentials,
+	ingress.AuthRejectForwardDenied,
+	ingress.AuthRejectUnspecified,
+	"other",
+}
+
+func normalizeAuthRejectReason(reason string) string {
+	trimmed := strings.TrimSpace(reason)
+	for _, known := range authRejectReasonOrder {
+		if trimmed == known && known != "other" {
+			return known
+		}
+	}
+	if trimmed == "" {
+		return ingress.AuthRejectUnspecified
+	}
+	return "other"
+}
+
 var ingressRejectStatusOrder = []string{
 	"400",
 	"401",
@@ -1033,6 +1152,82 @@ func (m *runtimeMetrics) ingressRejectBreakdownSnapshot() map[string]map[string]
 	return out
 }
 
+// secretPoolSecondsUntil renders a pool deadline as seconds from now for the
+// Prometheus gauges.
+//
+// The two special cases are the point of having a helper. A zero deadline on a
+// pool that still has a valid version means "nothing lapses", which is +Inf, not
+// zero -- reporting zero there would make every unbounded pool look like it is
+// expiring right now. A pool with no valid version reports 0, because it has no
+// validity left to count down; the versions gauge is what says whether 0 means
+// "dry" or "about to be".
+func secretPoolSecondsUntil(deadline time.Time, now time.Time, valid int) float64 {
+	if valid == 0 {
+		return 0
+	}
+	if deadline.IsZero() {
+		return math.Inf(1)
+	}
+	secs := deadline.Sub(now).Seconds()
+	if secs < 0 {
+		// A version valid at the census time cannot already be past its
+		// ValidUntil, so this is unreachable; clamped rather than emitted as a
+		// negative countdown in case the two ever drift apart.
+		return 0
+	}
+	return secs
+}
+
+// runtimeSecretDiagnostics is the /healthz?details=1 view of the secret pools.
+//
+// It exists because a Prometheus scrape is not always available: the failure in
+// #295 was found by a third party's delivery log, and the operator's own
+// monitoring was an HTTP uptime checker. `pools_without_valid_version` is the
+// single number such a checker can assert on without understanding any of the
+// rest.
+//
+// Deadlines are reported both as an absolute timestamp and as a countdown. The
+// countdown is what an alert threshold uses; the timestamp is what survives
+// being pasted into an incident channel an hour later. A null countdown means
+// no deadline applies (nothing lapses, or nothing is valid) -- the key stays
+// present so the shape does not change under a checker.
+func runtimeSecretDiagnostics(pools []secrets.PoolState, now time.Time) map[string]any {
+	entries := make([]map[string]any, 0, len(pools))
+	empty := make([]string, 0)
+	for _, st := range pools {
+		entry := map[string]any{
+			"pool":                st.Name,
+			"runtime":             st.Runtime,
+			"versions":            st.Total,
+			"valid":               st.Valid,
+			"pending":             st.Pending,
+			"expired":             st.Expired,
+			"next_expiry_at":      nil,
+			"next_expiry_seconds": nil,
+			"exhausted_at":        nil,
+			"exhaustion_seconds":  nil,
+		}
+		if st.Valid > 0 && !st.NextExpiry.IsZero() {
+			entry["next_expiry_at"] = st.NextExpiry.UTC().Format(time.RFC3339Nano)
+			entry["next_expiry_seconds"] = st.NextExpiry.Sub(now).Seconds()
+		}
+		if st.Valid > 0 && !st.Exhaustion.IsZero() {
+			entry["exhausted_at"] = st.Exhaustion.UTC().Format(time.RFC3339Nano)
+			entry["exhaustion_seconds"] = st.Exhaustion.Sub(now).Seconds()
+		}
+		entries = append(entries, entry)
+		if st.Valid == 0 {
+			empty = append(empty, st.Name)
+		}
+	}
+	return map[string]any{
+		"pools":                             entries,
+		"pools_total":                       len(pools),
+		"pools_without_valid_version":       len(empty),
+		"pools_without_valid_version_names": empty,
+	}
+}
+
 func pullDiagnostics(snapshot map[pullQueueKey]pullRouteSnapshot) map[string]any {
 	total := map[string]any{
 		"dequeue_total": map[string]any{
@@ -1143,6 +1338,19 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 	for _, reason := range deliveryDeadReasonOrder {
 		deliveryDeadByReasonAny[reason] = deliveryDeadByReason[reason]
 	}
+	// Folded across routes here on purpose: the route dimension belongs in the
+	// Prometheus family, not in a health payload an uptime checker polls.
+	authRejectTotals := make(map[string]int64, len(authRejectReasonOrder))
+	for _, reason := range authRejectReasonOrder {
+		authRejectTotals[reason] = 0
+	}
+	for key, count := range m.authRejectSnapshot() {
+		authRejectTotals[key.reason] += count
+	}
+	authRejectedByReasonAny := make(map[string]any, len(authRejectTotals))
+	for reason, count := range authRejectTotals {
+		authRejectedByReasonAny[reason] = count
+	}
 
 	diagnostics := map[string]any{
 		"tracing": map[string]any{
@@ -1167,6 +1375,8 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 			"accepted_total":                      m.ingressAcceptedTotal.Load(),
 			"rejected_total":                      m.ingressRejectedTotal.Load(),
 			"rejected_by_reason":                  ingressRejectedByReasonAny,
+			"auth_rejected_total":                 m.authRejectedTotal.Load(),
+			"auth_rejected_by_reason":             authRejectedByReasonAny,
 			"enqueued_total":                      m.ingressEnqueuedTotal.Load(),
 			"adaptive_backpressure_applied_total": m.ingressAdaptiveTotal.Load(),
 			"adaptive_backpressure_by_reason":     ingressAdaptiveByReasonAny,
@@ -1179,6 +1389,10 @@ func (m *runtimeMetrics) healthDiagnostics() map[string]any {
 			"dead_by_reason": deliveryDeadByReasonAny,
 		},
 		"pull": pullDiagnostics(pullSnapshot),
+	}
+
+	if pools := m.secretPoolStateSnapshot(); pools != nil {
+		diagnostics["runtime_secrets"] = runtimeSecretDiagnostics(pools, m.nowLocked().UTC())
 	}
 
 	if m.queueStore != nil {
@@ -1248,6 +1462,8 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		ingressRejectBreakdown := newIngressRejectBreakdownSnapshot()
 		var pullSnapshot map[pullQueueKey]pullRouteSnapshot
 		var secretGCPrunedByPool map[string]int64
+		var secretPools []secrets.PoolState
+		var authRejectByReason map[authRejectKey]int64
 		if rm != nil {
 			tracingEnabled = rm.tracingEnabled.Load()
 			tracingInitFailuresTotal = rm.tracingInitFailuresTotal.Load()
@@ -1269,6 +1485,8 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			ingressRejectBreakdown = rm.ingressRejectBreakdownSnapshot()
 			pullSnapshot = rm.pullSnapshot()
 			secretGCPrunedByPool = rm.secretGCPrunedSnapshot()
+			secretPools = rm.secretPoolStateSnapshot()
+			authRejectByReason = rm.authRejectSnapshot()
 		}
 
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -1356,6 +1574,39 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 				)
 			}
 		}
+		// Auth rejects, classified and attributed. `hookaido_ingress_rejected_
+		// by_reason_total{reason="auth"}` counts the same requests; this family
+		// says which of three unrelated causes produced them and on which
+		// route, which is what an auth failure could not be diagnosed without.
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_auth_rejected_total Total number of ingress requests rejected by an authenticator, by route and classified cause.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_auth_rejected_total counter\n")
+		authRejectKeys := make([]authRejectKey, 0, len(authRejectByReason)+len(authRejectReasonOrder))
+		// The route-less baseline first, so `== 0` is expressible for a cause
+		// that has never fired on this instance.
+		for _, reason := range authRejectReasonOrder {
+			authRejectKeys = append(authRejectKeys, authRejectKey{reason: reason})
+		}
+		for key := range authRejectByReason {
+			if key.route == "" {
+				continue
+			}
+			authRejectKeys = append(authRejectKeys, key)
+		}
+		sort.Slice(authRejectKeys, func(i, j int) bool {
+			if authRejectKeys[i].route != authRejectKeys[j].route {
+				return authRejectKeys[i].route < authRejectKeys[j].route
+			}
+			return authRejectKeys[i].reason < authRejectKeys[j].reason
+		})
+		for _, key := range authRejectKeys {
+			_, _ = fmt.Fprintf(
+				w,
+				"hookaido_ingress_auth_rejected_total{route=%q,reason=%q} %d\n",
+				key.route,
+				key.reason,
+				authRejectByReason[key],
+			)
+		}
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_enqueued_total Total number of items enqueued via ingress (may exceed accepted if fanout targets > 1).\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_enqueued_total counter\n")
 		_, _ = fmt.Fprintf(w, "hookaido_ingress_enqueued_total %d\n", ingressEnqueued)
@@ -1407,6 +1658,50 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		sort.Strings(secretGCPools)
 		for _, pool := range secretGCPools {
 			_, _ = fmt.Fprintf(w, "hookaido_runtime_secret_gc_pruned_total{pool=%q} %d\n", pool, secretGCPrunedByPool[pool])
+		}
+
+		// --- Runtime secret pool contents ---
+		//
+		// The GC counter above says versions were removed; it cannot say what is
+		// left, and "what is left, valid right now" is the only thing that
+		// decides whether a route authenticates. `...pool_versions{state="valid"}
+		// == 0` is the alert that was not writable before.
+		if len(secretPools) > 0 {
+			scrapeNow := time.Now().UTC()
+			if rm != nil {
+				scrapeNow = rm.nowLocked().UTC()
+			}
+			_, _ = fmt.Fprintf(w, "# HELP hookaido_runtime_secret_pool_versions Runtime-secret versions held by each pool, by validity state at scrape time.\n")
+			_, _ = fmt.Fprintf(w, "# TYPE hookaido_runtime_secret_pool_versions gauge\n")
+			for _, st := range secretPools {
+				for _, pair := range []struct {
+					state string
+					count int
+				}{
+					{"valid", st.Valid},
+					{"pending", st.Pending},
+					{"expired", st.Expired},
+				} {
+					_, _ = fmt.Fprintf(w, "hookaido_runtime_secret_pool_versions{pool=%q,state=%q} %d\n", st.Name, pair.state, pair.count)
+				}
+			}
+			_, _ = fmt.Fprintf(w, "# HELP hookaido_runtime_secret_pool_next_expiry_seconds Seconds until the next version of the pool lapses. +Inf when no valid version expires, 0 when the pool holds no valid version.\n")
+			_, _ = fmt.Fprintf(w, "# TYPE hookaido_runtime_secret_pool_next_expiry_seconds gauge\n")
+			for _, st := range secretPools {
+				_, _ = fmt.Fprintf(w, "hookaido_runtime_secret_pool_next_expiry_seconds{pool=%q} %g\n",
+					st.Name, secretPoolSecondsUntil(st.NextExpiry, scrapeNow, st.Valid))
+			}
+			// Distinct from next_expiry because a healthy overlapping rotation
+			// hands over constantly: next_expiry drops to near zero on every
+			// handover, so a threshold on it cries wolf. This one moves only
+			// when the pool is genuinely about to run out of credentials, which
+			// is the warning the incident wanted -- before the cliff, not after.
+			_, _ = fmt.Fprintf(w, "# HELP hookaido_runtime_secret_pool_exhaustion_seconds Seconds until the pool holds no valid version at all. +Inf when a valid version is unbounded, 0 when it already holds none.\n")
+			_, _ = fmt.Fprintf(w, "# TYPE hookaido_runtime_secret_pool_exhaustion_seconds gauge\n")
+			for _, st := range secretPools {
+				_, _ = fmt.Fprintf(w, "hookaido_runtime_secret_pool_exhaustion_seconds{pool=%q} %g\n",
+					st.Name, secretPoolSecondsUntil(st.Exhaustion, scrapeNow, st.Valid))
+			}
 		}
 
 		// --- Pull metrics ---

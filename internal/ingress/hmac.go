@@ -15,7 +15,86 @@ import (
 	"time"
 )
 
-var ErrUnauthorized = errors.New("unauthorized")
+// Auth reject causes. They are the `reason` label of
+// hookaido_ingress_auth_rejected_total and the classification an operator gets
+// on a 401, which previously carried nothing beyond "auth".
+//
+// The split exists because these have entirely different owners. A
+// no_valid_secret is a Hookaido-side outage -- the route has nothing left to
+// verify against, so it rejects *every* sender -- while a signature_mismatch or
+// a timestamp_out_of_window is one sender misbehaving. Collapsed into one
+// bucket, an empty secret pool was indistinguishable from a sender with the
+// wrong key, which is what made the outage in #295 undiagnosable from this side.
+const (
+	// AuthRejectNoValidSecret: the route had nothing to verify against. Every
+	// secret_ref pool it names holds no version valid at the request time, and
+	// it has no static secret either.
+	AuthRejectNoValidSecret = "no_valid_secret"
+	// AuthRejectSignatureMismatch: a well-formed signature that no live secret
+	// produces. The usual cause is a sender that has not adopted a rotation.
+	AuthRejectSignatureMismatch = "signature_mismatch"
+	// AuthRejectTimestampOutOfWindow: the signed timestamp is outside the
+	// route's tolerance. Clock skew on either side, or a delayed retry.
+	AuthRejectTimestampOutOfWindow = "timestamp_out_of_window"
+	// AuthRejectReplay: the signature verified but its nonce was already used
+	// inside the tolerance window.
+	AuthRejectReplay = "replay"
+	// AuthRejectMalformed: the signature material never got as far as being
+	// comparable -- a missing header, a non-numeric timestamp, a non-hex
+	// signature. Almost always a sender configured for a different scheme.
+	AuthRejectMalformed = "malformed"
+	// AuthRejectCredentials: a shared credential (basic auth, query token) was
+	// missing or wrong.
+	AuthRejectCredentials = "credentials"
+	// AuthRejectForwardDenied: the forward-auth endpoint refused the request.
+	AuthRejectForwardDenied = "forward_denied"
+	// AuthRejectUnspecified: an authorization failure that carries no
+	// classification.
+	AuthRejectUnspecified = "unspecified"
+)
+
+var (
+	// ErrUnauthorized is the class every ingress auth rejection belongs to. The
+	// classified errors below wrap it, so errors.Is(err, ErrUnauthorized)
+	// remains the correct test for "this request is not authorized" and no
+	// caller has to enumerate the causes to recognise one.
+	ErrUnauthorized = errors.New("unauthorized")
+
+	// ErrNoValidSecret is the failure #295 was about: nothing to verify
+	// against, so the route rejects every sender until a version lands.
+	ErrNoValidSecret = fmt.Errorf("%w: no valid secret", ErrUnauthorized)
+	// ErrSignatureMismatch is a well-formed signature no live secret produces.
+	ErrSignatureMismatch = fmt.Errorf("%w: signature mismatch", ErrUnauthorized)
+	// ErrTimestampOutOfWindow is a signed timestamp outside the tolerance.
+	ErrTimestampOutOfWindow = fmt.Errorf("%w: timestamp outside tolerance", ErrUnauthorized)
+	// ErrReplayedNonce is a verified signature whose nonce was already used.
+	ErrReplayedNonce = fmt.Errorf("%w: nonce replayed", ErrUnauthorized)
+	// ErrMalformedCredential is signature material that never became comparable.
+	ErrMalformedCredential = fmt.Errorf("%w: malformed credential", ErrUnauthorized)
+)
+
+// AuthRejectReason classifies an authenticator error into one of the
+// AuthReject* causes. An unclassified rejection reports
+// AuthRejectUnspecified rather than being dropped, so the counter's total
+// always matches the number of auth rejects.
+func AuthRejectReason(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrNoValidSecret):
+		return AuthRejectNoValidSecret
+	case errors.Is(err, ErrTimestampOutOfWindow):
+		return AuthRejectTimestampOutOfWindow
+	case errors.Is(err, ErrReplayedNonce):
+		return AuthRejectReplay
+	case errors.Is(err, ErrMalformedCredential):
+		return AuthRejectMalformed
+	case errors.Is(err, ErrSignatureMismatch):
+		return AuthRejectSignatureMismatch
+	default:
+		return AuthRejectUnspecified
+	}
+}
 
 type HMACAuth struct {
 	Secrets       [][]byte
@@ -97,18 +176,18 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) (*No
 	tsStr := strings.TrimSpace(r.Header.Get(a.TimestampHeader))
 	nonce := strings.TrimSpace(r.Header.Get(a.NonceHeader))
 	if sigHex == "" || tsStr == "" || nonce == "" {
-		return nil, ErrUnauthorized
+		return nil, ErrMalformedCredential
 	}
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
-		return nil, ErrUnauthorized
+		return nil, ErrMalformedCredential
 	}
 	t := time.Unix(ts, 0).UTC()
 	if a.Tolerance > 0 {
 		d := now().UTC().Sub(t)
 		if d < -a.Tolerance || d > a.Tolerance {
-			return nil, ErrUnauthorized
+			return nil, ErrTimestampOutOfWindow
 		}
 	}
 
@@ -121,12 +200,12 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) (*No
 	// route opted into replay protection, so a nonce we cannot track is not
 	// something to wave through.
 	if len(nonce) > nonceMaxLen {
-		return nil, ErrUnauthorized
+		return nil, ErrMalformedCredential
 	}
 
 	gotSig, err := hex.DecodeString(sigHex)
 	if err != nil || len(gotSig) == 0 {
-		return nil, ErrUnauthorized
+		return nil, ErrMalformedCredential
 	}
 
 	bodyHash := sha256.Sum256(body)
@@ -138,7 +217,10 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) (*No
 		secrets = a.SelectSecrets(t)
 	}
 	if len(secrets) == 0 {
-		return nil, ErrUnauthorized
+		// Reached when every secret_ref pool the route names is empty of
+		// versions valid at t. Nothing the sender did is wrong; there is
+		// nothing here to check the request against.
+		return nil, ErrNoValidSecret
 	}
 
 	for _, secret := range secrets {
@@ -158,13 +240,13 @@ func (a *HMACAuth) Verify(r *http.Request, requestPath string, body []byte) (*No
 			// immediately, but only Commit makes it survive. See NonceClaim.
 			seq, ok := a.nonce.claim(nonce, t.Add(a.Tolerance))
 			if !ok {
-				return nil, ErrUnauthorized
+				return nil, ErrReplayedNonce
 			}
 			return &NonceClaim{cache: a.nonce, nonce: nonce, seq: seq}, nil
 		}
 	}
 
-	return nil, ErrUnauthorized
+	return nil, ErrSignatureMismatch
 }
 
 func cloneByteSlices(in [][]byte) [][]byte {
@@ -197,7 +279,9 @@ func (a *HMACAuth) verifyProvider(r *http.Request, body []byte) error {
 	}
 	secrets := a.allSecrets(now())
 	if len(secrets) == 0 {
-		return ErrUnauthorized
+		// Same failure as the canonical path: an empty secret_ref pool leaves
+		// the route with nothing to verify against.
+		return ErrNoValidSecret
 	}
 
 	switch a.Provider {
@@ -210,6 +294,10 @@ func (a *HMACAuth) verifyProvider(r *http.Request, body []byte) error {
 	case "cituro":
 		return a.verifyStripeLike(r, body, secrets, cituroProviderConfig)
 	default:
+		// Unreachable through the config path -- compilation rejects an unknown
+		// provider. Deliberately left unclassified: it is a Hookaido bug, not
+		// one of the sender-or-secret causes, and AuthRejectReason reports it
+		// as `unspecified` rather than mislabelling it as one of them.
 		return ErrUnauthorized
 	}
 }
@@ -253,14 +341,14 @@ var (
 func (a *HMACAuth) verifyGitHub(r *http.Request, body []byte, secrets [][]byte) error {
 	sigHeader := strings.TrimSpace(r.Header.Get("X-Hub-Signature-256"))
 	if sigHeader == "" {
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 	if !strings.HasPrefix(sigHeader, "sha256=") {
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 	gotSig, err := hex.DecodeString(sigHeader[len("sha256="):])
 	if err != nil || len(gotSig) == 0 {
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 	for _, secret := range secrets {
 		if len(secret) == 0 {
@@ -273,17 +361,17 @@ func (a *HMACAuth) verifyGitHub(r *http.Request, body []byte, secrets [][]byte) 
 			return nil
 		}
 	}
-	return ErrUnauthorized
+	return ErrSignatureMismatch
 }
 
 func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) error {
 	sigHeader := strings.TrimSpace(r.Header.Get("X-Gitea-Signature"))
 	if sigHeader == "" {
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 	gotSig, err := hex.DecodeString(sigHeader)
 	if err != nil || len(gotSig) == 0 {
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 	for _, secret := range secrets {
 		if len(secret) == 0 {
@@ -296,7 +384,7 @@ func (a *HMACAuth) verifyGitea(r *http.Request, body []byte, secrets [][]byte) e
 			return nil
 		}
 	}
-	return ErrUnauthorized
+	return ErrSignatureMismatch
 }
 
 // verifyStripeLike verifies HMAC signatures in the Stripe-invented scheme
@@ -332,7 +420,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 	raw := strings.TrimSpace(r.Header.Get(cfg.Header))
 	if raw == "" {
 		slog.Warn("hmac_stripe_failed", "reason", "header_missing", "header", cfg.Header)
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 
 	// Every value carrying the configured tag is a candidate, not just the
@@ -375,7 +463,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 			"header", cfg.Header, "sig_tag", cfg.SigTag,
 			"ts_present", tsStr != "", "sig_present", len(sigHexes) > 0,
 			"pairs_parsed", pairs, "header_value_len", len(raw))
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
@@ -402,7 +490,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 			"header", cfg.Header,
 			"ts_len", len(tsStr),
 			"cause", cause)
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 
 	tolerance := a.Tolerance
@@ -420,7 +508,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		slog.Warn("hmac_stripe_failed", "reason", "ts_out_of_tolerance",
 			"header", cfg.Header, "ts_unix", ts, "ts_unit", cfg.TSUnit.String(),
 			"delta_seconds", d.Seconds(), "tolerance_seconds", tolerance.Seconds())
-		return ErrUnauthorized
+		return ErrTimestampOutOfWindow
 	}
 
 	// An entry that is not hex is skipped rather than fatal: the header may
@@ -444,7 +532,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		gotSigs = append(gotSigs, sig)
 	}
 	if len(gotSigs) == 0 {
-		return ErrUnauthorized
+		return ErrMalformedCredential
 	}
 
 	msg := make([]byte, 0, len(tsStr)+1+len(body))
@@ -485,7 +573,7 @@ func (a *HMACAuth) verifyStripeLike(r *http.Request, body []byte, secrets [][]by
 		"secrets_tried", len(secrets), "signatures_tried", len(gotSigs),
 		"ts_len", len(tsStr), "body_len", len(body),
 		"got_prefix", hex.EncodeToString(first)[:min(8, 2*len(first))])
-	return ErrUnauthorized
+	return ErrSignatureMismatch
 }
 
 const (

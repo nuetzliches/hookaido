@@ -51,8 +51,21 @@ type Server struct {
 	ObserveResult         func(accepted bool, enqueued int)
 	ObserveAdaptiveReject func(route string, reason string)
 	ObserveReject         func(route string, statusCode int, reason string)
-	MaxBodyBytes          int64
-	MaxHeaderBytes        int
+	// ObserveAuthReject fires for every rejection an authenticator caused,
+	// classified into one of the AuthReject* causes and carrying the route.
+	//
+	// It is a second hook rather than an extra argument on ObserveReject
+	// because the two answer different questions and have different label
+	// budgets: ObserveReject is the instance-wide reject census across all
+	// reasons, while this one is the auth diagnosis -- which is where the
+	// route attribution is worth its cardinality, and where "the pool is
+	// empty" has to be separable from "the sender signed wrong".
+	//
+	// Both fire for the same request; this is the finer-grained view, not a
+	// replacement.
+	ObserveAuthReject func(route string, reason string)
+	MaxBodyBytes      int64
+	MaxHeaderBytes    int
 }
 
 func NewServer(store queue.Store) *Server {
@@ -138,14 +151,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// avoids confirming that the path exists at all. Rejecting before the
 	// limiter means a wrong token costs no queue work and cannot consume the
 	// route's token budget, which is exactly how a matcher miss behaves today.
-	if a := snap.QueryAuth; a != nil && !a.Verify(r) {
-		w.WriteHeader(http.StatusNotFound)
-		s.observe(false, 0)
-		// Reported as "auth" rather than "not_found" so an operator can still
-		// tell a wrong token from a genuinely unknown path. The token itself is
-		// never a label.
-		s.observeReject(route, http.StatusNotFound, "auth")
-		return
+	if a := snap.QueryAuth; a != nil {
+		if ok, cause := a.VerifyCause(r); !ok {
+			w.WriteHeader(http.StatusNotFound)
+			s.observe(false, 0)
+			// Reported as "auth" rather than "not_found" so an operator can
+			// still tell a wrong token from a genuinely unknown path. The token
+			// itself is never a label.
+			s.observeReject(route, http.StatusNotFound, "auth")
+			s.observeAuthReject(route, cause)
+			return
+		}
 	}
 
 	if s.AllowRequestFor != nil && !s.AllowRequestFor(route) {
@@ -174,6 +190,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		s.observe(false, 0)
 		s.observeReject(route, http.StatusUnauthorized, "auth")
+		s.observeAuthReject(route, AuthRejectCredentials)
 		return
 	}
 
@@ -208,6 +225,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status)
 			s.observe(false, 0)
 			s.observeReject(route, status, "auth")
+			s.observeAuthReject(route, AuthRejectForwardDenied)
 			return
 		}
 		forwardCopied = copied
@@ -227,6 +245,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
 			s.observe(false, 0)
 			s.observeReject(route, http.StatusUnauthorized, "auth")
+			s.observeAuthReject(route, AuthRejectReason(err))
 			return
 		}
 		nonceClaim = claim
@@ -294,6 +313,21 @@ func (s *Server) observeReject(route string, statusCode int, reason string) {
 	if s.ObserveReject != nil {
 		s.ObserveReject(route, statusCode, strings.TrimSpace(reason))
 	}
+}
+
+// observeAuthReject records the classified cause of one auth rejection.
+//
+// Every call site pairs it with an observeReject(..., "auth") so the two views
+// stay reconcilable: the sum over causes here equals the `auth` bucket there.
+func (s *Server) observeAuthReject(route string, cause string) {
+	if s.ObserveAuthReject == nil {
+		return
+	}
+	cause = strings.TrimSpace(cause)
+	if cause == "" {
+		cause = AuthRejectUnspecified
+	}
+	s.ObserveAuthReject(route, cause)
 }
 
 func copyHeadersWithExtra(h http.Header, maxBytes int, extra map[string]string) (map[string]string, bool) {

@@ -182,6 +182,7 @@ polls `POST {endpoint}/dequeue` holds none between calls and is not counted by
 | `hookaido_ingress_accepted_total` | counter | Ingress requests accepted and enqueued            |
 | `hookaido_ingress_rejected_total` | counter | Ingress requests rejected (auth, rate-limit, etc) |
 | `hookaido_ingress_rejected_by_reason_total{reason,status}` | counter | Ingress rejects by normalized reason + status (includes `memory_pressure` with status `503`) |
+| `hookaido_ingress_auth_rejected_total{route,reason}` | counter | Auth rejects by route and classified cause (`no_valid_secret`, `signature_mismatch`, `timestamp_out_of_window`, `replay`, `malformed`, `credentials`, `forward_denied`, `unspecified`, `other`) |
 | `hookaido_ingress_enqueued_total` | counter | Items enqueued via ingress (>accepted if fanout)  |
 | `hookaido_ingress_adaptive_backpressure_total{reason}` | counter | Ingress requests rejected by adaptive backpressure (by trigger reason) |
 | `hookaido_ingress_adaptive_backpressure_applied_total` | counter | Total ingress requests rejected by adaptive backpressure |
@@ -225,8 +226,20 @@ All `hookaido_pull_*` series above also carry a `consumer_group` label. It is em
 | Metric                                                        | Type    | Description                                                                 |
 | ------------------------------------------------------------- | ------- | --------------------------------------------------------------------------- |
 | `hookaido_runtime_secret_gc_pruned_total`                     | counter | Expired runtime-secret versions pruned by the background sweeper, by pool name |
+| `hookaido_runtime_secret_pool_versions{pool,state}`           | gauge   | Versions held per pool by validity state at scrape time (`valid`, `pending`, `expired`) |
+| `hookaido_runtime_secret_pool_next_expiry_seconds{pool}`      | gauge   | Seconds until the pool's next version lapses (`+Inf` if none does, `0` if no valid version is left) |
+| `hookaido_runtime_secret_pool_exhaustion_seconds{pool}`       | gauge   | Seconds until the pool holds no valid version at all (`+Inf` if a valid version is unbounded, `0` if it already holds none) |
 | `hookaido_publish_rejected_managed_target_mismatch_total`     | counter | Admin publish rejections with code `managed_target_mismatch`                 |
 | `hookaido_publish_rejected_managed_resolver_missing_total`    | counter | Admin publish rejections with code `managed_resolver_missing`                |
+
+The `hookaido_runtime_secret_pool_*` gauges cover every registered pool, static
+`secret` blocks included — a static pool whose one version has lapsed rejects
+requests exactly as an empty runtime pool does. They are absent (not zero) in a
+process that declares no secrets at all.
+
+Alert on `exhaustion_seconds`, not on `next_expiry_seconds`: the latter drops to
+near zero on every handover of a healthy overlapping rotation, while the former
+moves only when the pool is genuinely about to run out of credentials.
 
 **Store common metrics:**
 
@@ -319,6 +332,27 @@ DLQ growth by dead reason:
 sum by (reason) (
   increase(hookaido_delivery_dead_by_reason_total[15m])
 )
+```
+
+A secret pool with nothing valid in it — every route naming it answers `401`,
+while the process stays green on every other signal:
+
+```promql
+hookaido_runtime_secret_pool_versions{state="valid"} == 0
+```
+
+Warn before the cliff rather than after it (six hours of validity left):
+
+```promql
+hookaido_runtime_secret_pool_exhaustion_seconds < 21600
+```
+
+Auth rejects that are Hookaido's fault rather than the sender's, by route:
+
+```promql
+sum by (route) (
+  increase(hookaido_ingress_auth_rejected_total{reason="no_valid_secret"}[15m])
+) > 0
 ```
 
 Alert example (backend-aware store error burst):
@@ -442,6 +476,8 @@ The Admin API health endpoint (`GET /healthz?details=1`) aggregates observabilit
 - Backlog trend signals with operator action playbooks
 - Tracing counters (init failures, export errors)
 - Ingress adaptive-backpressure diagnostics (`adaptive_backpressure_applied_total`, `adaptive_backpressure_by_reason`) and rejection reason counters (`rejected_by_reason`, including `memory_pressure`)
+- Ingress auth-rejection diagnostics (`auth_rejected_total`, `auth_rejected_by_reason`) — the classified causes behind the `auth` bucket, folded across routes
+- Runtime-secret rollup (`runtime_secrets`): `pools_without_valid_version` plus its `_names` list, and one entry per pool with version counts by validity state and both expiry deadlines (absolute and as a countdown; `null` means no deadline applies). This is the piece a plain HTTP uptime checker can consume without a Prometheus scrape — a non-zero `pools_without_valid_version` means at least one route is rejecting every webhook it receives.
 - Delivery diagnostics include dead-letter reason breakdown (`dead_by_reason`) for DLQ growth attribution
 - Memory-store diagnostics (when backend is `memory`): `items_by_state`, retained bytes, eviction counters, and `memory_pressure` status/limits/reject counters
 - Top route/target backlog buckets
@@ -481,11 +517,20 @@ Use these series together:
 - `hookaido_ingress_rejected_by_reason_total{reason,status}`
 - ingress latency p95/p99 from HTTP telemetry
 
+`hookaido_ingress_rejected_by_reason_total{reason="auth"}` counts every auth
+reject as one bucket, which is the right shape for a reject census and the wrong
+one for diagnosis: an empty secret pool, a sender signing with the wrong key and
+a clock-skewed timestamp are three unrelated problems with three different
+owners. `hookaido_ingress_auth_rejected_total{route,reason}` separates them and
+names the route. The two reconcile —
+`sum(hookaido_ingress_auth_rejected_total)` equals the `auth` bucket — so
+existing rules on the coarse family keep their meaning.
+
 ## Dashboard Compatibility Notes
 
 When dashboards span mixed Hookaido versions (for example `v1.2.x` and `v1.3.x`), treat missing metrics as "not emitted" rather than zero:
 
-- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.5.0"} == 1` (or `hookaido_build_info` version labels).
+- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.6.0"} == 1` (or `hookaido_build_info` version labels).
 - In PromQL, prefer compatibility-safe expressions (for example `metric OR on() vector(0)`) where appropriate.
 - Document minimum supported Hookaido version per dashboard bundle to avoid false "all good" signals from absent series.
 

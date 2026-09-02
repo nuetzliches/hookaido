@@ -181,6 +181,83 @@ func (p *Pool) ListMetadata() []VersionMetadata {
 	return out
 }
 
+// PoolState is a point-in-time census of a pool's versions.
+//
+// It exists because "how many versions does this pool hold" is not the question
+// an operator needs answered. Validity is a function of the wall clock, so a
+// pool holding three versions can still reject every request, and Size() cannot
+// tell that apart from the middle of a healthy rotation. Everything that
+// reports on a pool from the outside -- the Prometheus gauges, the
+// /healthz?details=1 rollup, the startup and sweeper warnings -- reads this,
+// so all three agree by construction.
+type PoolState struct {
+	Name    string
+	Runtime bool
+
+	// Total is every version held, whatever its window. Valid + Pending +
+	// Expired equals it.
+	Total   int
+	Valid   int
+	Pending int
+	Expired int
+
+	// NextExpiry is the earliest ValidUntil among the versions valid at the
+	// census time. Zero when no valid version expires -- either because the
+	// pool has none left, or because every valid one is unbounded.
+	NextExpiry time.Time
+
+	// Exhaustion is when the pool stops having any valid version: the latest
+	// ValidUntil among the versions valid at the census time. Zero when at
+	// least one valid version is unbounded (it never runs dry) or when there is
+	// no valid version left (it already has).
+	//
+	// This is the one to alert on. NextExpiry moves on every handover of a
+	// healthy overlapping rotation, so a warning threshold on it is noise;
+	// Exhaustion moves only when the last credential is about to lapse.
+	Exhaustion time.Time
+
+	// Unbounded reports that at least one version valid at the census time has
+	// no ValidUntil, which is what distinguishes "never runs dry" from "already
+	// dry" in a zero Exhaustion.
+	Unbounded bool
+}
+
+// StateAt censuses the pool as of t. Safe for concurrent callers.
+func (p *Pool) StateAt(t time.Time) PoolState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	st := PoolState{Name: p.name, Runtime: p.runtime, Total: len(p.versions)}
+	for _, v := range p.versions {
+		switch {
+		case v.IsValidAt(t):
+			st.Valid++
+			if v.ValidUntil.IsZero() {
+				st.Unbounded = true
+				continue
+			}
+			if st.NextExpiry.IsZero() || v.ValidUntil.Before(st.NextExpiry) {
+				st.NextExpiry = v.ValidUntil
+			}
+			if v.ValidUntil.After(st.Exhaustion) {
+				st.Exhaustion = v.ValidUntil
+			}
+		case !v.ValidUntil.IsZero() && !v.ValidUntil.After(t):
+			st.Expired++
+		default:
+			// Not valid yet: ValidFrom is still ahead of t. (A zero ValidFrom
+			// cannot reach here -- validateVersion rejects it on the way in.)
+			st.Pending++
+		}
+	}
+	if st.Unbounded {
+		// A bounded version's ValidUntil is not the pool's cliff when an
+		// unbounded one outlives it.
+		st.Exhaustion = time.Time{}
+	}
+	return st
+}
+
 func (p *Pool) pruneExpiredLocked(now time.Time) []string {
 	var removed []string
 	kept := p.versions[:0]

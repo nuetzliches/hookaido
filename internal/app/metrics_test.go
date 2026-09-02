@@ -26,7 +26,7 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.5.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.6.0"} 1`,
 		"hookaido_tracing_enabled 0",
 		"hookaido_tracing_init_failures_total 0",
 		"hookaido_tracing_export_errors_total 0",
@@ -87,7 +87,7 @@ func TestMetricsHandler_WithDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.5.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.6.0"} 1`,
 		"hookaido_tracing_enabled 1",
 		"hookaido_tracing_init_failures_total 1",
 		"hookaido_tracing_export_errors_total 2",

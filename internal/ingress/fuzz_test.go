@@ -1,6 +1,7 @@
 package ingress
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -67,8 +68,14 @@ func FuzzHMACAuthVerify(f *testing.F) {
 		req.Header.Set(auth.SignatureHeader, signature)
 
 		_, err := auth.Verify(req, requestPath, body)
-		if err != nil && err != ErrUnauthorized {
+		// Every rejection wraps ErrUnauthorized, so the classified causes stay
+		// inside the contract this asserts: Verify either accepts or refuses,
+		// and never returns an error of some other kind.
+		if err != nil && !errors.Is(err, ErrUnauthorized) {
 			t.Fatalf("unexpected verify error: %v", err)
+		}
+		if err != nil && AuthRejectReason(err) == AuthRejectUnspecified {
+			t.Fatalf("verify refusal carried no classified cause: %v", err)
 		}
 	})
 }

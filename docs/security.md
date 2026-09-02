@@ -238,6 +238,30 @@ DELETE /admin/secrets/cituro/sec_<old>  # after cut-over
 - **Overlap windows:** use `not_before`/`not_after` on the POST body to describe the rotation overlap. `Set.ValidAt` already filters by time, so both secrets can be live for the cut-over window.
 - **Expired-version GC:** a background sweeper runs every 5 minutes (plus once at startup) and removes versions whose `not_after` is in the past, both from the in-memory pool and from the persisted `runtime_secrets` table. Without it, short overlap windows would cause `GET /admin/secrets/<name>` and the DB to grow unboundedly since the per-`POST` opportunistic prune only fires when the pool is at `max_versions`. Each sweep emits a `secret_gc_pruned` log line per affected pool and increments `hookaido_runtime_secret_gc_pruned_total{pool="<name>"}`. The interval is not user-configurable in v1.
 
+#### A pool with no valid version
+
+A pool that holds no version valid *right now* is not a degraded state — every
+route whose `secret_ref` names it answers `401` to every sender, and the process
+otherwise looks healthy. This happens when a deploy lands on a fresh volume
+before the issuer's next push, or when the last version's `not_after` passes
+without a replacement.
+
+Four surfaces report it, so the failure cannot only be visible in the sender's
+delivery log:
+
+| Surface | Signal |
+| --- | --- |
+| Metrics | `hookaido_runtime_secret_pool_versions{pool,state="valid"} == 0`, with `hookaido_runtime_secret_pool_exhaustion_seconds{pool}` counting down to it |
+| Health | `GET /healthz?details=1` → `diagnostics.runtime_secrets.pools_without_valid_version` (plus per-pool counts and deadlines) |
+| Runtime log | `runtime_secret_pool_without_valid_version` (WARN) on the sweep that observes the transition, `runtime_secret_pool_valid_version_restored` (INFO) on recovery; `route_secret_ref_without_valid_version` (WARN) at startup and on every reload, naming the affected route |
+| Request path | `hookaido_ingress_auth_rejected_total{route,reason="no_valid_secret"}` — separated from `signature_mismatch` and `timestamp_out_of_window`, which are the sender's problem rather than yours |
+
+The pool gauges cover static `secret` blocks too: a static pool whose single
+version has lapsed rejects requests exactly the same way.
+
+Alert on `exhaustion_seconds`, not on `next_expiry_seconds` — the latter drops to
+near zero on every handover of a healthy overlapping rotation.
+
 ## API Access Control
 
 ### Pull API

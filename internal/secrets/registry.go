@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 var (
@@ -68,6 +69,28 @@ func (r *Registry) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// StatesAt censuses every registered pool as of t, ordered by pool name.
+//
+// One snapshot per reporting pass, taken through the registry rather than by
+// the caller walking Names() and Pool() itself: that walk can observe a pool
+// registered or dropped halfway through, and a report that lists a pool it then
+// cannot describe is worse than one taken a moment earlier.
+func (r *Registry) StatesAt(t time.Time) []PoolState {
+	r.mu.RLock()
+	pools := make([]*Pool, 0, len(r.pools))
+	for _, p := range r.pools {
+		pools = append(pools, p)
+	}
+	r.mu.RUnlock()
+
+	out := make([]PoolState, 0, len(pools))
+	for _, p := range pools {
+		out = append(out, p.StateAt(t))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Unregister removes a pool. Returns false if the name was not present.

@@ -4,18 +4,20 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
 
 ## P1 - Medium Priority (awesome-go readiness, target: July 2026)
 
-- [ ] **Test coverage ≥80%** — 77.3% as of v2.14.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
+- [ ] **Test coverage ≥80%** — 77.5% as of v2.15.0, measured with `make cover` (needs `HOOKAIDO_TEST_POSTGRES_DSN`; see `docker-compose.test.yml`). Generated protobuf code is excluded — 292 never-hand-tested statements say nothing about the code we write.
 
-  Up a tenth of a point against v2.13.0's 77.2%, and the per-package movement says more than the total does: #289 added about 130 production statements and 7 uncovered ones, so the new code landed at roughly 95% covered. That is what holding the line looks like when a release is small — it neither moves the number nor loses ground to it.
+  Up two tenths against v2.14.0's 77.3%, and it is the first release in a while where the largest package moved on its own: `internal/app` went 65.4% → 67.2% while *growing* by 180 statements, and its uncovered count went **down** by four (1207 → 1203). That is the shape to aim for — roughly 98% covered on the new code, and enough of it to drag a 3,600-statement package up nearly two points. Every other package in the table below is unchanged to the statement, which is honest: v2.15.0 touched `internal/app`, `internal/ingress` and `internal/secrets` and nothing else.
 
-  `internal/queue` is the one package that improved in both directions (84.1% → 84.6%, four *fewer* uncovered statements across twenty more total): the backlog breakdown and the top-N reduction are plain functions over their arguments, and the cross-backend contract test exercises them on all three stores at once. `internal/app` moved 64.8% → 65.4% only because the metric folding was extracted into `queueRouteDepthSeries` rather than written inline in the scrape handler — the new `run.go` wiring (`adoptRunning`, the startup `setKnownQueues`) sits in the same untested startup path as everything else there.
+  What made `internal/app` cheap to cover this time was where the logic was put. `secrets.Pool.StateAt` and `Registry.StatesAt` are plain functions over their arguments; `runtimeSecretDiagnostics` and `secretPoolSecondsUntil` take a census and a clock; `secretSweeper` was extracted out of a closure into a type with an injectable `now`, which is the only reason its transition detection is testable at all. That is the same trick v2.12.0 demonstrated with `resolveClientIP`/`pollConfig` and v2.13.0 with `identifyPullToken` — it is the approach that works, and it worked again. `internal/ingress` (92.8%) and `internal/secrets` (83.4%) are now among the best-covered packages in the tree.
+
+  The counter-example is worth recording, because it is the one part of v2.15.0 that added uncovered statements: the `run.go` wiring. The bug the release fixed *was* a wiring bug — `ObserveReject` received the route and `run.go` dropped it with a `_` — and no unit test on the observer can see that, so the regression test spawns the real binary and scrapes `/metrics`. A subprocess contributes nothing to the coverage profile, so `run.go` stays uncovered *in the number* while being covered in fact. Do not chase that percentage with a test that only re-asserts the closure; the e2e test is the right one.
 
   Ranked by uncovered statements, which is what actually moves the total — a package at 64% with 1,200 uncovered statements matters far more than one at 64% with 40:
 
   | Package | Uncovered | Total | % |
   | --- | ---: | ---: | ---: |
   | `internal/config` | 1248 | 5900 | 78.8% |
-  | `internal/app` | 1207 | 3491 | 65.4% |
+  | `internal/app` | 1203 | 3671 | 67.2% |
   | `internal/mcp` | 949 | 4153 | 77.1% |
   | `internal/admin` | 543 | 2633 | 79.4% |
   | `modules/sqlite` | 433 | 1708 | 74.6% |
@@ -23,7 +25,7 @@ Prioritized work items for Hookaido. Items are grouped by priority tier and roug
   | `internal/queue` | 209 | 1357 | 84.6% |
   | `internal/pullapi` | 183 | 754 | 75.7% |
 
-  Reaching 80% needs roughly **646 more covered statements**. `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is still the largest percentage gap and still the hardest: what remains uncovered there is concentrated in `run.go` startup paths that need a real server bring-up, which is where every coverage pass so far has deliberately stopped. The approach that works is still the one v2.12.0 demonstrated — extract the logic into a function that takes its inputs as arguments, as `resolveClientIP` and `pollConfig` do, rather than trying to test `run()`; v2.13.0's `identifyPullToken`, `adminPullConsumers` and `compileConsumerGroups` were written that way for the same reason.
+  Reaching 80% needs roughly **595 more covered statements** (down from 646 at v2.14.0). `internal/config` and `internal/mcp` are the tractable bulk (parser and handler edge cases). `internal/app` is still the largest percentage gap and still the hardest: what remains uncovered there is concentrated in `run.go` startup paths that need a real server bring-up, which is where every coverage pass so far has deliberately stopped. The approach that works is the extraction one described above — write the logic as a function that takes its inputs as arguments, rather than trying to test `run()`.
 
 - [ ] **Publish a reachable coverage report** — awesome-go requires a Codecov or Coveralls link that resolves. CI computes a profile and uploads it, but only as a workflow artifact (`ci.yml`, `actions/upload-artifact` name `coverage`): that expires, needs a signed-in session, and is not a report — so there is no durable link to submit. Needs a coverage service wired into CI plus a README badge. Two things to fix while doing it: the `test` job does not set `HOOKAIDO_TEST_POSTGRES_DSN`, so the uploaded profile understates coverage the same way a local `make test-pg`-less run does, and it excludes nothing, so it counts generated protobuf. This is the one remaining awesome-go blocker fully in our control besides the 80% number itself.
 - [ ] **pkg.go.dev doc coverage** — Ensure all public types and functions have Go-style doc comments.

@@ -18,7 +18,7 @@ import (
 	"github.com/nuetzliches/hookaido/v2/internal/secrets"
 )
 
-const metricsSchemaVersion = "1.6.0"
+const metricsSchemaVersion = "1.7.0"
 
 type runtimeMetrics struct {
 	tracingEnabled                             atomic.Int64
@@ -44,7 +44,7 @@ type runtimeMetrics struct {
 	ingressAdaptiveMu               sync.Mutex
 	ingressAdaptiveByReason         map[string]int64
 	ingressRejectMu                 sync.Mutex
-	ingressRejectedByReasonAndState map[string]map[string]int64
+	ingressRejectedByRouteAndReason map[ingressRejectKey]int64
 
 	// Delivery counters
 	deliveryAttemptTotal atomic.Int64
@@ -147,7 +147,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		pullLeases:                      make(map[string]pullLease),
 		now:                             time.Now,
 		ingressAdaptiveByReason:         make(map[string]int64),
-		ingressRejectedByReasonAndState: make(map[string]map[string]int64),
+		ingressRejectedByRouteAndReason: make(map[ingressRejectKey]int64),
 		deliveryDeadByReason:            make(map[string]int64),
 		secretGCPrunedByPool:            make(map[string]int64),
 	}
@@ -192,26 +192,36 @@ func (m *runtimeMetrics) observeIngressResult(accepted bool, enqueued int) {
 	}
 }
 
-func (m *runtimeMetrics) observeIngressReject(statusCode int, reason string) {
+// ingressRejectKey identifies one ingress rejection in the metric map.
+//
+// The route is part of the identity so a reject can be attributed. It is empty
+// for a reject taken before any route resolved -- an unmatched path, or a method
+// not allowed on one -- and Prometheus treats an empty label value as absent, so
+// those series keep the exact identity they had before the label existed.
+type ingressRejectKey struct {
+	route  string
+	reason string
+	status string
+}
+
+func (m *runtimeMetrics) observeIngressReject(route string, statusCode int, reason string) {
 	if m == nil {
 		return
 	}
 
-	normalizedReason := normalizeIngressRejectReason(reason)
-	normalizedStatus := normalizeIngressRejectStatus(statusCode)
+	key := ingressRejectKey{
+		route:  strings.TrimSpace(route),
+		reason: normalizeIngressRejectReason(reason),
+		status: normalizeIngressRejectStatus(statusCode),
+	}
 
 	m.ingressRejectedTotal.Add(1)
 
 	m.ingressRejectMu.Lock()
-	if m.ingressRejectedByReasonAndState == nil {
-		m.ingressRejectedByReasonAndState = make(map[string]map[string]int64)
+	if m.ingressRejectedByRouteAndReason == nil {
+		m.ingressRejectedByRouteAndReason = make(map[ingressRejectKey]int64)
 	}
-	byStatus := m.ingressRejectedByReasonAndState[normalizedReason]
-	if byStatus == nil {
-		byStatus = make(map[string]int64)
-		m.ingressRejectedByReasonAndState[normalizedReason] = byStatus
-	}
-	byStatus[normalizedStatus]++
+	m.ingressRejectedByRouteAndReason[key]++
 	m.ingressRejectMu.Unlock()
 }
 
@@ -1130,24 +1140,40 @@ func newIngressRejectBreakdownSnapshot() map[string]map[string]int64 {
 	return out
 }
 
+// ingressRejectBreakdownSnapshot folds the reject counts across routes, into
+// the reason-by-status shape /healthz?details=1 has always reported.
+//
+// The route dimension deliberately stays out of the health payload: it belongs
+// in the Prometheus family, where a label costs a series, and not in a JSON
+// document an uptime checker polls on a short interval. Same call as for the
+// classified auth causes.
 func (m *runtimeMetrics) ingressRejectBreakdownSnapshot() map[string]map[string]int64 {
 	out := newIngressRejectBreakdownSnapshot()
 	if m == nil {
 		return out
 	}
-	m.ingressRejectMu.Lock()
-	defer m.ingressRejectMu.Unlock()
-	for reason, byStatus := range m.ingressRejectedByReasonAndState {
-		targetByStatus, ok := out[reason]
+	for key, count := range m.ingressRejectByRouteSnapshot() {
+		byStatus, ok := out[key.reason]
 		if !ok {
 			continue
 		}
-		for status, count := range byStatus {
-			if _, exists := targetByStatus[status]; !exists {
-				continue
-			}
-			targetByStatus[status] = count
+		if _, exists := byStatus[key.status]; !exists {
+			continue
 		}
+		byStatus[key.status] += count
+	}
+	return out
+}
+
+func (m *runtimeMetrics) ingressRejectByRouteSnapshot() map[ingressRejectKey]int64 {
+	if m == nil {
+		return nil
+	}
+	m.ingressRejectMu.Lock()
+	defer m.ingressRejectMu.Unlock()
+	out := make(map[ingressRejectKey]int64, len(m.ingressRejectedByRouteAndReason))
+	for k, v := range m.ingressRejectedByRouteAndReason {
+		out[k] = v
 	}
 	return out
 }
@@ -1459,7 +1485,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		for _, reason := range deliveryDeadReasonOrder {
 			deliveryDeadByReason[reason] = 0
 		}
-		ingressRejectBreakdown := newIngressRejectBreakdownSnapshot()
+		var ingressRejectByRoute map[ingressRejectKey]int64
 		var pullSnapshot map[pullQueueKey]pullRouteSnapshot
 		var secretGCPrunedByPool map[string]int64
 		var secretPools []secrets.PoolState
@@ -1482,7 +1508,7 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 			ingressAdaptiveTotal = rm.ingressAdaptiveTotal.Load()
 			ingressAdaptiveByReason = rm.ingressAdaptiveSnapshot()
 			deliveryDeadByReason = rm.deliveryDeadReasonSnapshot()
-			ingressRejectBreakdown = rm.ingressRejectBreakdownSnapshot()
+			ingressRejectByRoute = rm.ingressRejectByRouteSnapshot()
 			pullSnapshot = rm.pullSnapshot()
 			secretGCPrunedByPool = rm.secretGCPrunedSnapshot()
 			secretPools = rm.secretPoolStateSnapshot()
@@ -1560,19 +1586,55 @@ func newMetricsHandler(version string, start time.Time, rm *runtimeMetrics) http
 		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_rejected_total Total number of ingress requests rejected (auth, rate-limit, not-found, etc).\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_rejected_total counter\n")
 		_, _ = fmt.Fprintf(w, "hookaido_ingress_rejected_total %d\n", ingressRejected)
-		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_rejected_by_reason_total Total number of ingress requests rejected by normalized reason and status.\n")
+		// Every reject now carries the route it happened on, so a rate-limited
+		// or overloaded route can be named instead of inferred. It is a label on
+		// this family rather than a family of its own: each reject is counted
+		// under exactly one (route, reason, status) triple, so no aggregate is
+		// duplicated -- which is what made a route label wrong for the queue
+		// *gauges*, where labeled and unlabeled series would have shared a
+		// family and doubled every sum().
+		//
+		// The route is empty for a reject taken before any route resolved, and
+		// Prometheus does not distinguish an empty label value from an absent
+		// one -- so the zero-filled reason/status baseline below is the same
+		// series it was before the label existed, and existing rules keep
+		// selecting it. Only reason and status are zero-filled: routes come and
+		// go with the config, and pre-seeding every route against every reason
+		// would emit mostly-impossible combinations (`memory_pressure` on a
+		// non-memory backend, say) at routes x reasons x statuses.
+		_, _ = fmt.Fprintf(w, "# HELP hookaido_ingress_rejected_by_reason_total Total number of ingress requests rejected by route, normalized reason and status. The route is empty when the reject happened before a route resolved.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE hookaido_ingress_rejected_by_reason_total counter\n")
+		rejectKeys := make([]ingressRejectKey, 0, len(ingressRejectByRoute)+len(ingressRejectReasonOrder)*len(ingressRejectStatusOrder))
 		for _, reason := range ingressRejectReasonOrder {
-			byStatus := ingressRejectBreakdown[reason]
 			for _, status := range ingressRejectStatusOrder {
-				_, _ = fmt.Fprintf(
-					w,
-					"hookaido_ingress_rejected_by_reason_total{reason=%q,status=%q} %d\n",
-					reason,
-					status,
-					byStatus[status],
-				)
+				rejectKeys = append(rejectKeys, ingressRejectKey{reason: reason, status: status})
 			}
+		}
+		for key := range ingressRejectByRoute {
+			if key.route == "" {
+				// Already covered by the baseline above, which carries its count.
+				continue
+			}
+			rejectKeys = append(rejectKeys, key)
+		}
+		sort.Slice(rejectKeys, func(i, j int) bool {
+			if rejectKeys[i].route != rejectKeys[j].route {
+				return rejectKeys[i].route < rejectKeys[j].route
+			}
+			if rejectKeys[i].reason != rejectKeys[j].reason {
+				return rejectKeys[i].reason < rejectKeys[j].reason
+			}
+			return rejectKeys[i].status < rejectKeys[j].status
+		})
+		for _, key := range rejectKeys {
+			_, _ = fmt.Fprintf(
+				w,
+				"hookaido_ingress_rejected_by_reason_total{route=%q,reason=%q,status=%q} %d\n",
+				key.route,
+				key.reason,
+				key.status,
+				ingressRejectByRoute[key],
+			)
 		}
 		// Auth rejects, classified and attributed. `hookaido_ingress_rejected_
 		// by_reason_total{reason="auth"}` counts the same requests; this family

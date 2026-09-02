@@ -181,11 +181,32 @@ polls `POST {endpoint}/dequeue` holds none between calls and is not counted by
 | --------------------------------- | ------- | ------------------------------------------------- |
 | `hookaido_ingress_accepted_total` | counter | Ingress requests accepted and enqueued            |
 | `hookaido_ingress_rejected_total` | counter | Ingress requests rejected (auth, rate-limit, etc) |
-| `hookaido_ingress_rejected_by_reason_total{reason,status}` | counter | Ingress rejects by normalized reason + status (includes `memory_pressure` with status `503`) |
+| `hookaido_ingress_rejected_by_reason_total{route,reason,status}` | counter | Ingress rejects by route, normalized reason + status (includes `memory_pressure` with status `503`). `route` is empty when the reject happened before a route resolved |
 | `hookaido_ingress_auth_rejected_total{route,reason}` | counter | Auth rejects by route and classified cause (`no_valid_secret`, `signature_mismatch`, `timestamp_out_of_window`, `replay`, `malformed`, `credentials`, `forward_denied`, `unspecified`, `other`) |
 | `hookaido_ingress_enqueued_total` | counter | Items enqueued via ingress (>accepted if fanout)  |
 | `hookaido_ingress_adaptive_backpressure_total{reason}` | counter | Ingress requests rejected by adaptive backpressure (by trigger reason) |
 | `hookaido_ingress_adaptive_backpressure_applied_total` | counter | Total ingress requests rejected by adaptive backpressure |
+
+Every reject carries the route it happened on, so a throttled or overloaded
+route can be named rather than inferred. Two cases have no route to name and
+report `route=""`: a request to an unmatched path (`404`), and one whose path
+matches but whose method does not (`405`) — several routes can match one path
+with different methods, so there is no single route to attribute it to.
+Prometheus does not distinguish an empty label value from an absent one, so
+those series are the same series they were before the label existed.
+
+`route` is a label on this family rather than a family of its own, unlike the
+`hookaido_queue_route_*` gauges: each reject is counted under exactly one
+`(route, reason, status)` triple, so no aggregate is duplicated and
+`sum by (reason) (...)` still reproduces the instance-wide count. Only `reason`
+and `status` are zero-filled — routes come and go with the config, and
+pre-seeding every route against every reason would emit series for combinations
+that cannot occur (`memory_pressure` on a non-memory backend, say).
+
+`hookaido_ingress_adaptive_backpressure_total{reason}` stays route-less by
+design: its `reason` is the *trigger* (queue pressure, ready lag), which is an
+instance-wide condition. Which routes got shed is already in the reject family
+under `reason="adaptive_backpressure"`.
 
 **Delivery metrics:**
 
@@ -355,6 +376,30 @@ sum by (route) (
 ) > 0
 ```
 
+Which routes are being throttled or shed, ranked:
+
+```promql
+topk(5,
+  sum by (route, reason) (
+    rate(hookaido_ingress_rejected_by_reason_total{reason=~"rate_limit|queue_full|adaptive_backpressure|memory_pressure"}[5m])
+  )
+)
+```
+
+One route rejecting while the instance looks fine — the multi-route blind spot,
+for rejects rather than for backlog:
+
+```promql
+sum by (route) (rate(hookaido_ingress_rejected_by_reason_total[5m])) > 0
+```
+
+Senders pointed at a path that no longer exists (`route=""` is the unattributed
+bucket, so this is the honest way to ask):
+
+```promql
+increase(hookaido_ingress_rejected_by_reason_total{route="",reason="not_found"}[1h]) > 0
+```
+
 Alert example (backend-aware store error burst):
 
 ```promql
@@ -514,7 +559,7 @@ Key principle:
 
 Use these series together:
 - `hookaido_ingress_adaptive_backpressure_total{reason}`
-- `hookaido_ingress_rejected_by_reason_total{reason,status}`
+- `hookaido_ingress_rejected_by_reason_total{route,reason,status}`
 - ingress latency p95/p99 from HTTP telemetry
 
 `hookaido_ingress_rejected_by_reason_total{reason="auth"}` counts every auth
@@ -530,7 +575,8 @@ existing rules on the coarse family keep their meaning.
 
 When dashboards span mixed Hookaido versions (for example `v1.2.x` and `v1.3.x`), treat missing metrics as "not emitted" rather than zero:
 
-- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.6.0"} == 1` (or `hookaido_build_info` version labels).
+- Gate rules and panels by `hookaido_metrics_schema_info{schema="1.7.0"} == 1` (or `hookaido_build_info` version labels).
+- Since `1.7.0`, `hookaido_ingress_rejected_by_reason_total` carries a `route` label. Matchers are unaffected (`{reason="auth"}` still selects every route) and `sum by (reason) (...)` is unchanged, but a selector that previously returned exactly one series per reason/status now returns one per route as well. Panels that plotted it raw gain a line per route; aggregate them with `sum by (reason)` to restore the old shape.
 - In PromQL, prefer compatibility-safe expressions (for example `metric OR on() vector(0)`) where appropriate.
 - Document minimum supported Hookaido version per dashboard bundle to avoid false "all good" signals from absent series.
 

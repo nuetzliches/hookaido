@@ -26,7 +26,7 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.6.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.7.0"} 1`,
 		"hookaido_tracing_enabled 0",
 		"hookaido_tracing_init_failures_total 0",
 		"hookaido_tracing_export_errors_total 0",
@@ -43,8 +43,8 @@ func TestMetricsHandler_DefaultDiagnostics(t *testing.T) {
 		"hookaido_publish_scoped_rejected_total 0",
 		"hookaido_ingress_accepted_total 0",
 		"hookaido_ingress_rejected_total 0",
-		`hookaido_ingress_rejected_by_reason_total{reason="memory_pressure",status="503"} 0`,
-		`hookaido_ingress_rejected_by_reason_total{reason="queue_full",status="503"} 0`,
+		`hookaido_ingress_rejected_by_reason_total{route="",reason="memory_pressure",status="503"} 0`,
+		`hookaido_ingress_rejected_by_reason_total{route="",reason="queue_full",status="503"} 0`,
 		"hookaido_ingress_enqueued_total 0",
 		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 0`,
 		"hookaido_ingress_adaptive_backpressure_applied_total 0",
@@ -87,7 +87,7 @@ func TestMetricsHandler_WithDiagnostics(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_metrics_schema_info{schema="1.6.0"} 1`,
+		`hookaido_metrics_schema_info{schema="1.7.0"} 1`,
 		"hookaido_tracing_enabled 1",
 		"hookaido_tracing_init_failures_total 1",
 		"hookaido_tracing_export_errors_total 2",
@@ -144,8 +144,8 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 	m := newRuntimeMetrics()
 	m.observeIngressResult(true, 2) // accepted, fanout to 2 targets
 	m.observeIngressResult(true, 1) // accepted, single target
-	m.observeIngressReject(http.StatusTooManyRequests, "rate_limit")
-	m.observeIngressReject(http.StatusUnauthorized, "auth")
+	m.observeIngressReject("", http.StatusTooManyRequests, "rate_limit")
+	m.observeIngressReject("", http.StatusUnauthorized, "auth")
 	m.observeIngressAdaptiveBackpressure("queued_pressure")
 	m.observeIngressAdaptiveBackpressure("ready_lag")
 	m.observeIngressAdaptiveBackpressure("")
@@ -158,8 +158,8 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 	for _, want := range []string{
 		"hookaido_ingress_accepted_total 2",
 		"hookaido_ingress_rejected_total 2",
-		`hookaido_ingress_rejected_by_reason_total{reason="rate_limit",status="429"} 1`,
-		`hookaido_ingress_rejected_by_reason_total{reason="auth",status="401"} 1`,
+		`hookaido_ingress_rejected_by_reason_total{route="",reason="rate_limit",status="429"} 1`,
+		`hookaido_ingress_rejected_by_reason_total{route="",reason="auth",status="401"} 1`,
 		"hookaido_ingress_enqueued_total 3",
 		`hookaido_ingress_adaptive_backpressure_total{reason="queued_pressure"} 1`,
 		`hookaido_ingress_adaptive_backpressure_total{reason="ready_lag"} 1`,
@@ -174,9 +174,9 @@ func TestMetricsHandler_IngressCounters(t *testing.T) {
 
 func TestMetricsHandler_IngressRejectBreakdownNormalization(t *testing.T) {
 	m := newRuntimeMetrics()
-	m.observeIngressReject(http.StatusServiceUnavailable, "memory_pressure")
-	m.observeIngressReject(http.StatusServiceUnavailable, "queue_full")
-	m.observeIngressReject(http.StatusTeapot, "unexpected_reason")
+	m.observeIngressReject("", http.StatusServiceUnavailable, "memory_pressure")
+	m.observeIngressReject("", http.StatusServiceUnavailable, "queue_full")
+	m.observeIngressReject("", http.StatusTeapot, "unexpected_reason")
 
 	h := newMetricsHandler("dev", time.Unix(100, 0).UTC(), m)
 	rr := httptest.NewRecorder()
@@ -184,9 +184,9 @@ func TestMetricsHandler_IngressRejectBreakdownNormalization(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, want := range []string{
-		`hookaido_ingress_rejected_by_reason_total{reason="memory_pressure",status="503"} 1`,
-		`hookaido_ingress_rejected_by_reason_total{reason="queue_full",status="503"} 1`,
-		`hookaido_ingress_rejected_by_reason_total{reason="other",status="other"} 1`,
+		`hookaido_ingress_rejected_by_reason_total{route="",reason="memory_pressure",status="503"} 1`,
+		`hookaido_ingress_rejected_by_reason_total{route="",reason="queue_full",status="503"} 1`,
+		`hookaido_ingress_rejected_by_reason_total{route="",reason="other",status="other"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics output:\n%s", want, body)
@@ -761,7 +761,7 @@ func TestHealthDiagnostics_IngressAndDelivery(t *testing.T) {
 	m := newRuntimeMetrics()
 	m.observeIngressResult(true, 3)
 	m.observeIngressAdaptiveBackpressure("ready_lag")
-	m.observeIngressReject(http.StatusServiceUnavailable, "memory_pressure")
+	m.observeIngressReject("", http.StatusServiceUnavailable, "memory_pressure")
 	m.observeDeliveryAttempt(queue.AttemptOutcomeAcked)
 	m.observeDeliveryAttempt(queue.AttemptOutcomeDead)
 	m.observeDeliveryDeadReason("policy_denied")

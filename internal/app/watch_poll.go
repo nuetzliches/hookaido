@@ -85,6 +85,22 @@ func readSettledConfigHash(ctx context.Context, path string, logger *slog.Logger
 		logger.Warn("poll_config_failed", slog.Any("err", err))
 		return "", false
 	}
+	// A plain overwrite truncates before writing, so a read can land on a
+	// zero-byte file that nobody meant as a config. The settle re-read makes
+	// that unlikely rather than impossible: with enough rewrites, both reads
+	// eventually land in a truncation window, and an empty file that "held
+	// still" was then reported as a settled change. The parser rejects it as
+	// `empty config`, so the only trace was a spurious config_reload_failed
+	// against a config the operator never wrote.
+	//
+	// Waiting for content is the honest reading of an empty file here: it is an
+	// artifact of someone else's write, and a genuinely emptied Hookaidofile
+	// could not be loaded either -- the running config stays in place in both
+	// cases, so nothing actionable is lost by staying quiet until there is
+	// something to parse.
+	if len(first) == 0 {
+		return "", false
+	}
 
 	timer := time.NewTimer(pollSettleDelay)
 	defer timer.Stop()

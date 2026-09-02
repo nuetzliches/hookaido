@@ -246,11 +246,72 @@ func TestRun_WatchIntervalBelowMinimumIsRejected(t *testing.T) {
 	}
 }
 
+// An empty read is an artifact of someone else's truncate, never a config. The
+// settle re-read alone could not establish that: two reads a settle window
+// apart can both land in a truncation window, which is how the hammering case
+// below came to fail roughly one run in twenty under load. This pins the part
+// that makes that case an absolute rather than a probability -- the file is
+// held empty across several settle windows, which the poller must sit out
+// entirely, and the real content that follows must still be reported.
+func TestPollConfig_IgnoresAnEmptyRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Hookaidofile")
+	initial := []byte("# v1\nroute \"/x\" {}\n")
+	if err := os.WriteFile(path, initial, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	seen := make(chan string, 64)
+	go pollConfig(ctx, path, 20*time.Millisecond, initial, discardLogger(), func() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			seen <- "read-error"
+			return
+		}
+		seen <- string(data)
+	})
+
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	// Long enough that the poller has taken several settled reads of the empty
+	// file, so a report here is the guard failing rather than a lucky timing.
+	time.Sleep(3 * pollSettleDelay)
+	select {
+	case got := <-seen:
+		t.Fatalf("an empty config file was reported as a change: %q", got)
+	default:
+	}
+
+	want := "# v2\nroute \"/y\" {}\n"
+	if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case got := <-seen:
+			if got == want {
+				return
+			}
+			t.Fatalf("reported %q, want the content written after the empty window", got)
+		case <-deadline:
+			t.Fatal("the config written after the empty window was never reported")
+		}
+	}
+}
+
 // A plain overwrite truncates and then writes, so the file is briefly empty.
 // Without the settle re-read that showed up as a change -- and for a config
 // being rewritten with content that differs, as two: a rejected reload of the
 // half-written file followed by the real one. Hammering identical rewrites is
-// what reliably catches a regression of that.
+// what reliably catches a regression of that, and the empty-read guard covered
+// by TestPollConfig_IgnoresAnEmptyRead is what makes this assertion hold every
+// time rather than most of the time.
 func TestPollConfig_RepeatedIdenticalRewritesAreNotChanges(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "Hookaidofile")

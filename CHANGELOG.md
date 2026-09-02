@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--watch-interval` no longer reports a truncated config file as a config change.** A plain overwrite truncates before writing, so a poll can read a zero-byte file that nobody meant as a config. The settle re-read made that unlikely rather than impossible: two reads a settle window apart can both land in a truncation window, at which point an empty file has demonstrably "held still" and was reported as settled content. The reload that followed was rejected by the parser as `empty config`, so the visible effect was a `config_reload_failed` at ERROR against a config the operator never wrote — misleading precisely when someone is looking at the log to find out why a deploy did not take. An empty read is now sat out until there is content to parse; the running config stays in place either way, including for a genuinely emptied Hookaidofile, which could not have been loaded in the first place. The same window is what made `TestPollConfig_RepeatedIdenticalRewritesAreNotChanges` fail about one run in twenty under load.
+
 ## [2.14.0] - 2026-09-01
 
 A release about one blind spot in the metrics. Every queue gauge was

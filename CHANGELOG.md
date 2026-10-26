@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Security
+
+- Bump the Go toolchain `1.26.6` → `1.26.10` and `golang.org/x/net` `v0.59.0` → `v0.61.0` to remediate twelve reachable vulnerabilities reported by `govulncheck` against v2.15.0: standard-library fixes in `net/http`, `net/textproto`, `crypto/tls`, `crypto/x509` and `html/template` (GO-2026-6599, -6600, -6603, -6605, -6607, -6608, -6610, -6611, -6612, -6613, -6809) plus the HTTP/2 fixes in `golang.org/x/net` (GO-2026-6617 and the shared `net/http` advisories). The traces land on the listener path (`app.serveOnListener`) and outbound delivery. `govulncheck ./...` now reports no findings.
+
+### Changed
+
+- Routine dependency bumps since 2.15.0 (Go modules, GitHub Actions, and the `golang` / `alpine` container base-image digests, via Dependabot).
+
 ## [2.15.0] - 2026-09-02
 
 A release about the rejects nobody could attribute. Hookaido answered `401` —

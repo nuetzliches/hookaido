@@ -429,6 +429,18 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 
 - Postgres `Enqueue` no longer rejects envelopes with nil `Payload`. The `payload BYTEA NOT NULL` schema constraint previously made the cross-package `queue.Store` contract tests fail for the Postgres backend while memory/sqlite tolerated it; nil is now coerced to `[]byte{}` to match contract behavior. Surfaced during the coverage uplift that lifted the project total from 70.6% to 75.2% (modules/postgres 14.4% → 80.8%, modules/otel 18.4% → 93.4%, modules/mcp 24.5% → 96.1%, internal/tools/release 32.4% → 84.3%, internal/release/sbom 67.6% → 97.2%, internal/app 54.9% → 61.1%). New `make test-pg` target runs the suite serialized (`-p 1`) so cross-package Postgres integration tests don't race on the shared DSN.
 
+## [2.7.3] - 2026-04-21
+
+### Fixed
+
+- Cituro HMAC provider parses `t=` in `X-CITURO-SIGNATURE` as Unix milliseconds instead of seconds ([#157](https://github.com/nuetzliches/hookaido/pull/157)). Previously every Cituro webhook was rejected as outside the timestamp tolerance (persistent `401`). Stripe keeps second precision.
+
+## [2.7.2] - 2026-04-21
+
+### Added
+
+- Diagnostic `WARN` logs on every Stripe/Cituro HMAC rejection path (`header_missing`, `parse_incomplete`, `ts_parse_error`, `ts_out_of_tolerance`, `sig_hex_decode_error`, `no_secret_matched`) with non-sensitive fingerprints only — no full signatures or secret material ([#156](https://github.com/nuetzliches/hookaido/pull/156)).
+
 ## [2.7.1] - 2026-04-21
 
 ### Fixed
@@ -454,7 +466,9 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 - Stripe-compatible HMAC verification: `auth hmac { provider stripe; secret env:SECRET }` verifies the `Stripe-Signature: t=<ts>,v1=<hex>` header format with the `<ts>.<body>` signed payload and a 5-minute timestamp tolerance. Multiple comma-separated `<tag>=<hex>` pairs in the header are accepted (covers Stripe's v0/v1 rotation).
 - Cituro HMAC verification: `auth hmac { provider cituro; secret env:SECRET }` reuses the Stripe scheme with header `X-CITURO-SIGNATURE` and signature tag `s` instead of `v1`. Matches the wire format documented in Cituro's API spec.
 
-## [2.4.0] - 2026-04-16
+## [2.5.3] - 2026-04-16
+
+Shipped as `v2.5.3` after release-workflow retries; no `v2.3.x`, `v2.4.x`, or other `v2.5.x` releases were published.
 
 ### Added
 
@@ -592,7 +606,9 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 
 - SQLite dequeue candidate helper now clamps batch size correctly inside the candidate collection path.
 
-## [1.3] - 2026-02-14
+## [1.3.0] - 2026-02-14
+
+Originally tagged as the non-SemVer `v1.3`; the tag was renamed to `v1.3.0` (same commit).
 
 ### Added
 
@@ -718,7 +734,8 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.14.0...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.15.0...HEAD
+[2.15.0]: https://github.com/nuetzliches/hookaido/compare/v2.14.0...v2.15.0
 [2.14.0]: https://github.com/nuetzliches/hookaido/compare/v2.13.0...v2.14.0
 [2.13.0]: https://github.com/nuetzliches/hookaido/compare/v2.12.0...v2.13.0
 [2.12.0]: https://github.com/nuetzliches/hookaido/compare/v2.11.0...v2.12.0
@@ -728,10 +745,12 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 [2.9.0]: https://github.com/nuetzliches/hookaido/compare/v2.8.1...v2.9.0
 [2.8.1]: https://github.com/nuetzliches/hookaido/compare/v2.8.0...v2.8.1
 [2.8.0]: https://github.com/nuetzliches/hookaido/compare/v2.7.3...v2.8.0
+[2.7.3]: https://github.com/nuetzliches/hookaido/compare/v2.7.2...v2.7.3
+[2.7.2]: https://github.com/nuetzliches/hookaido/compare/v2.7.1...v2.7.2
 [2.7.1]: https://github.com/nuetzliches/hookaido/compare/v2.7.0...v2.7.1
 [2.7.0]: https://github.com/nuetzliches/hookaido/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/nuetzliches/hookaido/compare/v2.5.3...v2.6.0
-[2.4.0]: https://github.com/nuetzliches/hookaido/compare/v2.2.2...v2.4.0
+[2.5.3]: https://github.com/nuetzliches/hookaido/compare/v2.2.2...v2.5.3
 [2.2.2]: https://github.com/nuetzliches/hookaido/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/nuetzliches/hookaido/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/nuetzliches/hookaido/compare/v2.1.0...v2.2.0
@@ -740,8 +759,8 @@ broken or already insecure; the compiler now says so instead of starting anyway.
 [2.0.0]: https://github.com/nuetzliches/hookaido/compare/v1.5.1...v2.0.0
 [1.5.1]: https://github.com/nuetzliches/hookaido/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/nuetzliches/hookaido/compare/v1.4.0...v1.5.0
-[1.4.0]: https://github.com/nuetzliches/hookaido/compare/v1.3...v1.4.0
-[1.3]: https://github.com/nuetzliches/hookaido/compare/v1.2.0...v1.3
+[1.4.0]: https://github.com/nuetzliches/hookaido/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/nuetzliches/hookaido/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nuetzliches/hookaido/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/nuetzliches/hookaido/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/nuetzliches/hookaido/compare/v1.0.2...v1.0.3

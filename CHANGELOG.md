@@ -7,6 +7,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.15.1] - 2026-10-27
+
+A security patch release. v2.15.0 was built against a Go toolchain and an
+HTTP/2 library with reachable vulnerabilities on the listener and delivery
+paths; this release rebuilds the same code on fixed versions. No behavior,
+DSL, API, or default changes — upgrading is a drop-in replacement.
+
 ### Security
 
 - Bump the Go toolchain `1.26.6` → `1.26.10` and `golang.org/x/net` `v0.59.0` → `v0.61.0` to remediate twelve reachable vulnerabilities reported by `govulncheck` against v2.15.0: standard-library fixes in `net/http`, `net/textproto`, `crypto/tls`, `crypto/x509` and `html/template` (GO-2026-6599, -6600, -6603, -6605, -6607, -6608, -6610, -6611, -6612, -6613, -6809) plus the HTTP/2 fixes in `golang.org/x/net` (GO-2026-6617 and the shared `net/http` advisories). The traces land on the listener path (`app.serveOnListener`) and outbound delivery. `govulncheck ./...` now reports no findings.
@@ -734,7 +741,8 @@ Originally tagged as the non-SemVer `v1.3`; the tag was renamed to `v1.3.0` (sam
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.15.0...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.15.1...HEAD
+[2.15.1]: https://github.com/nuetzliches/hookaido/compare/v2.15.0...v2.15.1
 [2.15.0]: https://github.com/nuetzliches/hookaido/compare/v2.14.0...v2.15.0
 [2.14.0]: https://github.com/nuetzliches/hookaido/compare/v2.13.0...v2.14.0
 [2.13.0]: https://github.com/nuetzliches/hookaido/compare/v2.12.0...v2.13.0

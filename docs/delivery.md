@@ -163,7 +163,10 @@ Deliver webhooks by executing a local command instead of making HTTP requests. T
 
 ```hcl
 /webhooks/github {
-  auth hmac { provider github; secret env:GITHUB_SECRET }
+  auth hmac {
+    provider github
+    secret env:GITHUB_SECRET
+  }
   deliver exec "/opt/hooks/deploy.sh" {
     timeout 30s
     retry exponential max 3 base 1s cap 1m jitter 0.1

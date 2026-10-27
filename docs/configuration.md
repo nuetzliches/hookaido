@@ -20,7 +20,10 @@ vars { ... }
 
 # Inbound routes (implicit — bare top-level routes receive ingress traffic)
 /webhooks/github {
-  auth hmac env:HOOKAIDO_SECRET
+  auth hmac {
+    provider github
+    secret env:HOOKAIDO_SECRET
+  }
   pull { path /pull/github }
 }
 
@@ -485,10 +488,24 @@ See [Observability](observability.md) for full reference.
 
 ```hcl
 observability {
-  access_log { enabled on; output stderr; format json }
-  runtime_log { level info; output stderr; format json }
-  metrics { listen ":9900"; prefix "/metrics" }
-  tracing { enabled on; collector "https://otel.example.com/v1/traces" }
+  access_log {
+    enabled on
+    output stderr
+    format json
+  }
+  runtime_log {
+    level info
+    output stderr
+    format json
+  }
+  metrics {
+    listen ":9900"
+    prefix "/metrics"
+  }
+  tracing {
+    enabled on
+    collector "https://otel.example.com/v1/traces"
+  }
 }
 ```
 
@@ -517,7 +534,11 @@ Each route block defines a webhook endpoint path and its processing pipeline:
   rate_limit { rps 50 }
 
   # Authentication (pick one)
-  auth hmac env:HOOKAIDO_GITHUB_SECRET
+  auth hmac {
+    provider github                # GitHub's X-Hub-Signature-256
+    secret env:HOOKAIDO_GITHUB_SECRET
+  }
+  # auth hmac env:SECRET           # Hookaido's own format (senders you control)
   # auth basic "user" "pass"
   # auth forward "https://auth.example/check"
   # auth query "t" secret_ref "source-token"   # for URL-only sources

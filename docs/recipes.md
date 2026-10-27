@@ -59,7 +59,10 @@ Forward Stripe webhook events to an internal billing service with push delivery,
 
 ```hcl
 /webhooks/stripe {
-  auth hmac env:STRIPE_SIGNING_SECRET
+  auth hmac {
+    provider stripe
+    secret env:STRIPE_SIGNING_SECRET
+  }
 
   deliver "https://billing.internal/hooks/stripe" {
     timeout 10s

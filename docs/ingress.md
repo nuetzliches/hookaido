@@ -131,37 +131,39 @@ Each route can use one authentication method. Authentication runs before enqueue
 
 Verifies webhook signatures with replay protection (timestamp + nonce + tolerance).
 
+This is Hookaido's own signature format, for senders you control. GitHub, Gitea/Forgejo, Stripe and Cituro sign differently and are rejected with `401` here; use [provider mode](#provider-mode) for them.
+
 **Shorthand:**
 
 ```hcl
-/webhooks/github {
-  auth hmac env:HOOKAIDO_GITHUB_SECRET
-  pull { path /pull/github }
+/webhooks/app {
+  auth hmac env:HOOKAIDO_APP_SECRET
+  pull { path /pull/app }
 }
 ```
 
 **With secret rotation:**
 
 ```hcl
-/webhooks/github {
+/webhooks/app {
   auth hmac secret_ref "S1"
-  pull { path /pull/github }
+  pull { path /pull/app }
 }
 ```
 
 **Block form** (full control):
 
 ```hcl
-/webhooks/github {
+/webhooks/app {
   auth hmac {
-    secret env:HOOKAIDO_GITHUB_SECRET
+    secret env:HOOKAIDO_APP_SECRET
     # or: secret_ref "S1"
-    signature_header "X-Hub-Signature-256"
+    signature_header "X-App-Signature"
     timestamp_header "X-Timestamp"
     nonce_header "X-Nonce"
     tolerance 5m
   }
-  pull { path /pull/github }
+  pull { path /pull/app }
 }
 ```
 
@@ -171,7 +173,7 @@ Verification tries all secrets valid at the request timestamp (from the timestam
 
 A nonce is claimed when the signature verifies and becomes permanent once the request is durably enqueued. A request that is refused after verification — a 503 from queue backpressure, a 413 from oversized headers — releases the claim, so the sender's identical signed retry is accepted instead of being rejected as a replay for the rest of the tolerance window. A replay arriving while the first request is still in flight is rejected either way, and claims survive config reloads.
 
-**Provider mode** (GitHub, Gitea/Forgejo, Stripe, Cituro):
+<a id="provider-mode"></a>**Provider mode** (GitHub, Gitea/Forgejo, Stripe, Cituro):
 
 For webhook providers with their own signature format, use provider mode. This verifies the provider's native signature:
 

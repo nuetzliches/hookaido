@@ -33,7 +33,10 @@ pull_api {
 }
 
 /webhooks/github {
-  auth hmac env:HOOKAIDO_INGRESS_SECRET
+  auth hmac {
+    provider github
+    secret env:HOOKAIDO_INGRESS_SECRET
+  }
   pull { path /pull/github }
 }
 ```

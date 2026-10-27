@@ -6,21 +6,23 @@ Hookaido provides layered security across ingress authentication, transport encr
 
 ### HMAC Signature Verification
 
-Verify webhook signatures using HMAC-SHA256 with replay protection:
+Verify webhook signatures using HMAC-SHA256 with replay protection. This is
+Hookaido's own format, for senders you control; for GitHub, Gitea/Forgejo,
+Stripe and Cituro use [provider mode](#providers) instead:
 
 ```hcl
-/webhooks/github {
-  auth hmac env:HOOKAIDO_GITHUB_SECRET
+/webhooks/app {
+  auth hmac env:HOOKAIDO_APP_SECRET
 }
 ```
 
 Full control via block form:
 
 ```hcl
-/webhooks/github {
+/webhooks/app {
   auth hmac {
-    secret env:HOOKAIDO_GITHUB_SECRET
-    signature_header "X-Hub-Signature-256"
+    secret env:HOOKAIDO_APP_SECRET
+    signature_header "X-App-Signature"
     timestamp_header "X-Timestamp"
     nonce_header "X-Nonce"
     tolerance 5m
@@ -47,10 +49,37 @@ Provider-compatible HMAC verification short-circuits the canonical format and
 instead uses the wire format of a specific webhook provider:
 
 ```hcl
-/webhooks/github { auth hmac { provider github; secret env:GH_SECRET } }
-/webhooks/gitea  { auth hmac { provider gitea;  secret env:GITEA_SECRET } }
-/webhooks/stripe { auth hmac { provider stripe; secret env:STRIPE_SECRET } }
-/webhooks/cituro { auth hmac { provider cituro; secret env:CITURO_SECRET } }
+/webhooks/github {
+  auth hmac {
+    provider github
+    secret env:GH_SECRET
+  }
+  pull { path /pull/github }
+}
+
+/webhooks/gitea {
+  auth hmac {
+    provider gitea
+    secret env:GITEA_SECRET
+  }
+  pull { path /pull/gitea }
+}
+
+/webhooks/stripe {
+  auth hmac {
+    provider stripe
+    secret env:STRIPE_SECRET
+  }
+  pull { path /pull/stripe }
+}
+
+/webhooks/cituro {
+  auth hmac {
+    provider cituro
+    secret env:CITURO_SECRET
+  }
+  pull { path /pull/cituro }
+}
 ```
 
 | Provider | Header | Signed payload | Replay protection |

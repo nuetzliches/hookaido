@@ -44,7 +44,10 @@ pull_api {
 }
 
 /webhooks/github {
-  auth hmac env:HOOKAIDO_INGRESS_SECRET
+  auth hmac {
+    provider github
+    secret env:HOOKAIDO_INGRESS_SECRET
+  }
   pull { path /pull/github }
 }
 ```
@@ -53,13 +56,13 @@ This config:
 
 - Listens for incoming webhooks on `:8080`
 - Exposes a Pull API on `:9443` (default) with token authentication
-- Routes `POST /webhooks/github` through HMAC verification, then enqueues
+- Routes `POST /webhooks/github` through GitHub signature verification (`X-Hub-Signature-256`), then enqueues
 
 ### 2. Set Environment Variables
 
 ```bash
 export HOOKAIDO_PULL_TOKEN="your-pull-secret"
-export HOOKAIDO_INGRESS_SECRET="your-hmac-secret"
+export HOOKAIDO_INGRESS_SECRET="your-hmac-secret"   # the "Secret" set on the GitHub webhook
 ```
 
 For local development, use a dotenv file instead:
@@ -90,13 +93,20 @@ Hookaido starts three listeners:
 
 ### 4. Send a Test Webhook
 
+Sign the body the way GitHub does (`sha256=` + hex HMAC-SHA256 of the raw body):
+
 ```bash
+BODY='{"action": "push", "ref": "refs/heads/main"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$HOOKAIDO_INGRESS_SECRET" | awk '{print $NF}')
+
 curl -X POST http://localhost:8080/webhooks/github \
   -H "Content-Type: application/json" \
-  -d '{"action": "push", "ref": "refs/heads/main"}'
+  -H "X-GitHub-Event: push" \
+  -H "X-Hub-Signature-256: sha256=$SIG" \
+  -d "$BODY"
 ```
 
-> If HMAC auth is configured, you also need to send the appropriate signature headers. For testing without auth, remove the `auth hmac` line from your route.
+Hookaido answers `202 Accepted` once the event is queued. A missing or wrong signature gets `401`. Once a real GitHub webhook points at this URL with the same secret, its deliveries verify the same way.
 
 ### 5. Consume Messages
 

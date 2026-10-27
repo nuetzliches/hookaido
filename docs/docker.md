@@ -13,7 +13,7 @@ docker pull ghcr.io/nuetzliches/hookaido:latest
 Tag guidance:
 
 - `:latest` tracks the newest stable release.
-- `:vX.Y.Z` pins an exact release (recommended for production).
+- `:X.Y.Z` (for example `:2.15.1`, no `v` prefix) pins an exact release (recommended for production); `:X.Y` and `:X` track the newest patch/minor of that line.
 - Digest pinning (`@sha256:...`) is the strongest immutable option.
 
 Published architectures:

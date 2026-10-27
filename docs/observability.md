@@ -53,7 +53,7 @@ observability {
   access_log {
     enabled on
     output stderr       # stdout, stderr, or file
-    path /var/log/hookaido/access.log   # required when output=file
+    # path /var/log/hookaido/access.log   # required when output=file
     format json
   }
 }
@@ -78,7 +78,7 @@ observability {
   runtime_log {
     level info         # debug, info, warn, error, off
     output stderr      # stdout, stderr, or file
-    path /var/log/hookaido/runtime.log
+    # path /var/log/hookaido/runtime.log   # required when output=file
     format json
   }
 }

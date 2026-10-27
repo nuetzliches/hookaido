@@ -148,17 +148,24 @@ pull_api {
 # }
 
 /webhooks/github {
-  # Optional: ingress HMAC verification with replay protection.
-  # If set, clients must send: X-Timestamp (unix seconds), X-Nonce, X-Signature (hex).
-  # String-to-sign: method + "\n" + path + "\n" + timestamp + "\n" + hex(sha256(body))
-  auth hmac env:HOOKAIDO_INGRESS_SECRET
+  # Optional: verify GitHub's X-Hub-Signature-256 (provider mode).
+  # For senders you control, `auth hmac env:SECRET` uses Hookaido's own format
+  # with replay protection instead: X-Timestamp (unix seconds), X-Nonce and
+  # X-Signature (hex) over method, path, timestamp and hex(sha256(body)).
+  auth hmac {
+    provider github
+    secret env:HOOKAIDO_INGRESS_SECRET
+  }
   pull { path /pull/github }
   # pull { path "{vars.PULL_ENDPOINT}" }
 }
 
 # Push-mode example (deliver instead of pull):
 # /webhooks/stripe {
-#   auth hmac env:HOOKAIDO_STRIPE_SECRET
+#   auth hmac {
+#     provider stripe
+#     secret env:HOOKAIDO_STRIPE_SECRET
+#   }
 #   deliver "https://billing.internal/stripe" {
 #     timeout 10s
 #     retry exponential max 5 base 1s cap 30s jitter 0.2
@@ -167,7 +174,10 @@ pull_api {
 
 # Subprocess delivery example (exec mode):
 # /webhooks/github {
-#   auth hmac { provider github; secret env:GITHUB_SECRET }
+#   auth hmac {
+#     provider github
+#     secret env:GITHUB_SECRET
+#   }
 #   deliver exec "/opt/hooks/deploy.sh" {
 #     timeout 30s
 #     retry exponential max 3 base 500ms cap 30s jitter 0.1

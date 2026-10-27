@@ -102,7 +102,10 @@ pull_api {
 }
 
 /webhooks/github {
-  auth hmac env:HOOKAIDO_INGRESS_SECRET
+  auth hmac {
+    provider github
+    secret env:HOOKAIDO_INGRESS_SECRET
+  }
   pull { path /pull/github }
 }
 ```
@@ -111,7 +114,10 @@ pull_api {
 
 ```hcl
 /webhooks/stripe {
-  auth hmac env:STRIPE_SIGNING_SECRET
+  auth hmac {
+    provider stripe
+    secret env:STRIPE_SIGNING_SECRET
+  }
   deliver "https://billing.internal/stripe" {
     retry exponential max 8 base 2s cap 2m jitter 0.2
     timeout 10s
@@ -123,7 +129,10 @@ pull_api {
 
 ```hcl
 /webhooks/github {
-  auth hmac { provider github; secret env:GITHUB_SECRET }
+  auth hmac {
+    provider github
+    secret env:GITHUB_SECRET
+  }
   deliver exec "/opt/hooks/deploy.sh" {
     timeout 30s
     env DEPLOY_ENV production
@@ -176,10 +185,22 @@ Full endpoint list → [DESIGN.md](DESIGN.md)
 
 ```hcl
 observability {
-  access_log  { output stderr; format json }
-  runtime_log { level info; output stderr; format json }
-  metrics     { listen ":9900"; prefix "/metrics" }
-  tracing     { collector "https://otel.example.com/v1/traces" }
+  access_log {
+    output stderr
+    format json
+  }
+  runtime_log {
+    level info
+    output stderr
+    format json
+  }
+  metrics {
+    listen ":9900"
+    prefix "/metrics"
+  }
+  tracing {
+    collector "https://otel.example.com/v1/traces"
+  }
 }
 ```
 

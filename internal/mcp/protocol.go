@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -334,7 +335,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		default:
 		}
 
-		payload, err := readFrame(r)
+		payload, mode, err := readMessage(r)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -343,7 +344,7 @@ func (s *Server) Serve(ctx context.Context) error {
 				JSONRPC: "2.0",
 				Error:   &rpcError{Code: -32700, Message: "parse error"},
 			}
-			_ = writeFrame(s.Out, resp)
+			_ = writeMessage(s.Out, mode, resp)
 			continue
 		}
 
@@ -353,7 +354,7 @@ func (s *Server) Serve(ctx context.Context) error {
 				JSONRPC: "2.0",
 				Error:   &rpcError{Code: -32700, Message: "parse error"},
 			}
-			_ = writeFrame(s.Out, resp)
+			_ = writeMessage(s.Out, mode, resp)
 			continue
 		}
 
@@ -361,7 +362,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		if resp == nil {
 			continue
 		}
-		if err := writeFrame(s.Out, resp); err != nil {
+		if err := writeMessage(s.Out, mode, resp); err != nil {
 			return err
 		}
 	}
@@ -2582,6 +2583,83 @@ func parseLimit(args map[string]any, max int) (int, error) {
 	default:
 		return 0, errors.New("limit must be an integer")
 	}
+}
+
+// frameMode is the stdio framing a client speaks. The MCP stdio transport is
+// newline-delimited JSON, which is what Claude Code, OpenClaw and the official
+// MCP SDKs send; Content-Length headers (LSP style) are what this server spoke
+// originally and stay accepted so existing clients keep working.
+type frameMode int
+
+const (
+	frameContentLength frameMode = iota
+	frameNewline
+)
+
+// readMessage reads one JSON-RPC message in whichever framing the client uses,
+// detected per message from its first non-whitespace byte: a newline-delimited
+// message starts with '{' or '[', a Content-Length header block does not. The
+// response goes back in the same framing.
+func readMessage(r *bufio.Reader) ([]byte, frameMode, error) {
+	for {
+		b, err := r.Peek(1)
+		if err != nil {
+			return nil, frameContentLength, err
+		}
+		switch b[0] {
+		case ' ', '\t', '\r', '\n':
+			_, _ = r.ReadByte()
+			continue
+		case '{', '[':
+			payload, err := readLine(r)
+			return payload, frameNewline, err
+		}
+		payload, err := readFrame(r)
+		return payload, frameContentLength, err
+	}
+}
+
+// readLine reads one newline-delimited message, bounded by maxFrameBytes like
+// a Content-Length frame. An oversized line is drained up to its newline before
+// the error is returned, so the next message is still read correctly.
+func readLine(r *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(line)+len(chunk) > maxFrameBytes+len("\r\n") {
+			for errors.Is(err, bufio.ErrBufferFull) {
+				_, err = r.ReadSlice('\n')
+			}
+			return nil, fmt.Errorf("message exceeds the %d byte frame limit", maxFrameBytes)
+		}
+		line = append(line, chunk...)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) && len(line) > 0 {
+			// The last message may arrive without a trailing newline.
+			break
+		}
+		return nil, err
+	}
+	return bytes.TrimRight(line, "\r\n"), nil
+}
+
+func writeMessage(w io.Writer, mode frameMode, msg any) error {
+	if mode != frameNewline {
+		return writeFrame(w, msg)
+	}
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	// json.Marshal escapes control characters, so the payload never contains a
+	// raw newline that would split the message.
+	_, err = w.Write(append(payload, '\n'))
+	return err
 }
 
 func readFrame(r *bufio.Reader) ([]byte, error) {

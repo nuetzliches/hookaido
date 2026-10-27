@@ -3,7 +3,7 @@
 Status: implemented (read tools + guarded mutation tools + guarded runtime control tools).
 
 Transport:
-- JSON-RPC 2.0 over stdio with `Content-Length` framing.
+- JSON-RPC 2.0 over stdio. Newline-delimited JSON (the MCP stdio transport) and LSP-style `Content-Length` framing are both accepted, detected per message; each response uses the framing of the request it answers.
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized`.
 - A single frame is capped at 8 MiB. A larger `Content-Length` is rejected with a parse error (`-32700`) rather than allocating the declared size.
 

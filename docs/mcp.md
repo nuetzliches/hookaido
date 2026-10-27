@@ -18,7 +18,7 @@ hookaido mcp serve --config ./Hookaidofile --db ./hookaido.db \
   --principal ops@example.test --pid-file ./hookaido.pid
 ```
 
-Transport: JSON-RPC 2.0 over stdio with `Content-Length` framing.
+Transport: JSON-RPC 2.0 over stdio. Standard newline-delimited JSON (as sent by Claude Code, OpenClaw and the MCP SDKs) and legacy `Content-Length` framing are both accepted; the server answers in the client's framing.
 
 ## Roles
 

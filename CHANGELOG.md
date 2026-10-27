@@ -7,6 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hookaido mcp serve` works with standard MCP clients.** The MCP stdio transport is newline-delimited JSON, but the server only accepted LSP-style `Content-Length` frames: a client such as Claude Code or OpenClaw sent `initialize`, the server read it as a header line and waited for a blank line that never came, and the client timed out (`connection timed out after 30000ms`). The server now detects the framing per message and answers in the client's framing; `Content-Length` clients keep working unchanged. Newline-delimited messages are bounded by the same 8 MiB frame limit.
+
 ## [2.15.1] - 2026-10-27
 
 A security patch release. v2.15.0 was built against a Go toolchain and an

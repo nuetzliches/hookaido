@@ -1,7 +1,7 @@
 # Development Status
 
 Last updated: 2026-10-27
-Current release: v2.15.1
+Current release: v2.15.2
 
 Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change history: `CHANGELOG.md`. Prioritized work items: `BACKLOG.md`.
 
@@ -13,7 +13,7 @@ Lightweight project snapshot. Canonical spec: `DESIGN.md`. Detailed change histo
 
 **Admin API** - Full queue lifecycle: DLQ management, message publish/cancel/requeue/resume (by ID and by filter), backlog drill-down (top queued, oldest, aging summary, trends with operator-action playbooks). Management model projection and endpoint mapping lifecycle with config-source-of-truth mutations. Structured JSON errors, audit headers, and publish-policy enforcement throughout.
 
-**MCP** - Stdio JSON-RPC server (`hookaido mcp serve`) with role-gated access (`read`/`operate`/`admin`). Read tools for config inspection, queue state, and health diagnostics. Mutation tools (gated) for config apply, queue operations, and endpoint management. Runtime control tools (gated) for process lifecycle. Structured JSONL audit events, principal-authoritative actor binding, and Admin-proxy mode for non-SQLite backends (memory/postgres) deployments.
+**MCP** - Stdio JSON-RPC server (`hookaido mcp serve`, standard newline-delimited MCP framing plus legacy `Content-Length`) with role-gated access (`read`/`operate`/`admin`). Read tools for config inspection, queue state, and health diagnostics. Mutation tools (gated) for config apply, queue operations, and endpoint management. Runtime control tools (gated) for process lifecycle. Structured JSONL audit events, principal-authoritative actor binding, and Admin-proxy mode for non-SQLite backends (memory/postgres) deployments.
 
 **Config DSL** - Caddyfile-inspired syntax with `config fmt` round-trip stability. Env/file/vars placeholders, multi-value directives, hot reload via `--watch`/`SIGHUP` (with an optional `--watch-interval` content poll for mounts that cannot deliver file events), and channel-type wrappers. Defaults blocks for egress policy, deliver settings, publish policy, and trend signal tuning. Secret refs support `env:`, `file:`, `vault:`, and `raw:`.
 

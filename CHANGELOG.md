@@ -7,6 +7,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.15.2] - 2026-10-27
+
+A patch release that makes `hookaido mcp serve` usable from the MCP clients
+people actually run. The server only understood LSP-style `Content-Length`
+framing, while the MCP stdio transport — and with it Claude Code, OpenClaw and
+the official SDKs — sends one JSON message per line, so every standard client
+timed out on `initialize`. No DSL, API, or default changes; existing
+`Content-Length` clients keep working.
+
 ### Fixed
 
 - **`hookaido mcp serve` works with standard MCP clients.** The MCP stdio transport is newline-delimited JSON, but the server only accepted LSP-style `Content-Length` frames: a client such as Claude Code or OpenClaw sent `initialize`, the server read it as a header line and waited for a blank line that never came, and the client timed out (`connection timed out after 30000ms`). The server now detects the framing per message and answers in the client's framing; `Content-Length` clients keep working unchanged. Newline-delimited messages are bounded by the same 8 MiB frame limit.
@@ -745,7 +754,8 @@ Originally tagged as the non-SemVer `v1.3`; the tag was renamed to `v1.3.0` (sam
 - Mixed queue backends rejected at compile time.
 - Hot reload now correctly rejects changes to `defaults.max_body`, `defaults.max_headers`, and `defaults.publish_policy` (previously silently ignored).
 
-[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.15.1...HEAD
+[Unreleased]: https://github.com/nuetzliches/hookaido/compare/v2.15.2...HEAD
+[2.15.2]: https://github.com/nuetzliches/hookaido/compare/v2.15.1...v2.15.2
 [2.15.1]: https://github.com/nuetzliches/hookaido/compare/v2.15.0...v2.15.1
 [2.15.0]: https://github.com/nuetzliches/hookaido/compare/v2.14.0...v2.15.0
 [2.14.0]: https://github.com/nuetzliches/hookaido/compare/v2.13.0...v2.14.0

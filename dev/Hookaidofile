@@ -1,0 +1,37 @@
+# Hookaidofile for local development (devstack.toml runs it).
+#
+# Single-port layout: ingress, Pull API and Admin API share one listener so
+# devstack can start a new build beside the running one on a port of its own.
+# HOOKAIDO_LISTEN is set by devstack; the default matches devstack's port.
+# Hookaido runs with --watch: edits to this file reload without a restart.
+
+ingress {
+  listen {$HOOKAIDO_LISTEN:127.0.0.1:8080}
+}
+
+pull_api {
+  listen {$HOOKAIDO_LISTEN:127.0.0.1:8080}
+  prefix /pull
+  auth token env:HOOKAIDO_PULL_TOKEN
+}
+
+admin_api {
+  listen {$HOOKAIDO_LISTEN:127.0.0.1:8080}
+  prefix /admin
+  # Required when the Admin API shares the ingress listener. Bare GET /admin/healthz stays open.
+  auth token env:HOOKAIDO_ADMIN_TOKEN
+}
+
+# GitHub-style route (provider HMAC), as in the root Hookaidofile.
+/webhooks/github {
+  auth hmac {
+    provider github
+    secret env:HOOKAIDO_INGRESS_SECRET
+  }
+  pull { path /github }
+}
+
+# Unauthenticated route for local smoke tests (devstack commands send-sample / pull-sample).
+/webhooks/dev {
+  pull { path /dev }
+}

@@ -31,6 +31,18 @@ make test-pg
 `make cover` runs the same suite with a coverage profile and prints a
 per-package breakdown against the 80% target tracked in [BACKLOG.md](BACKLOG.md).
 
+### Local stack with devstack (optional)
+
+[devstack](https://github.com/nuetzliches/devstack) runs Hookaido from the
+working tree as described in [devstack.toml](devstack.toml): `devstack up`
+builds it and serves [dev/Hookaidofile](dev/Hookaidofile) on
+`http://127.0.0.1:8080` with the SQLite queue in `.data/`. Ingress, Pull API
+(`/pull`) and Admin API (`/admin`) share that one port; a saved `.go` change is
+rebuilt and swapped in once healthy, and edits to `dev/Hookaidofile` reload
+without a restart. Commands: `devstack run send-sample` / `pull-sample` (smoke
+test of the `/webhooks/dev` route), `test`, and `reset-queue` (deletes the
+local queue, asks first). Dev tokens are in `devstack.toml`.
+
 ## Change Expectations
 
 - Keep changes focused and small where possible.

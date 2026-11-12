@@ -20,6 +20,7 @@ hookaido.db
 hookaido.db-shm
 hookaido.db-wal
 /.data/
+/.devstack/
 
 # MkDocs
 /site/

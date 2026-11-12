@@ -1,0 +1,63 @@
+# devstack stack file for Hookaido.
+# Reference: https://github.com/nuetzliches/devstack/blob/v0.46.0/docs/stack-file.md
+#
+# Hookaido runs natively with the SQLite queue; no containers are needed.
+# dev/Hookaidofile puts ingress, Pull API (/pull) and Admin API (/admin) on one
+# port, so a new build can start beside the running one and take over once healthy.
+
+version = 1
+
+[stack]
+name     = "hookaido"
+requires = "0.46.0"
+reviewed = "0.46.0"   # the devstack this file was last brought up to date with
+
+[services.hookaido]
+build  = "go build -o bin/hookaido/ ./cmd/hookaido"
+output = "bin/hookaido"
+# --watch reloads dev/Hookaidofile on change (no rebuild); the queue lives in the gitignored .data/.
+run    = "{artifact}/hookaido run --config {repo}/dev/Hookaidofile --db {repo}/.data/hookaido{lane_suffix}.db --watch"
+ensure_dirs = [".data"]
+watch  = ["**/*.go", "go.mod", "go.sum"]
+port   = 8080
+# Unauthenticated liveness probe of the Admin API (admin_api prefix /admin).
+health = { http = "/admin/healthz", timeout = "60s" }
+
+[services.hookaido.env]
+HOOKAIDO_LISTEN         = "127.0.0.1:{port}"
+HOOKAIDO_PULL_TOKEN     = "devtoken"    # dev value, as in .env.example
+HOOKAIDO_INGRESS_SECRET = "devsecret"   # dev value, as in .env.example
+HOOKAIDO_ADMIN_TOKEN    = "devadmin"    # dev value; the Admin API shares the ingress port
+
+[commands.test]
+description = "Run the Go unit tests"
+steps = [
+  { exec = "go test ./...", timeout = "20m" },
+]
+
+[commands.send-sample]
+description = "Send a sample webhook to the unauthenticated /webhooks/dev route"
+requires    = ["hookaido"]
+steps = [
+  { http = "POST {service.hookaido.url}/webhooks/dev", headers = { "Content-Type" = "application/json" }, body = '{{"hello":"devstack"}}' },
+]
+
+[commands.pull-sample]
+description = "Dequeue one item from the /webhooks/dev route via the Pull API (lease, no ack)"
+requires    = ["hookaido"]
+steps = [
+  { http = "POST {service.hookaido.url}/pull/dev/dequeue", headers = { "Authorization" = "Bearer devtoken", "Content-Type" = "application/json" }, body = '{{"batch":1}}' },
+]
+
+[commands.reset-queue]
+description = "Delete the local SQLite queue (all queued, delivered and dead-lettered items)"
+confirm     = "The local Hookaido queue database (.data/) will be deleted. Continue?"
+steps = [
+  { stop = "hookaido" },
+  { exec = "git clean -fdX -- .data" },
+  { start = "hookaido" },
+]
+
+# Where `devstack skills install` writes the agent skills (.claude/skills: Claude Code).
+[agents]
+skills = [".claude/skills"]
